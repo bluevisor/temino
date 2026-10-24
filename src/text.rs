@@ -1,0 +1,655 @@
+//! Fonts, glyph rasterization (fontdue) and the R8 glyph atlas the GPU
+//! samples. Box-drawing and block characters are drawn procedurally so they
+//! join seamlessly across cells, as in Alacritty and Warp.
+
+use std::collections::HashMap;
+
+use fontdue::{Font, FontSettings};
+
+use crate::scene::{Rect, Scene};
+use crate::theme::Color;
+
+pub const ATLAS_SIZE: usize = 2048;
+
+const MONO_FONTS: [&[u8]; 4] = [
+    include_bytes!("../assets/fonts/JetBrainsMonoNL-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMonoNL-Bold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMonoNL-Italic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMonoNL-BoldItalic.ttf"),
+];
+
+const SYSTEM_FONTS: &str = "/boot/system/data/fonts/ttfonts";
+
+/// Index of a font in `TextSystem::fonts`.
+pub type FontId = u8;
+pub const UI: FontId = 4;
+pub const UI_BOLD: FontId = 5;
+const BUILTIN: FontId = 255;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct Style {
+    pub bold: bool,
+    pub italic: bool,
+}
+
+impl Style {
+    pub const BOLD: Style = Style { bold: true, italic: false };
+
+    fn mono_font(self) -> FontId {
+        self.bold as u8 | (self.italic as u8) << 1
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CellMetrics {
+    pub width: f32,
+    pub height: f32,
+    /// Distance from the cell top to the baseline.
+    pub baseline: f32,
+    pub size: f32,
+    pub underline: f32,
+    pub stroke: f32,
+}
+
+#[derive(Clone, Copy)]
+struct CachedGlyph {
+    uv: [f32; 4],
+    width: f32,
+    height: f32,
+    /// Offset of the bitmap's left edge from the pen.
+    left: f32,
+    /// Offset of the bitmap's top edge from the baseline (negative = above).
+    top: f32,
+    advance: f32,
+}
+
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+struct GlyphKey {
+    font: FontId,
+    glyph: u32,
+    size: u32,
+}
+
+/// The CPU copy of the atlas; the renderer uploads `dirty` rows.
+pub struct Atlas {
+    pub pixels: Vec<u8>,
+    pub dirty: Option<(usize, usize)>,
+    shelf_x: usize,
+    shelf_y: usize,
+    shelf_height: usize,
+    pub generation: u64,
+}
+
+impl Atlas {
+    fn new() -> Atlas {
+        Atlas {
+            pixels: vec![0; ATLAS_SIZE * ATLAS_SIZE],
+            dirty: Some((0, ATLAS_SIZE)),
+            shelf_x: 1,
+            shelf_y: 1,
+            shelf_height: 0,
+            generation: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.pixels.fill(0);
+        self.dirty = Some((0, ATLAS_SIZE));
+        self.shelf_x = 1;
+        self.shelf_y = 1;
+        self.shelf_height = 0;
+        self.generation += 1;
+    }
+
+    /// Reserves a `w`x`h` slot (1 px apart); `None` when the atlas is full.
+    fn allocate(&mut self, w: usize, h: usize) -> Option<(usize, usize)> {
+        if w + 2 > ATLAS_SIZE || h + 2 > ATLAS_SIZE {
+            return None;
+        }
+        if self.shelf_x + w + 1 > ATLAS_SIZE {
+            self.shelf_y += self.shelf_height + 1;
+            self.shelf_x = 1;
+            self.shelf_height = 0;
+        }
+        if self.shelf_y + h + 1 > ATLAS_SIZE {
+            return None;
+        }
+        let slot = (self.shelf_x, self.shelf_y);
+        self.shelf_x += w + 1;
+        self.shelf_height = self.shelf_height.max(h);
+        Some(slot)
+    }
+
+    fn write(&mut self, x: usize, y: usize, w: usize, h: usize, coverage: &[u8]) {
+        for row in 0..h {
+            let start = (y + row) * ATLAS_SIZE + x;
+            self.pixels[start..start + w].copy_from_slice(&coverage[row * w..row * w + w]);
+        }
+        let (lo, hi) = self.dirty.unwrap_or((y, y + h));
+        self.dirty = Some((lo.min(y), hi.max(y + h)));
+    }
+}
+
+pub struct TextSystem {
+    fonts: Vec<Font>,
+    /// Fonts searched, in order, for characters the primary font lacks.
+    fallbacks: Vec<FontId>,
+    cache: HashMap<GlyphKey, Option<CachedGlyph>>,
+    lookup: HashMap<(char, FontId), (FontId, u16)>,
+    pub atlas: Atlas,
+    pub cell: CellMetrics,
+}
+
+fn load_system_font(name: &str) -> Option<Font> {
+    let data = std::fs::read(format!("{SYSTEM_FONTS}/{name}")).ok()?;
+    Font::from_bytes(data, FontSettings::default()).ok()
+}
+
+impl TextSystem {
+    pub fn new(size: f32) -> TextSystem {
+        let mut fonts: Vec<Font> =
+            MONO_FONTS.iter().map(|data| Font::from_bytes(*data, FontSettings::default()).unwrap()).collect();
+        // The UI face; the bundled mono stands in when Noto Sans is missing.
+        let ui = load_system_font("NotoSans-Regular.ttf")
+            .unwrap_or_else(|| Font::from_bytes(MONO_FONTS[0], FontSettings::default()).unwrap());
+        let ui_bold = load_system_font("NotoSans-Bold.ttf")
+            .unwrap_or_else(|| Font::from_bytes(MONO_FONTS[1], FontSettings::default()).unwrap());
+        fonts.push(ui);
+        fonts.push(ui_bold);
+        let mut fallbacks = Vec::new();
+        for name in ["NotoSansSymbols-Regular.ttf", "NotoSans-Regular.ttf", "NotoMono-Regular.ttf"] {
+            if let Some(font) = load_system_font(name) {
+                fallbacks.push(fonts.len() as FontId);
+                fonts.push(font);
+            }
+        }
+        let mut system = TextSystem {
+            fonts,
+            fallbacks,
+            cache: HashMap::new(),
+            lookup: HashMap::new(),
+            atlas: Atlas::new(),
+            cell: CellMetrics { width: 0.0, height: 0.0, baseline: 0.0, size, underline: 0.0, stroke: 1.0 },
+        };
+        system.set_size(size);
+        system
+    }
+
+    pub fn set_size(&mut self, size: f32) {
+        let font = &self.fonts[0];
+        let line = font.horizontal_line_metrics(size).expect("mono font has horizontal metrics");
+        let width = font.metrics('M', size).advance_width.round().max(1.0);
+        // A little extra leading reads better than the font's tight default.
+        let height = (line.new_line_size * 1.12).round();
+        let extra = height - (line.ascent - line.descent);
+        let baseline = (extra / 2.0 + line.ascent).round();
+        self.cell = CellMetrics {
+            width,
+            height,
+            baseline,
+            size,
+            underline: (baseline + (size * 0.12).max(1.0)).round(),
+            stroke: (size / 14.0).round().max(1.0),
+        };
+        self.cache.clear();
+        self.atlas.clear();
+    }
+
+    /// Which font draws `c` for a request in `primary`.
+    fn resolve(&mut self, c: char, primary: FontId) -> (FontId, u16) {
+        if let Some(found) = self.lookup.get(&(c, primary)) {
+            return *found;
+        }
+        let mut found = (primary, 0);
+        let index = self.fonts[primary as usize].lookup_glyph_index(c);
+        if index != 0 || c == ' ' {
+            found = (primary, index);
+        } else {
+            let candidates = std::iter::once(0).chain(self.fallbacks.iter().copied());
+            for font in candidates {
+                let index = self.fonts[font as usize].lookup_glyph_index(c);
+                if index != 0 {
+                    found = (font, index);
+                    break;
+                }
+            }
+        }
+        self.lookup.insert((c, primary), found);
+        found
+    }
+
+    pub fn has_glyph(&mut self, c: char, font: FontId) -> bool {
+        self.resolve(c, font).1 != 0
+    }
+
+    fn glyph(&mut self, font: FontId, glyph: u16, size: f32) -> Option<CachedGlyph> {
+        let key = GlyphKey { font, glyph: glyph as u32, size: (size * 8.0) as u32 };
+        if let Some(cached) = self.cache.get(&key) {
+            return *cached;
+        }
+        let (metrics, coverage) = self.fonts[font as usize].rasterize_indexed(glyph, size);
+        let entry = self.store(metrics.width, metrics.height, &coverage).map(|uv| CachedGlyph {
+            uv,
+            width: metrics.width as f32,
+            height: metrics.height as f32,
+            left: metrics.xmin as f32,
+            top: -(metrics.ymin as f32 + metrics.height as f32),
+            advance: metrics.advance_width,
+        });
+        let entry = entry.or({
+            // Zero-size glyphs (spaces) still need their advance.
+            Some(CachedGlyph {
+                uv: [0.0; 4],
+                width: 0.0,
+                height: 0.0,
+                left: 0.0,
+                top: 0.0,
+                advance: metrics.advance_width,
+            })
+        });
+        self.cache.insert(key, entry);
+        entry
+    }
+
+    fn store(&mut self, w: usize, h: usize, coverage: &[u8]) -> Option<[f32; 4]> {
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let (x, y) = match self.atlas.allocate(w, h) {
+            Some(slot) => slot,
+            None => {
+                // Full: start over. Glyphs come back as they are drawn.
+                self.cache.clear();
+                self.atlas.clear();
+                self.atlas.allocate(w, h)?
+            }
+        };
+        self.atlas.write(x, y, w, h, coverage);
+        let s = ATLAS_SIZE as f32;
+        Some([x as f32 / s, y as f32 / s, (x + w) as f32 / s, (y + h) as f32 / s])
+    }
+
+    /// Draws one terminal cell's character with its top-left at (x, y).
+    /// `span` is 2 for wide characters.
+    pub fn draw_cell(&mut self, scene: &mut Scene, c: char, x: f32, y: f32, style: Style, color: Color, span: usize) {
+        if c == ' ' || c == '\0' {
+            return;
+        }
+        let cell = self.cell;
+        if let Some(glyph) = self.builtin(c) {
+            scene.glyph(Rect::new(x, y, glyph.width, glyph.height), glyph.uv, color);
+            return;
+        }
+        let (font, index) = self.resolve(c, style.mono_font());
+        // Fallback faces are scaled so their capitals match the mono font.
+        let size = if font < 4 { cell.size } else { cell.size * 0.95 };
+        let Some(glyph) = self.glyph(font, index, size) else { return };
+        if glyph.width == 0.0 {
+            return;
+        }
+        let mut gx = x + glyph.left;
+        let slot = cell.width * span as f32;
+        if glyph.advance > slot + 0.5 || font >= 4 {
+            // Center glyphs that don't share the mono advance.
+            gx = x + ((slot - glyph.width) / 2.0).max(0.0);
+        }
+        let gy = y + cell.baseline + glyph.top;
+        scene.glyph(Rect::new(gx.round(), gy.round(), glyph.width, glyph.height), glyph.uv, color);
+    }
+
+    /// Lays out proportional text on a baseline; returns the advance.
+    pub fn draw_text(
+        &mut self,
+        scene: &mut Scene,
+        text: &str,
+        x: f32,
+        baseline: f32,
+        font: FontId,
+        size: f32,
+        color: Color,
+    ) -> f32 {
+        let mut pen = x;
+        for c in text.chars() {
+            let (face, index) = self.resolve(c, font);
+            let Some(glyph) = self.glyph(face, index, size) else { continue };
+            if glyph.width > 0.0 {
+                let rect =
+                    Rect::new((pen + glyph.left).round(), (baseline + glyph.top).round(), glyph.width, glyph.height);
+                scene.glyph(rect, glyph.uv, color);
+            }
+            pen += glyph.advance;
+        }
+        pen - x
+    }
+
+    pub fn measure(&mut self, text: &str, font: FontId, size: f32) -> f32 {
+        let mut width = 0.0;
+        for c in text.chars() {
+            let (face, index) = self.resolve(c, font);
+            if let Some(glyph) = self.glyph(face, index, size) {
+                width += glyph.advance;
+            }
+        }
+        width
+    }
+
+    /// Mono text on the cell grid (one cell per char); returns the width.
+    pub fn draw_mono(&mut self, scene: &mut Scene, text: &str, x: f32, y: f32, style: Style, color: Color) -> f32 {
+        let mut pen = x;
+        for c in text.chars() {
+            self.draw_cell(scene, c, pen, y, style, color, 1);
+            pen += self.cell.width;
+        }
+        pen - x
+    }
+
+    /// Ascent of the UI font at `size`, for vertical centering.
+    pub fn ui_ascent(&self, size: f32) -> f32 {
+        self.fonts[UI as usize].horizontal_line_metrics(size).map(|m| m.ascent).unwrap_or(size * 0.8)
+    }
+
+    /// A procedurally drawn cell-sized glyph for box drawing and blocks.
+    fn builtin(&mut self, c: char) -> Option<CachedGlyph> {
+        let code = c as u32;
+        if !(0x2500..=0x259f).contains(&code) {
+            return None;
+        }
+        let key = GlyphKey { font: BUILTIN, glyph: code, size: (self.cell.size * 8.0) as u32 };
+        if let Some(cached) = self.cache.get(&key) {
+            return *cached;
+        }
+        let w = self.cell.width as usize;
+        let h = self.cell.height as usize;
+        let coverage = draw_builtin(code, w, h, self.cell.stroke as usize)?;
+        let entry = self.store(w, h, &coverage).map(|uv| CachedGlyph {
+            uv,
+            width: w as f32,
+            height: h as f32,
+            left: 0.0,
+            top: 0.0,
+            advance: w as f32,
+        });
+        self.cache.insert(key, entry);
+        entry
+    }
+}
+
+/// Line weights per arm (left, right, up, down): 0 none, 1 light, 2 heavy,
+/// 3 double. Indexed by `code - 0x2500` for U+2500..U+257F.
+const BOX: [[u8; 4]; 128] = {
+    const fn b(l: u8, r: u8, u: u8, d: u8) -> [u8; 4] {
+        [l, r, u, d]
+    }
+    [
+        b(1, 1, 0, 0),
+        b(2, 2, 0, 0),
+        b(0, 0, 1, 1),
+        b(0, 0, 2, 2), // ─ ━ │ ┃
+        b(1, 1, 0, 0),
+        b(2, 2, 0, 0),
+        b(0, 0, 1, 1),
+        b(0, 0, 2, 2), // dashed
+        b(1, 1, 0, 0),
+        b(2, 2, 0, 0),
+        b(0, 0, 1, 1),
+        b(0, 0, 2, 2),
+        b(0, 1, 0, 1),
+        b(0, 2, 0, 1),
+        b(0, 1, 0, 2),
+        b(0, 2, 0, 2), // ┌ ┍ ┎ ┏
+        b(1, 0, 0, 1),
+        b(2, 0, 0, 1),
+        b(1, 0, 0, 2),
+        b(2, 0, 0, 2), // ┐ ┑ ┒ ┓
+        b(0, 1, 1, 0),
+        b(0, 2, 1, 0),
+        b(0, 1, 2, 0),
+        b(0, 2, 2, 0), // └ ┕ ┖ ┗
+        b(1, 0, 1, 0),
+        b(2, 0, 1, 0),
+        b(1, 0, 2, 0),
+        b(2, 0, 2, 0), // ┘ ┙ ┚ ┛
+        b(0, 1, 1, 1),
+        b(0, 2, 1, 1),
+        b(0, 1, 2, 1),
+        b(0, 1, 1, 2), // ├ ┝ ┞ ┟
+        b(0, 1, 2, 2),
+        b(0, 2, 2, 1),
+        b(0, 2, 1, 2),
+        b(0, 2, 2, 2), // ┠ ┡ ┢ ┣
+        b(1, 0, 1, 1),
+        b(2, 0, 1, 1),
+        b(1, 0, 2, 1),
+        b(1, 0, 1, 2), // ┤ ┥ ┦ ┧
+        b(1, 0, 2, 2),
+        b(2, 0, 2, 1),
+        b(2, 0, 1, 2),
+        b(2, 0, 2, 2), // ┨ ┩ ┪ ┫
+        b(1, 1, 0, 1),
+        b(2, 1, 0, 1),
+        b(1, 2, 0, 1),
+        b(2, 2, 0, 1), // ┬ ┭ ┮ ┯
+        b(1, 1, 0, 2),
+        b(2, 1, 0, 2),
+        b(1, 2, 0, 2),
+        b(2, 2, 0, 2), // ┰ ┱ ┲ ┳
+        b(1, 1, 1, 0),
+        b(2, 1, 1, 0),
+        b(1, 2, 1, 0),
+        b(2, 2, 1, 0), // ┴ ┵ ┶ ┷
+        b(1, 1, 2, 0),
+        b(2, 1, 2, 0),
+        b(1, 2, 2, 0),
+        b(2, 2, 2, 0), // ┸ ┹ ┺ ┻
+        b(1, 1, 1, 1),
+        b(2, 1, 1, 1),
+        b(1, 2, 1, 1),
+        b(2, 2, 1, 1), // ┼ ┽ ┾ ┿
+        b(1, 1, 2, 1),
+        b(1, 1, 1, 2),
+        b(1, 1, 2, 2),
+        b(2, 1, 2, 1), // ╀ ╁ ╂ ╃
+        b(1, 2, 2, 1),
+        b(2, 1, 1, 2),
+        b(1, 2, 1, 2),
+        b(2, 2, 2, 1), // ╄ ╅ ╆ ╇
+        b(2, 2, 1, 2),
+        b(2, 1, 2, 2),
+        b(1, 2, 2, 2),
+        b(2, 2, 2, 2), // ╈ ╉ ╊ ╋
+        b(1, 1, 0, 0),
+        b(2, 2, 0, 0),
+        b(0, 0, 1, 1),
+        b(0, 0, 2, 2), // ╌ ╍ ╎ ╏
+        b(3, 3, 0, 0),
+        b(0, 0, 3, 3),
+        b(0, 3, 0, 1),
+        b(0, 1, 0, 3), // ═ ║ ╒ ╓
+        b(0, 3, 0, 3),
+        b(3, 0, 0, 1),
+        b(1, 0, 0, 3),
+        b(3, 0, 0, 3), // ╔ ╕ ╖ ╗
+        b(0, 3, 1, 0),
+        b(0, 1, 3, 0),
+        b(0, 3, 3, 0),
+        b(3, 0, 1, 0), // ╘ ╙ ╚ ╛
+        b(1, 0, 3, 0),
+        b(3, 0, 3, 0),
+        b(0, 3, 1, 1),
+        b(0, 1, 3, 3), // ╜ ╝ ╞ ╟
+        b(0, 3, 3, 3),
+        b(3, 0, 1, 1),
+        b(1, 0, 3, 3),
+        b(3, 0, 3, 3), // ╠ ╡ ╢ ╣
+        b(3, 3, 0, 1),
+        b(1, 1, 0, 3),
+        b(3, 3, 0, 3),
+        b(3, 3, 1, 0), // ╤ ╥ ╦ ╧
+        b(1, 1, 3, 0),
+        b(3, 3, 3, 0),
+        b(3, 3, 1, 1),
+        b(1, 1, 3, 3), // ╨ ╩ ╪ ╫
+        b(3, 3, 3, 3),
+        b(0, 1, 0, 1),
+        b(1, 0, 0, 1),
+        b(1, 0, 1, 0), // ╬ ╭ ╮ ╯
+        b(0, 1, 1, 0),
+        b(0, 0, 0, 0),
+        b(0, 0, 0, 0),
+        b(0, 0, 0, 0), // ╰ ╱ ╲ ╳
+        b(1, 0, 0, 0),
+        b(0, 0, 1, 0),
+        b(0, 1, 0, 0),
+        b(0, 0, 0, 1), // ╴ ╵ ╶ ╷
+        b(2, 0, 0, 0),
+        b(0, 0, 2, 0),
+        b(0, 2, 0, 0),
+        b(0, 0, 0, 2), // ╸ ╹ ╺ ╻
+        b(1, 2, 0, 0),
+        b(0, 0, 1, 2),
+        b(2, 1, 0, 0),
+        b(0, 0, 2, 1), // ╼ ╽ ╾ ╿
+    ]
+};
+
+struct Canvas {
+    out: Vec<u8>,
+    w: usize,
+    h: usize,
+}
+
+impl Canvas {
+    fn fill(&mut self, x0: usize, y0: usize, x1: usize, y1: usize, value: u8) {
+        for y in y0.min(self.h)..y1.min(self.h) {
+            for x in x0.min(self.w)..x1.min(self.w) {
+                let pixel = &mut self.out[y * self.w + x];
+                *pixel = (*pixel).max(value);
+            }
+        }
+    }
+}
+
+fn draw_builtin(code: u32, w: usize, h: usize, stroke: usize) -> Option<Vec<u8>> {
+    let mut canvas = Canvas { out: vec![0u8; w * h], w, h };
+    let light = stroke.max(1);
+    let heavy = light * 2 + 1;
+    // Pixel spans (lo, hi) of the line(s) for an arm of `weight` centered
+    // on `center`.
+    let span = |weight: u8, center: usize| -> Vec<(usize, usize)> {
+        match weight {
+            1 => vec![(center - light / 2, center - light / 2 + light)],
+            2 => vec![(center.saturating_sub(heavy / 2), center.saturating_sub(heavy / 2) + heavy)],
+            3 => {
+                let gap = light + 1;
+                vec![
+                    (center.saturating_sub(gap + light / 2), center.saturating_sub(gap + light / 2) + light),
+                    (center + gap - light / 2, center + gap - light / 2 + light),
+                ]
+            }
+            _ => vec![],
+        }
+    };
+    match code {
+        0x2571..=0x2573 => return None, // diagonals: the font's glyphs are fine
+        0x256d..=0x2570 => {
+            // Rounded corner: a quarter circle joining the two arms.
+            let (sx, sy): (f32, f32) = match code {
+                0x256d => (1.0, 1.0),   // ╭ arms right and down
+                0x256e => (-1.0, 1.0),  // ╮ left and down
+                0x256f => (-1.0, -1.0), // ╯ left and up
+                _ => (1.0, -1.0),       // ╰ right and up
+            };
+            let (v0, v1) = span(1, w / 2)[0];
+            let (h0, h1) = span(1, h / 2)[0];
+            let line_x = (v0 + v1) as f32 / 2.0;
+            let line_y = (h0 + h1) as f32 / 2.0;
+            let radius = (w.min(h) / 2) as f32;
+            let (ccx, ccy) = (line_x + sx * radius, line_y + sy * radius);
+            let half = light as f32 / 2.0;
+            for y in 0..h {
+                for x in 0..w {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    if (px - ccx) * sx <= 0.0 && (py - ccy) * sy <= 0.0 {
+                        let distance = ((px - ccx).powi(2) + (py - ccy).powi(2)).sqrt();
+                        let edge = (half + 0.5 - (distance - radius).abs()).clamp(0.0, 1.0);
+                        canvas.fill(x, y, x + 1, y + 1, (edge * 255.0) as u8);
+                    }
+                }
+            }
+            if sy > 0.0 {
+                canvas.fill(v0, ccy as usize, v1, h, 255);
+            } else {
+                canvas.fill(v0, 0, v1, ccy.ceil() as usize, 255);
+            }
+            if sx > 0.0 {
+                canvas.fill(ccx as usize, h0, w, h1, 255);
+            } else {
+                canvas.fill(0, h0, ccx.ceil() as usize, h1, 255);
+            }
+        }
+        0x2500..=0x257f => {
+            let [l, r, u, d] = BOX[(code - 0x2500) as usize];
+            let (cx, cy) = (w / 2, h / 2);
+            // Each arm runs from the far side of the crossing lines to the
+            // cell edge, so corners and tees meet without gaps.
+            let vertical = span(u.max(d), cx);
+            let horizontal = span(l.max(r), cy);
+            let (vx0, vx1) = (vertical.first().map_or(cx, |s| s.0), vertical.last().map_or(cx + 1, |s| s.1));
+            let (hy0, hy1) = (horizontal.first().map_or(cy, |s| s.0), horizontal.last().map_or(cy + 1, |s| s.1));
+            let has_vertical = u | d != 0;
+            let has_horizontal = l | r != 0;
+            for (lo, hi) in span(l, cy) {
+                canvas.fill(0, lo, if has_vertical { vx1 } else { cx + 1 }, hi, 255);
+            }
+            for (lo, hi) in span(r, cy) {
+                canvas.fill(if has_vertical { vx0 } else { cx }, lo, w, hi, 255);
+            }
+            for (lo, hi) in span(u, cx) {
+                canvas.fill(lo, 0, hi, if has_horizontal { hy1 } else { cy + 1 }, 255);
+            }
+            for (lo, hi) in span(d, cx) {
+                canvas.fill(lo, if has_horizontal { hy0 } else { cy }, hi, h, 255);
+            }
+        }
+        0x2580 => canvas.fill(0, 0, w, h / 2, 255),
+        0x2581..=0x2588 => {
+            let eighths = (code - 0x2580) as usize;
+            canvas.fill(0, h - (h * eighths + 4) / 8, w, h, 255);
+        }
+        0x2589..=0x258f => {
+            let eighths = (0x2590 - code) as usize;
+            canvas.fill(0, 0, (w * eighths + 4) / 8, h, 255);
+        }
+        0x2590 => canvas.fill(w / 2, 0, w, h, 255),
+        0x2591 => canvas.fill(0, 0, w, h, 64),
+        0x2592 => canvas.fill(0, 0, w, h, 128),
+        0x2593 => canvas.fill(0, 0, w, h, 192),
+        0x2594 => canvas.fill(0, 0, w, (h + 4) / 8, 255),
+        0x2595 => canvas.fill(w - (w + 4) / 8, 0, w, h, 255),
+        0x2596..=0x259f => {
+            // Quadrant bits: upper-left, upper-right, lower-left, lower-right.
+            let quadrants: u8 = match code {
+                0x2596 => 0b0100,
+                0x2597 => 0b1000,
+                0x2598 => 0b0001,
+                0x2599 => 0b1101,
+                0x259a => 0b1001,
+                0x259b => 0b0111,
+                0x259c => 0b1011,
+                0x259d => 0b0010,
+                0x259e => 0b0110,
+                _ => 0b1110,
+            };
+            let (mx, my) = (w / 2, h / 2);
+            for (bit, (x0, y0, x1, y1)) in
+                [(0, 0, mx, my), (mx, 0, w, my), (0, my, mx, h), (mx, my, w, h)].into_iter().enumerate()
+            {
+                if quadrants & (1 << bit) != 0 {
+                    canvas.fill(x0, y0, x1, y1, 255);
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(canvas.out)
+}

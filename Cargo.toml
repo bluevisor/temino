@@ -1,0 +1,19 @@
+[package]
+name = "renga"
+version = "0.1.0"
+edition = "2021"
+description = "A GPU-rendered block terminal for Haiku, drawn with Vulkan"
+license = "MIT"
+repository = "https://github.com/bluevisor/renga"
+
+[dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }
+ash = { version = "0.38", default-features = false, features = ["loaded", "debug"] }
+fontdue = "0.9.5"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = 3
+debug = "line-tables-only"
