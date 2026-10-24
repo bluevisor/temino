@@ -200,22 +200,30 @@ impl TextSystem {
         if let Some(found) = self.lookup.get(&(c, primary)) {
             return *found;
         }
-        let mut found = (primary, 0);
-        let index = self.fonts[primary as usize].lookup_glyph_index(c);
-        if index != 0 || c == ' ' {
-            found = (primary, index);
-        } else {
-            let candidates = std::iter::once(0).chain(self.fallbacks.iter().copied());
-            for font in candidates {
-                let index = self.fonts[font as usize].lookup_glyph_index(c);
-                if index != 0 {
-                    found = (font, index);
-                    break;
-                }
+        let mut found = self.find(c, primary);
+        if found.1 == 0 {
+            // No installed font has it: draw the nearest symbol one does.
+            if let Some(substitute) = substitute(c) {
+                found = self.find(substitute, primary);
             }
         }
         self.lookup.insert((c, primary), found);
         found
+    }
+
+    fn find(&self, c: char, primary: FontId) -> (FontId, u16) {
+        let index = self.fonts[primary as usize].lookup_glyph_index(c);
+        if index != 0 || c == ' ' {
+            return (primary, index);
+        }
+        let candidates = std::iter::once(0).chain(self.fallbacks.iter().copied());
+        for font in candidates {
+            let index = self.fonts[font as usize].lookup_glyph_index(c);
+            if index != 0 {
+                return (font, index);
+            }
+        }
+        (primary, 0)
     }
 
     pub fn has_glyph(&mut self, c: char, font: FontId) -> bool {
@@ -372,6 +380,25 @@ impl TextSystem {
         self.cache.insert(key, entry);
         entry
     }
+}
+
+/// Stand-ins for symbols that terminal programs use but Haiku's fonts lack,
+/// such as the tool-call markers of Claude Code-style agents (⏺ ⎿).
+fn substitute(c: char) -> Option<char> {
+    Some(match c {
+        '⏺' | '⬤' | '🔴' | '🟢' | '🟡' => '●',
+        '⎿' => '└',
+        '⏵' | '⯈' => '▶',
+        '⏴' | '⯇' => '◀',
+        '⏸' => '‖',
+        '⏹' | '⬛' => '■',
+        '⏎' => '↵',
+        '✻' | '✽' | '✶' | '✳' | '✢' => '*',
+        '✔' | '✅' => '✓',
+        '✘' | '❌' => '✗',
+        '⚠' => '!',
+        _ => return None,
+    })
 }
 
 /// Line weights per arm (left, right, up, down): 0 none, 1 light, 2 heavy,
