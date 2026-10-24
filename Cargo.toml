@@ -1,10 +1,10 @@
 [package]
-name = "renga"
+name = "temino"
 version = "0.1.0"
 edition = "2021"
-description = "A GPU-rendered block terminal for Haiku, drawn with Vulkan"
+description = "A modern GPU-accelerated terminal for Haiku"
 license = "MIT"
-repository = "https://github.com/bluevisor/renga"
+repository = "https://github.com/bluevisor/temino"
 
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }

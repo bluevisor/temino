@@ -1,5 +1,5 @@
 /*
- * Renga's Haiku layer: the Be API pieces Rust can't reach directly
+ * Temino's Haiku layer: the Be API pieces Rust can't reach directly
  * (BApplication, the window and its view, the frame bitmaps, the clipboard)
  * plus the pseudo-terminal spawn, all behind a small C ABI.
  *
@@ -42,7 +42,7 @@
 
 extern "C" {
 
-struct RengaEvent {
+struct TeminoEvent {
 	int32_t kind;
 	int32_t key;
 	uint32_t modifiers;
@@ -59,7 +59,7 @@ struct RengaEvent {
 	uint8_t bytes[16];
 };
 
-typedef void (*RengaEventCallback)(const RengaEvent* event, void* context);
+typedef void (*TeminoEventCallback)(const TeminoEvent* event, void* context);
 
 }
 
@@ -83,22 +83,22 @@ enum {
 };
 
 
-static RengaEventCallback sCallback;
+static TeminoEventCallback sCallback;
 static void* sContext;
 
-static BLocker sFrameLock("renga frame");
+static BLocker sFrameLock("temino frame");
 static BBitmap* sFront;
 static BBitmap* sBack;
 static std::atomic<bool> sFramePending(false);
 static rgb_color sBackground = { 16, 18, 24, 255 };
 
-static class RengaWindow* sWindow;
-static class RengaView* sView;
+static class TeminoWindow* sWindow;
+static class TeminoView* sView;
 static std::atomic<bool> sQuitting(false);
 
 
 static void
-emit(RengaEvent& event)
+emit(TeminoEvent& event)
 {
 	if (sCallback != NULL)
 		sCallback(&event, sContext);
@@ -116,11 +116,11 @@ current_int32(BView* view, const char* name, int32 fallback)
 }
 
 
-class RengaView : public BView {
+class TeminoView : public BView {
 public:
-	RengaView(BRect frame)
+	TeminoView(BRect frame)
 		:
-		BView(frame, "renga", B_FOLLOW_ALL,
+		BView(frame, "temino", B_FOLLOW_ALL,
 			B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE),
 		fIBeam(B_CURSOR_ID_I_BEAM),
 		fArrow(B_CURSOR_ID_SYSTEM_DEFAULT)
@@ -143,7 +143,7 @@ public:
 
 	void FrameResized(float width, float height) override
 	{
-		RengaEvent event = {};
+		TeminoEvent event = {};
 		event.kind = kEventResize;
 		event.width = (int32)width + 1;
 		event.height = (int32)height + 1;
@@ -153,7 +153,7 @@ public:
 	void MouseDown(BPoint where) override
 	{
 		SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
-		RengaEvent event = {};
+		TeminoEvent event = {};
 		event.kind = kEventMouseDown;
 		event.x = where.x;
 		event.y = where.y;
@@ -165,7 +165,7 @@ public:
 
 	void MouseUp(BPoint where) override
 	{
-		RengaEvent event = {};
+		TeminoEvent event = {};
 		event.kind = kEventMouseUp;
 		event.x = where.x;
 		event.y = where.y;
@@ -176,7 +176,7 @@ public:
 
 	void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override
 	{
-		RengaEvent event = {};
+		TeminoEvent event = {};
 		event.kind = kEventMouseMoved;
 		event.x = where.x;
 		event.y = where.y;
@@ -204,7 +204,7 @@ public:
 			}
 			case B_MOUSE_WHEEL_CHANGED:
 			{
-				RengaEvent event = {};
+				TeminoEvent event = {};
 				event.kind = kEventWheel;
 				event.dx = message->GetFloat("be:wheel_delta_x", 0);
 				event.dy = message->GetFloat("be:wheel_delta_y", 0);
@@ -246,9 +246,9 @@ private:
 };
 
 
-class RengaWindow : public BWindow {
+class TeminoWindow : public BWindow {
 public:
-	RengaWindow(BRect frame, const char* title)
+	TeminoWindow(BRect frame, const char* title)
 		:
 		BWindow(frame, title, B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS)
 	{
@@ -260,7 +260,7 @@ public:
 	void DispatchMessage(BMessage* message, BHandler* target) override
 	{
 		if (message->what == B_KEY_DOWN) {
-			RengaEvent event = {};
+			TeminoEvent event = {};
 			event.kind = kEventKey;
 			event.key = message->GetInt32("key", 0);
 			event.modifiers = (uint32)message->GetInt32("modifiers", 0);
@@ -289,7 +289,7 @@ public:
 	void MessageReceived(BMessage* message) override
 	{
 		if (message->what == kMsgTitle) {
-			SetTitle(message->GetString("title", "Renga"));
+			SetTitle(message->GetString("title", "Temino"));
 			return;
 		}
 		BWindow::MessageReceived(message);
@@ -297,7 +297,7 @@ public:
 
 	void WindowActivated(bool active) override
 	{
-		RengaEvent event = {};
+		TeminoEvent event = {};
 		event.kind = kEventFocus;
 		event.buttons = active ? 1 : 0;
 		emit(event);
@@ -308,7 +308,7 @@ public:
 	{
 		if (sQuitting.load())
 			return true;
-		RengaEvent event = {};
+		TeminoEvent event = {};
 		event.kind = kEventClose;
 		emit(event);
 		return false;
@@ -316,9 +316,9 @@ public:
 };
 
 
-class RengaApplication : public BApplication {
+class TeminoApplication : public BApplication {
 public:
-	RengaApplication(const char* signature)
+	TeminoApplication(const char* signature)
 		:
 		BApplication(signature)
 	{
@@ -328,7 +328,7 @@ public:
 	{
 		if (sQuitting.load())
 			return true;
-		RengaEvent event = {};
+		TeminoEvent event = {};
 		event.kind = kEventClose;
 		emit(event);
 		return false;
@@ -340,15 +340,15 @@ extern "C" {
 
 
 void
-renga_app_new(const char* signature)
+temino_app_new(const char* signature)
 {
-	new RengaApplication(signature);
+	new TeminoApplication(signature);
 }
 
 
 void
-renga_window_new(const char* title, int32_t width, int32_t height,
-	RengaEventCallback callback, void* context)
+temino_window_new(const char* title, int32_t width, int32_t height,
+	TeminoEventCallback callback, void* context)
 {
 	sCallback = callback;
 	sContext = context;
@@ -358,15 +358,15 @@ renga_window_new(const char* title, int32_t width, int32_t height,
 	float top = floorf((screen.Height() - height) / 2.5f);
 	BRect frame(left, top, left + width - 1, top + height - 1);
 
-	sWindow = new RengaWindow(frame, title);
-	sView = new RengaView(sWindow->Bounds());
+	sWindow = new TeminoWindow(frame, title);
+	sView = new TeminoView(sWindow->Bounds());
 	sWindow->AddChild(sView);
 	sWindow->Show();
 }
 
 
 void
-renga_app_run()
+temino_app_run()
 {
 	be_app->Run();
 	sQuitting.store(true);
@@ -375,7 +375,7 @@ renga_app_run()
 
 
 void
-renga_quit()
+temino_quit()
 {
 	sQuitting.store(true);
 	be_app->PostMessage(B_QUIT_REQUESTED);
@@ -383,7 +383,7 @@ renga_quit()
 
 
 void
-renga_set_background(uint8_t r, uint8_t g, uint8_t b)
+temino_set_background(uint8_t r, uint8_t g, uint8_t b)
 {
 	BAutolock lock(sFrameLock);
 	sBackground = make_color(r, g, b, 255);
@@ -391,7 +391,7 @@ renga_set_background(uint8_t r, uint8_t g, uint8_t b)
 
 
 void
-renga_present(const uint8_t* pixels, int32_t width, int32_t height,
+temino_present(const uint8_t* pixels, int32_t width, int32_t height,
 	int32_t stride)
 {
 	if (sQuitting.load() || width <= 0 || height <= 0)
@@ -424,7 +424,7 @@ renga_present(const uint8_t* pixels, int32_t width, int32_t height,
 
 
 void
-renga_set_title(const char* title)
+temino_set_title(const char* title)
 {
 	if (sQuitting.load())
 		return;
@@ -435,7 +435,7 @@ renga_set_title(const char* title)
 
 
 void
-renga_set_cursor(int32_t kind)
+temino_set_cursor(int32_t kind)
 {
 	if (sQuitting.load())
 		return;
@@ -446,14 +446,14 @@ renga_set_cursor(int32_t kind)
 
 
 void
-renga_beep()
+temino_beep()
 {
 	beep();
 }
 
 
 int32_t
-renga_clipboard_set(const char* text, int32_t length)
+temino_clipboard_set(const char* text, int32_t length)
 {
 	if (!be_clipboard->Lock())
 		return -1;
@@ -467,9 +467,9 @@ renga_clipboard_set(const char* text, int32_t length)
 
 
 // Returns a malloc()ed copy of the clipboard text (free it with
-// renga_free), or NULL.
+// temino_free), or NULL.
 char*
-renga_clipboard_get(int32_t* length)
+temino_clipboard_get(int32_t* length)
 {
 	*length = 0;
 	if (!be_clipboard->Lock())
@@ -492,7 +492,7 @@ renga_clipboard_get(int32_t* length)
 
 
 void
-renga_free(void* pointer)
+temino_free(void* pointer)
 {
 	free(pointer);
 }
@@ -534,11 +534,11 @@ initialize_termios(struct termios& tio)
 // ring (Venus aborts) and later hangs the kernel when the areas go away.
 // So the shell is started with load_image() as `self --pty-exec <tty>
 // <columns> <rows> <cwd> <program> [args]`, and that fresh team sets up
-// the terminal (renga_pty_exec) before exec'ing the program.
+// the terminal (temino_pty_exec) before exec'ing the program.
 // Returns the team id and stores the master fd, or returns an error code
 // (negative on Haiku).
 int32_t
-renga_spawn(const char* self, const char* const* argv, int32_t argc,
+temino_spawn(const char* self, const char* const* argv, int32_t argc,
 	const char* const* envp, const char* cwd, int32_t columns, int32_t rows,
 	int32_t* masterOut)
 {
@@ -581,10 +581,10 @@ renga_spawn(const char* self, const char* const* argv, int32_t argc,
 }
 
 
-// The child side of renga_spawn: argv is <tty> <columns> <rows> <cwd>
+// The child side of temino_spawn: argv is <tty> <columns> <rows> <cwd>
 // <program> [args]. Only returns if something failed.
 int32_t
-renga_pty_exec(int32_t argc, const char* const* argv)
+temino_pty_exec(int32_t argc, const char* const* argv)
 {
 	if (argc < 5)
 		return 2;
@@ -636,18 +636,18 @@ renga_pty_exec(int32_t argc, const char* const* argv)
 
 // A modal alert, for fatal errors (no fork, unlike running `alert`).
 void
-renga_alert(const char* text)
+temino_alert(const char* text)
 {
 	if (be_app == NULL)
 		return;
-	BAlert* alert = new BAlert("Renga", text, "Quit", NULL, NULL,
+	BAlert* alert = new BAlert("Temino", text, "Quit", NULL, NULL,
 		B_WIDTH_AS_USUAL, B_STOP_ALERT);
 	alert->Go();
 }
 
 
 int32_t
-renga_pty_resize(int32_t master, int32_t columns, int32_t rows,
+temino_pty_resize(int32_t master, int32_t columns, int32_t rows,
 	int32_t pixelWidth, int32_t pixelHeight)
 {
 	struct winsize size = {};
@@ -662,7 +662,7 @@ renga_pty_resize(int32_t master, int32_t columns, int32_t rows,
 // Blocks until the child exits; returns its exit code (128 + signal when
 // it was killed).
 int32_t
-renga_wait(int32_t pid)
+temino_wait(int32_t pid)
 {
 	int status;
 	while (waitpid(pid, &status, 0) < 0) {
@@ -678,7 +678,7 @@ renga_wait(int32_t pid)
 
 
 void
-renga_hangup(int32_t pid)
+temino_hangup(int32_t pid)
 {
 	kill(-pid, SIGHUP);
 	kill(pid, SIGHUP);
@@ -687,7 +687,7 @@ renga_hangup(int32_t pid)
 
 // The login name, for when $USER isn't set (launched from Deskbar).
 const char*
-renga_user_name()
+temino_user_name()
 {
 	struct passwd* entry = getpwuid(getuid());
 	return entry != NULL ? entry->pw_name : NULL;

@@ -28,19 +28,19 @@ struct RawEvent {
 type Callback = extern "C" fn(*const RawEvent, *mut c_void);
 
 extern "C" {
-    fn renga_app_new(signature: *const c_char);
-    fn renga_window_new(title: *const c_char, width: i32, height: i32, callback: Callback, context: *mut c_void);
-    fn renga_app_run();
-    fn renga_quit();
-    fn renga_set_background(r: u8, g: u8, b: u8);
-    fn renga_present(pixels: *const u8, width: i32, height: i32, stride: i32);
-    fn renga_set_title(title: *const c_char);
-    fn renga_set_cursor(kind: i32);
-    fn renga_beep();
-    fn renga_clipboard_set(text: *const c_char, length: i32) -> i32;
-    fn renga_clipboard_get(length: *mut i32) -> *mut c_char;
-    fn renga_free(pointer: *mut c_void);
-    fn renga_spawn(
+    fn temino_app_new(signature: *const c_char);
+    fn temino_window_new(title: *const c_char, width: i32, height: i32, callback: Callback, context: *mut c_void);
+    fn temino_app_run();
+    fn temino_quit();
+    fn temino_set_background(r: u8, g: u8, b: u8);
+    fn temino_present(pixels: *const u8, width: i32, height: i32, stride: i32);
+    fn temino_set_title(title: *const c_char);
+    fn temino_set_cursor(kind: i32);
+    fn temino_beep();
+    fn temino_clipboard_set(text: *const c_char, length: i32) -> i32;
+    fn temino_clipboard_get(length: *mut i32) -> *mut c_char;
+    fn temino_free(pointer: *mut c_void);
+    fn temino_spawn(
         program: *const c_char,
         argv: *const *const c_char,
         argc: i32,
@@ -50,12 +50,12 @@ extern "C" {
         rows: i32,
         master: *mut i32,
     ) -> i32;
-    fn renga_pty_resize(master: i32, columns: i32, rows: i32, pixel_width: i32, pixel_height: i32) -> i32;
-    fn renga_pty_exec(argc: i32, argv: *const *const c_char) -> i32;
-    fn renga_alert(text: *const c_char);
-    fn renga_wait(pid: i32) -> i32;
-    fn renga_hangup(pid: i32);
-    fn renga_user_name() -> *const c_char;
+    fn temino_pty_resize(master: i32, columns: i32, rows: i32, pixel_width: i32, pixel_height: i32) -> i32;
+    fn temino_pty_exec(argc: i32, argv: *const *const c_char) -> i32;
+    fn temino_alert(text: *const c_char);
+    fn temino_wait(pid: i32) -> i32;
+    fn temino_hangup(pid: i32);
+    fn temino_user_name() -> *const c_char;
 }
 
 /// Haiku modifier bits (`B_SHIFT_KEY` and friends). Haiku calls Alt the
@@ -133,37 +133,37 @@ extern "C" fn on_event(raw: *const RawEvent, context: *mut c_void) {
 
 pub fn app_new(signature: &str) {
     let signature = CString::new(signature).unwrap();
-    unsafe { renga_app_new(signature.as_ptr()) }
+    unsafe { temino_app_new(signature.as_ptr()) }
 }
 
 pub fn window_new(title: &str, width: u32, height: u32, sender: Sender<Msg>) {
     let title = CString::new(title).unwrap();
     let context = Box::into_raw(Box::new(sender)) as *mut c_void;
-    unsafe { renga_window_new(title.as_ptr(), width as i32, height as i32, on_event, context) }
+    unsafe { temino_window_new(title.as_ptr(), width as i32, height as i32, on_event, context) }
 }
 
 /// Runs the application loop on the calling (main) thread until quit.
 pub fn app_run() {
-    unsafe { renga_app_run() }
+    unsafe { temino_app_run() }
 }
 
 pub fn quit() {
-    unsafe { renga_quit() }
+    unsafe { temino_quit() }
 }
 
 pub fn set_background(rgb: [u8; 3]) {
-    unsafe { renga_set_background(rgb[0], rgb[1], rgb[2]) }
+    unsafe { temino_set_background(rgb[0], rgb[1], rgb[2]) }
 }
 
 /// Copies a BGRA frame into the window's back bitmap and shows it.
 pub fn present(pixels: &[u8], width: u32, height: u32) {
     debug_assert!(pixels.len() >= (width * height * 4) as usize);
-    unsafe { renga_present(pixels.as_ptr(), width as i32, height as i32, (width * 4) as i32) }
+    unsafe { temino_present(pixels.as_ptr(), width as i32, height as i32, (width * 4) as i32) }
 }
 
 pub fn set_title(title: &str) {
     if let Ok(title) = CString::new(title.replace('\0', "")) {
-        unsafe { renga_set_title(title.as_ptr()) }
+        unsafe { temino_set_title(title.as_ptr()) }
     }
 }
 
@@ -174,26 +174,26 @@ pub enum Cursor {
 }
 
 pub fn set_cursor(cursor: Cursor) {
-    unsafe { renga_set_cursor(cursor as i32) }
+    unsafe { temino_set_cursor(cursor as i32) }
 }
 
 pub fn beep() {
-    unsafe { renga_beep() }
+    unsafe { temino_beep() }
 }
 
 pub fn clipboard_set(text: &str) {
-    unsafe { renga_clipboard_set(text.as_ptr() as *const c_char, text.len() as i32) };
+    unsafe { temino_clipboard_set(text.as_ptr() as *const c_char, text.len() as i32) };
 }
 
 pub fn clipboard_get() -> Option<String> {
     let mut length = 0;
-    let pointer = unsafe { renga_clipboard_get(&mut length) };
+    let pointer = unsafe { temino_clipboard_get(&mut length) };
     if pointer.is_null() {
         return None;
     }
     let bytes = unsafe { std::slice::from_raw_parts(pointer as *const u8, length as usize) };
     let text = String::from_utf8_lossy(bytes).into_owned();
-    unsafe { renga_free(pointer as *mut c_void) };
+    unsafe { temino_free(pointer as *mut c_void) };
     Some(text)
 }
 
@@ -212,7 +212,7 @@ pub fn spawn(argv: &[String], env: &[String], cwd: &str, columns: u16, rows: u16
     let cwd = CString::new(cwd).unwrap_or_default();
     let mut master = -1;
     let team = unsafe {
-        renga_spawn(
+        temino_spawn(
             program.as_ptr(),
             argv_ptrs.as_ptr(),
             argv_ptrs.len() as i32,
@@ -230,35 +230,35 @@ pub fn spawn(argv: &[String], env: &[String], cwd: &str, columns: u16, rows: u16
     Ok((team, master))
 }
 
-/// The child half of `spawn`, run as `renga --pty-exec ...`: sets up the
+/// The child half of `spawn`, run as `temino --pty-exec ...`: sets up the
 /// terminal and execs the program. Returns only on failure.
 pub fn pty_exec(args: &[String]) -> i32 {
     let args: Vec<CString> = args.iter().filter_map(|a| CString::new(a.as_str()).ok()).collect();
     let mut pointers: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
     pointers.push(std::ptr::null());
-    unsafe { renga_pty_exec(args.len() as i32, pointers.as_ptr()) }
+    unsafe { temino_pty_exec(args.len() as i32, pointers.as_ptr()) }
 }
 
 pub fn alert(text: &str) {
     if let Ok(text) = CString::new(text.replace('\0', "")) {
-        unsafe { renga_alert(text.as_ptr()) }
+        unsafe { temino_alert(text.as_ptr()) }
     }
 }
 
 pub fn pty_resize(master: i32, columns: u16, rows: u16, pixel_width: u32, pixel_height: u32) {
-    unsafe { renga_pty_resize(master, columns as i32, rows as i32, pixel_width as i32, pixel_height as i32) };
+    unsafe { temino_pty_resize(master, columns as i32, rows as i32, pixel_width as i32, pixel_height as i32) };
 }
 
 /// Blocks until `pid` exits and returns its exit code.
 pub fn wait(pid: i32) -> i32 {
-    unsafe { renga_wait(pid) }
+    unsafe { temino_wait(pid) }
 }
 
 pub fn user_name() -> Option<String> {
-    let name = unsafe { renga_user_name() };
+    let name = unsafe { temino_user_name() };
     (!name.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned())
 }
 
 pub fn hangup(pid: i32) {
-    unsafe { renga_hangup(pid) }
+    unsafe { temino_hangup(pid) }
 }

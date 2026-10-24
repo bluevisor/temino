@@ -590,25 +590,76 @@ fn draw_builtin(code: u32, w: usize, h: usize, stroke: usize) -> Option<Vec<u8>>
         0x2500..=0x257f => {
             let [l, r, u, d] = BOX[(code - 0x2500) as usize];
             let (cx, cy) = (w / 2, h / 2);
-            // Each arm runs from the far side of the crossing lines to the
-            // cell edge, so corners and tees meet without gaps.
-            let vertical = span(u.max(d), cx);
-            let horizontal = span(l.max(r), cy);
-            let (vx0, vx1) = (vertical.first().map_or(cx, |s| s.0), vertical.last().map_or(cx + 1, |s| s.1));
-            let (hy0, hy1) = (horizontal.first().map_or(cy, |s| s.0), horizontal.last().map_or(cy + 1, |s| s.1));
-            let has_vertical = u | d != 0;
-            let has_horizontal = l | r != 0;
-            for (lo, hi) in span(l, cy) {
-                canvas.fill(0, lo, if has_vertical { vx1 } else { cx + 1 }, hi, 255);
+            let gap = (light + 1) as i32;
+            // The lines of an arm: (offset from the center, thickness).
+            let lines = |weight: u8| -> Vec<(i32, usize)> {
+                match weight {
+                    1 => vec![(0, light)],
+                    2 => vec![(0, heavy)],
+                    3 => vec![(-gap, light), (gap, light)],
+                    _ => vec![],
+                }
+            };
+            let line_span = |center: usize, offset: i32, thickness: usize| -> (usize, usize) {
+                let lo = (center as i32 + offset - (thickness / 2) as i32).max(0) as usize;
+                (lo, lo + thickness)
+            };
+            // The crossing arms' lines sit at ±offset with this thickness.
+            let crossing = |a: u8, b: u8| -> (i32, usize) {
+                (if a.max(b) == 3 { gap } else { 0 }, if a.max(b) == 2 { heavy } else { light })
+            };
+            // A line meets the crossing lines either at the near one (when
+            // an arm continues on its side, as the inner line of a corner)
+            // or runs on to the far one (the outer line), so double lines
+            // nest at corners and tees instead of crossing.
+            let near = |offset: i32, before: u8, after: u8| -> bool {
+                match offset {
+                    o if o < 0 => before > 0,
+                    o if o > 0 => after > 0,
+                    _ => before > 0 && after > 0,
+                }
+            };
+            let (vertical_offset, vertical_thickness) = crossing(u, d);
+            let (horizontal_offset, horizontal_thickness) = crossing(l, r);
+            for (offset, thickness) in lines(l) {
+                let (y0, y1) = line_span(cy, offset, thickness);
+                let end = if u | d == 0 {
+                    cx + 1
+                } else {
+                    let to = if near(offset, u, d) { -vertical_offset } else { vertical_offset };
+                    line_span(cx, to, vertical_thickness).1
+                };
+                canvas.fill(0, y0, end, y1, 255);
             }
-            for (lo, hi) in span(r, cy) {
-                canvas.fill(if has_vertical { vx0 } else { cx }, lo, w, hi, 255);
+            for (offset, thickness) in lines(r) {
+                let (y0, y1) = line_span(cy, offset, thickness);
+                let start = if u | d == 0 {
+                    cx
+                } else {
+                    let from = if near(offset, u, d) { vertical_offset } else { -vertical_offset };
+                    line_span(cx, from, vertical_thickness).0
+                };
+                canvas.fill(start, y0, w, y1, 255);
             }
-            for (lo, hi) in span(u, cx) {
-                canvas.fill(lo, 0, hi, if has_horizontal { hy1 } else { cy + 1 }, 255);
+            for (offset, thickness) in lines(u) {
+                let (x0, x1) = line_span(cx, offset, thickness);
+                let end = if l | r == 0 {
+                    cy + 1
+                } else {
+                    let to = if near(offset, l, r) { -horizontal_offset } else { horizontal_offset };
+                    line_span(cy, to, horizontal_thickness).1
+                };
+                canvas.fill(x0, 0, x1, end, 255);
             }
-            for (lo, hi) in span(d, cx) {
-                canvas.fill(lo, if has_horizontal { hy0 } else { cy }, hi, h, 255);
+            for (offset, thickness) in lines(d) {
+                let (x0, x1) = line_span(cx, offset, thickness);
+                let start = if l | r == 0 {
+                    cy
+                } else {
+                    let from = if near(offset, l, r) { horizontal_offset } else { -horizontal_offset };
+                    line_span(cy, from, horizontal_thickness).0
+                };
+                canvas.fill(x0, start, x1, h, 255);
             }
         }
         0x2580 => canvas.fill(0, 0, w, h / 2, 255),

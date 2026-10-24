@@ -313,7 +313,7 @@ pub struct History {
 impl History {
     const LIMIT: usize = 5000;
 
-    /// Renga's own history, seeded from ~/.bash_history the first time.
+    /// Temino's own history, seeded from ~/.bash_history the first time.
     pub fn load() -> History {
         let path = format!("{}/history", crate::settings_dir());
         let mut entries: Vec<String> = match std::fs::read_to_string(&path) {

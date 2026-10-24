@@ -76,8 +76,8 @@ impl Gpu {
         crate::trace("gpu: loading libvulkan.so.1");
         let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("loading libvulkan.so.1: {e}"))?;
         let app = vk::ApplicationInfo::default()
-            .application_name(c"Renga")
-            .engine_name(c"Renga")
+            .application_name(c"Temino")
+            .engine_name(c"Temino")
             .api_version(vk::API_VERSION_1_1);
         let instance_info = vk::InstanceCreateInfo::default().application_info(&app);
         let instance = unsafe { entry.create_instance(&instance_info, None) }.check("vkCreateInstance")?;

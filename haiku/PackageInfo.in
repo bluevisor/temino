@@ -1,8 +1,8 @@
-name			renga
+name			temino
 version			@VERSION@-@REVISION@
 architecture		@ARCH@
-summary			"A block terminal for Haiku, drawn with Vulkan"
-description		"Renga is a modern terminal in the style of Warp: every command \
+summary			"A modern GPU-accelerated terminal for Haiku"
+description		"Temino is a modern terminal in the style of Warp: every command \
 and its output is a block you can select and copy, commands are typed in an \
 editor with syntax colors, history, autosuggestions and Tab completion, and \
 full-screen programs get the whole window. It draws with Vulkan, so on the UTM \
@@ -11,12 +11,12 @@ packager		"John Zheng"
 vendor			"bluevisor"
 copyrights		"2026 John Zheng"
 licenses		"MIT"
-urls			"https://github.com/bluevisor/renga"
+urls			"https://github.com/bluevisor/temino"
 
 provides {
-	renga = @VERSION@-@REVISION@
-	app:Renga = @VERSION@
-	cmd:renga = @VERSION@
+	temino = @VERSION@-@REVISION@
+	app:Temino = @VERSION@
+	cmd:temino = @VERSION@
 }
 
 requires {

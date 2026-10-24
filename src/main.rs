@@ -1,4 +1,4 @@
-//! Renga: a block-based terminal for Haiku, rendered with Vulkan.
+//! Temino: a modern GPU-accelerated terminal for Haiku, rendered with Vulkan.
 
 // Drawing helpers take a scene, the text system, a position and a style.
 #![allow(clippy::too_many_arguments)]
@@ -24,27 +24,27 @@ pub enum Msg {
     ShellExited(i32),
 }
 
-/// ~/config/settings/Renga: history, the shell integration script, logs.
+/// ~/config/settings/Temino: history, the shell integration script, logs.
 pub fn settings_dir() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
-    format!("{home}/config/settings/Renga")
+    format!("{home}/config/settings/Temino")
 }
 
 /// Reports a fatal error the way Haiku apps do, with an alert.
 pub fn fatal(message: &str) {
-    eprintln!("renga: {message}");
+    eprintln!("temino: {message}");
     let _ = std::fs::create_dir_all(settings_dir());
     let _ = std::fs::write(format!("{}/crash.log", settings_dir()), format!("{message}\n"));
-    platform::alert(&format!("Renga: {message}"));
+    platform::alert(&format!("Temino: {message}"));
 }
 
-/// With RENGA_TRACE set, appends a timestamped line to
-/// ~/config/settings/Renga/trace.log (flushed, so it survives a hang).
+/// With TEMINO_TRACE set, appends a timestamped line to
+/// ~/config/settings/Temino/trace.log (flushed, so it survives a hang).
 pub fn trace(message: &str) {
     use std::io::Write;
     use std::sync::OnceLock;
     static START: OnceLock<Option<std::time::Instant>> = OnceLock::new();
-    let Some(start) = START.get_or_init(|| std::env::var_os("RENGA_TRACE").map(|_| std::time::Instant::now())) else {
+    let Some(start) = START.get_or_init(|| std::env::var_os("TEMINO_TRACE").map(|_| std::time::Instant::now())) else {
         return;
     };
     let _ = std::fs::create_dir_all(settings_dir());
@@ -63,7 +63,7 @@ fn main() {
         std::process::exit(platform::pty_exec(&args[2..]));
     }
     if args.get(1).map(String::as_str) == Some("--selftest") {
-        let path = args.get(2).map_or("/tmp/renga-selftest.ppm", String::as_str);
+        let path = args.get(2).map_or("/tmp/temino-selftest.ppm", String::as_str);
         // Optional WIDTHxHEIGHT and frame count, for soak tests.
         let (width, height) = args
             .get(3)
@@ -86,10 +86,10 @@ fn main() {
     }));
 
     let (sender, receiver) = mpsc::channel();
-    platform::app_new("application/x-vnd.bluevisor-Renga");
-    platform::window_new("Renga", WIDTH, HEIGHT, sender.clone());
+    platform::app_new("application/x-vnd.bluevisor-Temino");
+    platform::window_new("Temino", WIDTH, HEIGHT, sender.clone());
     thread::Builder::new()
-        .name("renga core".into())
+        .name("temino core".into())
         .spawn(move || app::run(receiver, sender, WIDTH, HEIGHT))
         .expect("core thread");
     platform::app_run();

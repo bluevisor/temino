@@ -24,7 +24,7 @@ use alacritty_terminal::vte::ansi::Processor;
 use crate::theme::Theme;
 use crate::Msg;
 
-const SHELL_INTEGRATION: &str = include_str!("shell/renga.bash");
+const SHELL_INTEGRATION: &str = include_str!("shell/temino.bash");
 const HISTORY_LINES: usize = 20_000;
 /// How long a PS2 continuation prompt must sit unanswered before the
 /// editor comes back for the rest of the command.
@@ -229,7 +229,7 @@ enum Segment {
     Continuation,
 }
 
-/// Pulls Renga's own OSC sequences out of the byte stream; everything else
+/// Pulls Temino's own OSC sequences out of the byte stream; everything else
 /// passes through untouched, in order. Sequences may span reads.
 #[derive(Default)]
 struct Scanner {
@@ -503,10 +503,10 @@ impl Session {
     pub fn start(&mut self, sender: Sender<Msg>, credits: Arc<Credits>) -> std::io::Result<()> {
         let dir = crate::settings_dir();
         std::fs::create_dir_all(&dir)?;
-        self.integration_path = format!("{dir}/renga.bash");
+        self.integration_path = format!("{dir}/temino.bash");
         std::fs::write(&self.integration_path, SHELL_INTEGRATION)?;
 
-        let shell = std::env::var("RENGA_SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let shell = std::env::var("TEMINO_SHELL").unwrap_or_else(|_| "/bin/bash".into());
         let argv = vec![shell, "--rcfile".into(), self.integration_path.clone(), "-i".into()];
         let mut env: Vec<String> = std::env::vars()
             .filter(|(key, _)| !matches!(key.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "COLUMNS" | "LINES"))
@@ -514,7 +514,7 @@ impl Session {
             .collect();
         env.push("TERM=xterm-256color".into());
         env.push("COLORTERM=truecolor".into());
-        env.push("TERM_PROGRAM=Renga".into());
+        env.push("TERM_PROGRAM=Temino".into());
         env.push(format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION")));
 
         let (pid, master) =
@@ -523,7 +523,7 @@ impl Session {
         let mut writer_file = reader.try_clone()?;
 
         let data_sender = sender.clone();
-        thread::Builder::new().name("renga pty reader".into()).spawn(move || {
+        thread::Builder::new().name("temino pty reader".into()).spawn(move || {
             let mut reader = reader;
             let mut buffer = vec![0u8; 64 * 1024];
             loop {
@@ -544,7 +544,7 @@ impl Session {
         })?;
 
         let (writer, queue) = mpsc::channel::<Vec<u8>>();
-        thread::Builder::new().name("renga pty writer".into()).spawn(move || {
+        thread::Builder::new().name("temino pty writer".into()).spawn(move || {
             for bytes in queue {
                 if writer_file.write_all(&bytes).is_err() {
                     break;
@@ -552,7 +552,7 @@ impl Session {
             }
         })?;
 
-        thread::Builder::new().name("renga shell waiter".into()).spawn(move || {
+        thread::Builder::new().name("temino shell waiter".into()).spawn(move || {
             let code = crate::platform::wait(pid);
             let _ = sender.send(Msg::ShellExited(code));
         })?;

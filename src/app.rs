@@ -33,6 +33,15 @@ const BLINK: Duration = Duration::from_millis(530);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const MAX_EDITOR_LINES: usize = 10;
 const MENU_ROWS: usize = 8;
+/// The launch banner, in figlet's "ANSI Shadow" style.
+const BANNER: [&str; 6] = [
+    "████████╗███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ",
+    "╚══██╔══╝██╔════╝████╗ ████║██║████╗  ██║██╔═══██╗",
+    "   ██║   █████╗  ██╔████╔██║██║██╔██╗ ██║██║   ██║",
+    "   ██║   ██╔══╝  ██║╚██╔╝██║██║██║╚██╗██║██║   ██║",
+    "   ██║   ███████╗██║ ╚═╝ ██║██║██║ ╚████║╚██████╔╝",
+    "   ╚═╝   ╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ",
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SelectMode {
@@ -176,7 +185,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
         let card = Rect::new(16.0, 16.0, 448.0, 128.0);
         scene.shadow(card, Color::hex(0x000000).alpha(0.6), 10.0, 8.0);
         scene.quad(Quad::new(card, theme.surface).radius(10.0).border(1.0, theme.divider));
-        text.draw_text(&mut scene, "Renga self-test", 32.0, 52.0, UI_BOLD, 20.0, theme.text);
+        text.draw_text(&mut scene, "Temino self-test", 32.0, 52.0, UI_BOLD, 20.0, theme.text);
         text.draw_mono(&mut scene, "ls -la ~/config ─┼─ ✓", 32.0, 70.0, Style::default(), theme.success);
         scene.fill(Rect::new(32.0, 110.0, 120.0, 18.0), theme.accent);
         match gpu.render(&scene, &mut text.atlas) {
@@ -373,9 +382,9 @@ impl App {
     fn update_title(&mut self) {
         let title = match self.session.active() {
             Some(block) if !block.command.is_empty() => {
-                format!("{} — Renga", block.command.lines().next().unwrap_or(""))
+                format!("{} — Temino", block.command.lines().next().unwrap_or(""))
             }
-            _ => format!("{} — Renga", ui::short_path(&self.session.cwd)),
+            _ => format!("{} — Temino", ui::short_path(&self.session.cwd)),
         };
         if title != self.title {
             platform::set_title(&title);
@@ -1153,7 +1162,7 @@ impl App {
     fn draw_main(&mut self) {
         let (width, height) = (self.width as f32, self.height as f32);
         let input_height = self.input_height();
-        let welcome_height = if self.session.blocks.is_empty() { 150.0 } else { 0.0 };
+        let welcome_height = if self.session.blocks.is_empty() { self.welcome_height() } else { 0.0 };
 
         let mut heights = Vec::with_capacity(self.session.blocks.len());
         let mut total = welcome_height;
@@ -1200,13 +1209,43 @@ impl App {
         self.draw_input(input_y, input_height);
     }
 
+    /// Whether the window is wide enough for the ASCII-art banner.
+    fn banner_fits(&self) -> bool {
+        self.session.size.columns >= BANNER[0].chars().count() + 2
+    }
+
+    fn welcome_height(&self) -> f32 {
+        let title = if self.banner_fits() { BANNER.len() as f32 * self.text.cell.height } else { 30.0 };
+        24.0 + title + 30.0 + 2.0 * 28.0 + 12.0
+    }
+
     fn draw_welcome(&mut self, top: f32) {
+        let banner = self.banner_fits();
         let App { scene, text, theme, gpu, .. } = self;
         let x = PAD_X + 6.0;
-        let y = top + 28.0;
-        text.draw_text(scene, "Renga", x, y + 26.0, UI_BOLD, 28.0, theme.text);
-        let subtitle = format!("A block terminal for Haiku · Vulkan on {}", gpu.device_name);
-        text.draw_text(scene, &subtitle, x, y + 50.0, UI, 13.0, theme.text_dim);
+        let mut y = top + 24.0;
+        if banner {
+            // Solid strokes take a blue-to-violet gradient down the rows; the
+            // box-drawing "shadow" strokes sit a step darker behind them.
+            for (row, line) in BANNER.iter().enumerate() {
+                let tint = theme.accent.mix(theme.variable, row as f32 / (BANNER.len() - 1) as f32);
+                let shade = tint.mix(theme.background, 0.55);
+                for (column, c) in line.chars().enumerate() {
+                    let color = if c == '█' { tint } else { shade };
+                    let cx = x + column as f32 * text.cell.width;
+                    text.draw_cell(scene, c, cx, y, Style::default(), color, 1);
+                }
+                y += text.cell.height;
+            }
+        } else {
+            text.draw_text(scene, "Temino", x, y + 26.0, UI_BOLD, 28.0, theme.text);
+            y += 30.0;
+        }
+        let tagline = "A modern GPU-accelerated terminal for Haiku";
+        let width = text.draw_text(scene, tagline, x, y + 22.0, UI, 13.0, theme.text_dim);
+        let device = format!("  ·  Vulkan on {}", gpu.device_name);
+        text.draw_text(scene, &device, x + width, y + 22.0, UI, 13.0, theme.text_faint);
+        let y = y + 36.0;
         let rows: [&[(&str, &str)]; 2] = [
             &[
                 ("Enter", "run"),
@@ -1225,7 +1264,7 @@ impl App {
         ];
         for (row, hints) in rows.iter().enumerate() {
             let mut hx = x;
-            let hy = y + 68.0 + row as f32 * 28.0;
+            let hy = y + row as f32 * 28.0;
             for (key, label) in hints.iter() {
                 hx += ui::hint(scene, text, theme, key, label, hx, hy) + 18.0;
             }

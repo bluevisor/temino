@@ -335,16 +335,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "renga"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "ash",
- "cc",
- "fontdue",
-]
-
-[[package]]
 name = "rustix"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -405,6 +395,16 @@ name = "smallvec"
 version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
+
+[[package]]
+name = "temino"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "ash",
+ "cc",
+ "fontdue",
+]
 
 [[package]]
 name = "ttf-parser"

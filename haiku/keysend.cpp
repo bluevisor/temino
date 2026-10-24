@@ -1,5 +1,5 @@
 // keysend <team> <title-substring> <step>...: activates that team's window
-// and posts key presses to it, for driving Renga in tests. Steps:
+// and posts key presses to it, for driving Temino in tests. Steps:
 //   some text        types the text
 //   @enter @tab @up @down @left @right @esc @backspace @home @end
 //   @ctrl+c @alt+k   (modifiers: ctrl, alt, shift; combine as @ctrl+shift+x)

@@ -10,6 +10,6 @@ fn main() {
         .file("src/haiku/shim.cpp")
         .flag("-std=c++17")
         .flag_if_supported("-Wno-unused-parameter")
-        .compile("renga_shim");
+        .compile("temino_shim");
     println!("cargo:rustc-link-lib=be");
 }
