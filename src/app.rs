@@ -1225,13 +1225,23 @@ impl App {
         let x = PAD_X + 6.0;
         let mut y = top + 24.0;
         if banner {
-            // Solid strokes take a blue-to-violet gradient down the rows; the
-            // box-drawing "shadow" strokes sit a step darker behind them.
+            // The three leaves of the Haiku logo, left to right: green,
+            // orange, peach, blended by hue so green turns yellow on its way
+            // to orange. Top rows catch a little light like the leaves'
+            // upper edges; the box-drawing "shadow" strokes sit darker.
+            let leaves = [Color::hex(0x5ae202), Color::hex(0xff8203), Color::hex(0xffc468)];
+            let columns = BANNER[0].chars().count() as f32 - 1.0;
             for (row, line) in BANNER.iter().enumerate() {
-                let tint = theme.accent.mix(theme.variable, row as f32 / (BANNER.len() - 1) as f32);
-                let shade = tint.mix(theme.background, 0.55);
+                let light = 0.22 * (1.0 - row as f32 / (BANNER.len() - 1) as f32);
                 for (column, c) in line.chars().enumerate() {
-                    let color = if c == '█' { tint } else { shade };
+                    let t = column as f32 / columns * 2.0;
+                    let leaf =
+                        if t < 1.0 { leaves[0].mix_hue(leaves[1], t) } else { leaves[1].mix_hue(leaves[2], t - 1.0) };
+                    let color = if c == '█' {
+                        leaf.mix(Color::hex(0xffffff), light)
+                    } else {
+                        leaf.mix(theme.background, 0.55)
+                    };
                     let cx = x + column as f32 * text.cell.width;
                     text.draw_cell(scene, c, cx, y, Style::default(), color, 1);
                 }

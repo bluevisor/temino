@@ -40,6 +40,51 @@ impl Color {
         }
     }
 
+    /// Blends through hue rather than RGB, so green to orange passes
+    /// through yellow instead of olive.
+    pub fn mix_hue(self, other: Color, t: f32) -> Color {
+        let (h0, s0, v0) = self.hsv();
+        let (h1, s1, v1) = other.hsv();
+        let mut dh = h1 - h0;
+        if dh > 180.0 {
+            dh -= 360.0;
+        } else if dh < -180.0 {
+            dh += 360.0;
+        }
+        Color::from_hsv((h0 + dh * t).rem_euclid(360.0), s0 + (s1 - s0) * t, v0 + (v1 - v0) * t)
+    }
+
+    fn hsv(self) -> (f32, f32, f32) {
+        let max = self.r.max(self.g).max(self.b);
+        let min = self.r.min(self.g).min(self.b);
+        let delta = max - min;
+        let hue = if delta == 0.0 {
+            0.0
+        } else if max == self.r {
+            60.0 * ((self.g - self.b) / delta).rem_euclid(6.0)
+        } else if max == self.g {
+            60.0 * ((self.b - self.r) / delta + 2.0)
+        } else {
+            60.0 * ((self.r - self.g) / delta + 4.0)
+        };
+        (hue, if max == 0.0 { 0.0 } else { delta / max }, max)
+    }
+
+    fn from_hsv(hue: f32, saturation: f32, value: f32) -> Color {
+        let c = value * saturation;
+        let x = c * (1.0 - ((hue / 60.0).rem_euclid(2.0) - 1.0).abs());
+        let (r, g, b) = match (hue / 60.0) as u32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+        let m = value - c;
+        Color { r: r + m, g: g + m, b: b + m, a: 1.0 }
+    }
+
     pub fn to_array(self) -> [f32; 4] {
         [self.r, self.g, self.b, self.a]
     }
