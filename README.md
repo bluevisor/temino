@@ -108,6 +108,7 @@ presses to a window for scripted tests. After editing a shader, run
 Set `TEMINO_TRACE=1` to log startup and frame stages to
 `~/config/settings/Temino/trace.log`. History, the shell integration script
 and crash logs live in the same directory. `TEMINO_SHELL` picks another bash.
+`TEMINO_CAPTURE=frame.ppm` saves every frame as it's drawn, for screenshots.
 
 ## Credits
 

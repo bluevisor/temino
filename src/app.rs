@@ -1076,7 +1076,12 @@ impl App {
         }
         crate::trace("render: scene built");
         match self.gpu.render(&self.scene, &mut self.text.atlas) {
-            Ok(pixels) => platform::present(pixels, self.width, self.height),
+            Ok(pixels) => {
+                if let Some(path) = std::env::var_os("TEMINO_CAPTURE") {
+                    write_ppm(&path, pixels, self.width, self.height);
+                }
+                platform::present(pixels, self.width, self.height)
+            }
             Err(error) => {
                 crate::fatal(&format!("rendering failed: {error}"));
                 self.close();
@@ -1595,6 +1600,17 @@ fn draw_menu(
     }
     scene.pop_clip();
     scene.set_layer(LAYER_CONTENT);
+}
+
+/// TEMINO_CAPTURE: saves each frame, straight from the GPU readback, for
+/// screenshots that no other window or the pointer can get into.
+fn write_ppm(path: &std::ffi::OsStr, bgra: &[u8], width: u32, height: u32) {
+    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+    ppm.reserve(bgra.len() / 4 * 3);
+    for pixel in bgra.chunks_exact(4) {
+        ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+    }
+    let _ = std::fs::write(path, ppm);
 }
 
 fn normalize(selection: Selection) -> ((usize, usize), (usize, usize)) {
