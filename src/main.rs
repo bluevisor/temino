@@ -21,6 +21,7 @@ mod shells;
 mod text;
 mod theme;
 mod ui;
+mod update;
 
 use std::sync::mpsc;
 use std::thread;
@@ -30,6 +31,8 @@ pub enum Msg {
     /// Output from the shell of the pane with this id.
     Pty(u64, Vec<u8>),
     ShellExited(u64, i32),
+    /// A message for the user from another thread (the updater).
+    Notice(String),
 }
 
 /// History, the shell integration script and logs: ~/config/settings/Temino

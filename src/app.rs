@@ -299,6 +299,7 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
                     Msg::Ui(_) => "loop: ui event",
                     Msg::Pty(..) => "loop: pty data",
                     Msg::ShellExited(..) => "loop: shell exited",
+                    Msg::Notice(..) => "loop: notice",
                 });
                 app.handle(message)
             }
@@ -466,6 +467,7 @@ impl App {
         };
         app.set_zoom(crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(1.0), false);
         app.restore_tabs()?;
+        crate::update::check(app.ctx.sender.clone(), false);
         crate::trace("app: shell started");
         Ok(app)
     }
@@ -826,6 +828,10 @@ impl App {
                 self.dirty = true;
             }
             Msg::Ui(event) => self.ui_event(event),
+            Msg::Notice(message) => {
+                self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(6)));
+                self.dirty = true;
+            }
         }
         self.update_title();
     }
@@ -875,6 +881,7 @@ impl App {
         for pane in &mut self.panes {
             pane.hangup();
         }
+        crate::update::apply_at_quit();
         self.quitting = true;
         platform::quit();
     }
@@ -1102,6 +1109,11 @@ impl App {
                 }
                 (_, Some('q')) => {
                     self.quit();
+                    true
+                }
+                (_, Some('u')) => {
+                    self.ctx.show_toast("Checking for updates…");
+                    crate::update::check(self.ctx.sender.clone(), true);
                     true
                 }
                 // Command+Shift+[ ] (macOS-style) moves between tabs.

@@ -180,6 +180,8 @@ mod menu {
     /// A None label is a separator.
     type MenuItem = (&'static str, Option<&'static str>, &'static str, u32, Option<Named>, char);
     const ITEMS: &[MenuItem] = &[
+        ("Temino", Some("Check for Updates…"), "u", 0, None, 'u'),
+        ("Temino", None, "", 0, None, '\0'),
         ("Temino", Some("Quit Temino"), "q", 0, None, 'q'),
         ("Shell", Some("New Tab"), "t", 0, None, 't'),
         ("Shell", Some("Split Right"), "d", 0, None, 'd'),

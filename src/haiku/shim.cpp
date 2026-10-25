@@ -439,6 +439,8 @@ build_menu_bar()
 	app->AddItem(menu_key("Split down", 'E'));
 	app->AddSeparatorItem();
 	app->AddItem(menu_key("Close pane", 'W'));
+	app->AddSeparatorItem();
+	app->AddItem(menu_key("Check for updates", 'U'));
 	app->AddItem(menu_key("Quit", 'Q'));
 	bar->AddItem(app);
 

@@ -154,6 +154,16 @@ settings directory (`~/config/settings/Temino` on Haiku). History, the shell
 integration script and crash logs live in the same directory. `TEMINO_SHELL` picks another bash.
 `TEMINO_CAPTURE=frame.ppm` saves every frame as it's drawn, for screenshots.
 
+## Updates
+
+Temino checks GitHub for a newer release once a day at launch, and from
+Temino ▸ Check for Updates (Cmd+U). It downloads the build for your system and
+swaps it in; the new version runs from the next launch. It replaces
+Temino.app on macOS and the `temino` binary on Linux. On Haiku it replaces the
+package in `~/config/packages` when you quit, because swapping the package
+stops a running Temino. To turn off the daily check, put `updates=off` in the
+`settings` file. Updates need `curl`.
+
 ## Credits
 
 - The rounded-rectangle and shadow shader math follows `rect_shader.wgsl`
