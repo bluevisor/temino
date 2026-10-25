@@ -35,8 +35,8 @@ enum Request {
     Present,
     Title(String),
     Cursor(Cursor),
-    /// The Background menu changed; it is in BACKGROUNDS.
-    Backgrounds,
+    /// A choice menu changed; it is in CHOICES.
+    Choices(Choice),
     Quit,
 }
 
@@ -51,8 +51,18 @@ static FRAME: Mutex<Option<Frame>> = Mutex::new(None);
 /// Set while a Present request is queued, so frames don't pile up.
 static PRESENT_PENDING: AtomicBool = AtomicBool::new(false);
 static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
-/// The Background menu's entries and the picked one.
-static BACKGROUNDS: Mutex<Option<(Vec<String>, usize)>> = Mutex::new(None);
+/// The menus of choices Rust fills (macOS; Linux has no menu bar).
+#[derive(Clone, Copy, Debug)]
+enum Choice {
+    Background,
+    Shell,
+}
+
+/// A choice menu's entries and the picked one.
+type Choices = (Vec<String>, usize);
+
+/// Each choice menu, by `Choice`.
+static CHOICES: Mutex<[Option<Choices>; 2]> = Mutex::new([None, None]);
 /// Where menu picks go; the menu calls back on the main thread.
 static MENU_SENDER: Mutex<Option<Sender<Msg>>> = Mutex::new(None);
 
@@ -115,17 +125,26 @@ pub fn quit() {
 /// The window is always covered by the frame; nothing to do.
 pub fn set_background(_rgb: [u8; 3]) {}
 
-/// Fills Settings ▸ Background (macOS; Linux has no menu bar).
+/// Fills View ▸ Background.
 pub fn set_background_menu(names: &[&str], selected: usize) {
-    *BACKGROUNDS.lock().unwrap() = Some((names.iter().map(|n| n.to_string()).collect(), selected));
-    request(Request::Backgrounds);
+    set_choices(Choice::Background, names.iter().map(|n| n.to_string()).collect(), selected);
+}
+
+/// Fills Shell ▸ Default Shell.
+pub fn set_shell_menu(names: &[String], selected: usize) {
+    set_choices(Choice::Shell, names.to_vec(), selected);
+}
+
+fn set_choices(choice: Choice, names: Vec<String>, selected: usize) {
+    CHOICES.lock().unwrap()[choice as usize] = Some((names, selected));
+    request(Request::Choices(choice));
 }
 
 #[cfg(target_os = "macos")]
 mod menu {
     use std::ffi::{c_char, CString};
 
-    use super::{KeyEvent, UiEvent, BACKGROUNDS, MENU_SENDER};
+    use super::{Choice, KeyEvent, UiEvent, CHOICES, MENU_SENDER};
     use crate::keys::Named;
     use crate::platform::mods;
     use crate::Msg;
@@ -141,14 +160,20 @@ mod menu {
 
     extern "C" {
         fn temino_menu_install(items: *const Item, count: usize, callback: extern "C" fn(i32));
-        fn temino_menu_backgrounds(names: *const *const c_char, count: usize, selected: usize);
-        fn temino_menu_mark_background(selected: usize);
+        fn temino_menu_choices(tag: i32, names: *const *const c_char, count: usize, selected: usize);
     }
 
     const SHIFT: u32 = 1 << 17;
     const COMMAND: u32 = 1 << 20;
-    /// The tag of the Background submenu; its entries count up from here.
-    const BACKGROUND: i32 = 1000;
+    /// Choice submenus have tags CHOICE, 2 * CHOICE…; their entries count
+    /// up from there.
+    const CHOICE: i32 = 1000;
+    const SUBMENUS: [(&str, &str, Choice); 2] =
+        [("View", "Background", Choice::Background), ("Shell", "Default Shell", Choice::Shell)];
+
+    fn choice_tag(choice: Choice) -> i32 {
+        CHOICE * (choice as i32 + 1)
+    }
 
     /// Menu, label, key equivalent, extra modifiers, and the key the item
     /// sends, as if typed with Command: menus and shortcuts share one path.
@@ -178,16 +203,15 @@ mod menu {
         ("View", Some("Smaller Text"), "-", 0, None, '-'),
         ("View", Some("Default Text Size"), "0", 0, None, '0'),
         ("View", None, "", 0, None, '\0'),
+        ("Shell", None, "", 0, None, '\0'),
     ];
 
     extern "C" fn pick(tag: i32) {
-        let event = if tag >= BACKGROUND {
-            let index = (tag - BACKGROUND) as usize;
-            unsafe { temino_menu_mark_background(index) };
-            if let Some((_, selected)) = BACKGROUNDS.lock().unwrap().as_mut() {
-                *selected = index;
-            }
-            UiEvent::Background(index)
+        // The app answers a pick by refilling the menu with the new mark.
+        let event = if tag >= choice_tag(Choice::Shell) {
+            UiEvent::Shell((tag - choice_tag(Choice::Shell)) as usize)
+        } else if tag >= choice_tag(Choice::Background) {
+            UiEvent::Background((tag - choice_tag(Choice::Background)) as usize)
         } else {
             let Some(&(_, _, _, extra, named, c)) = ITEMS.get(tag as usize) else { return };
             let shift = if extra & SHIFT != 0 { mods::SHIFT } else { 0 };
@@ -203,7 +227,7 @@ mod menu {
         let strings: Vec<[CString; 3]> = ITEMS
             .iter()
             .map(|(menu, label, key, ..)| [*menu, label.unwrap_or(""), *key].map(|s| CString::new(s).unwrap()))
-            .chain(std::iter::once(["View", "Background", ""].map(|s| CString::new(s).unwrap())))
+            .chain(SUBMENUS.iter().map(|(menu, label, _)| [*menu, label, ""].map(|s| CString::new(s).unwrap())))
             .collect();
         let items: Vec<Item> = strings
             .iter()
@@ -215,19 +239,21 @@ mod menu {
                     label: if separator { std::ptr::null() } else { label.as_ptr() },
                     key: key.as_ptr(),
                     modifiers: COMMAND | ITEMS.get(i).map_or(0, |item| item.3),
-                    tag: if i < ITEMS.len() { i as i32 } else { BACKGROUND },
+                    tag: if i < ITEMS.len() { i as i32 } else { choice_tag(SUBMENUS[i - ITEMS.len()].2) },
                 }
             })
             .collect();
         unsafe { temino_menu_install(items.as_ptr(), items.len(), pick) };
-        update_backgrounds();
+        for (.., choice) in SUBMENUS {
+            update_choices(choice);
+        }
     }
 
-    pub fn update_backgrounds() {
-        let Some((names, selected)) = BACKGROUNDS.lock().unwrap().clone() else { return };
+    pub fn update_choices(choice: Choice) {
+        let Some((names, selected)) = CHOICES.lock().unwrap()[choice as usize].clone() else { return };
         let names: Vec<CString> = names.into_iter().map(|n| CString::new(n).unwrap_or_default()).collect();
         let pointers: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
-        unsafe { temino_menu_backgrounds(pointers.as_ptr(), pointers.len(), selected) };
+        unsafe { temino_menu_choices(choice_tag(choice), pointers.as_ptr(), pointers.len(), selected) };
     }
 }
 
@@ -574,10 +600,10 @@ impl ApplicationHandler<Request> for Handler {
                     });
                 }
             }
-            Request::Backgrounds =>
+            Request::Choices(_choice) =>
             {
                 #[cfg(target_os = "macos")]
-                menu::update_backgrounds()
+                menu::update_choices(_choice)
             }
             Request::Quit => event_loop.exit(),
         }

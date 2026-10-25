@@ -77,6 +77,7 @@ enum {
 	kEventClose = 8,
 	kEventQuit = 9,
 	kEventBackground = 10,
+	kEventShell = 11,
 };
 
 enum {
@@ -86,6 +87,8 @@ enum {
 	kMsgMenuKey = 'rmky',
 	kMsgBackground = 'rbgd',
 	kMsgBackgroundMenu = 'rbgm',
+	kMsgShell = 'rshl',
+	kMsgShellMenu = 'rshm',
 };
 
 
@@ -100,6 +103,7 @@ static rgb_color sBackground = { 16, 18, 24, 255 };
 
 static class TeminoWindow* sWindow;
 static BMenu* sBackgroundMenu;
+static BMenu* sShellMenu;
 static class TeminoView* sView;
 static std::atomic<bool> sQuitting(false);
 
@@ -320,15 +324,19 @@ public:
 			SetTitle(message->GetString("title", "Temino"));
 			return;
 		}
-		if (message->what == kMsgBackground) {
+		if (message->what == kMsgBackground || message->what == kMsgShell) {
 			TeminoEvent event = {};
-			event.kind = kEventBackground;
+			event.kind = message->what == kMsgBackground ? kEventBackground : kEventShell;
 			event.key = message->GetInt32("index", 0);
 			emit(event);
 			return;
 		}
 		if (message->what == kMsgBackgroundMenu) {
-			_FillBackgroundMenu(message);
+			_FillChoices(sBackgroundMenu, kMsgBackground, message);
+			return;
+		}
+		if (message->what == kMsgShellMenu) {
+			_FillChoices(sShellMenu, kMsgShell, message);
 			return;
 		}
 		if (message->what == kMsgMenuKey) {
@@ -347,20 +355,20 @@ public:
 		BWindow::MessageReceived(message);
 	}
 
-	// Rust names the backgrounds; the menu is radio-style, so picking one
-	// moves the mark by itself.
-	static void _FillBackgroundMenu(BMessage* message)
+	// Rust names a menu's choices and which is picked; picks come back as
+	// `what` messages and the app refills the menu with the new mark.
+	static void _FillChoices(BMenu* menu, uint32 what, BMessage* message)
 	{
-		while (BMenuItem* item = sBackgroundMenu->RemoveItem((int32)0))
+		while (BMenuItem* item = menu->RemoveItem((int32)0))
 			delete item;
 		int32 selected = message->GetInt32("selected", 0);
 		const char* name;
 		for (int32 i = 0; message->FindString("name", i, &name) == B_OK; i++) {
-			BMessage* pick = new BMessage(kMsgBackground);
+			BMessage* pick = new BMessage(what);
 			pick->AddInt32("index", i);
 			BMenuItem* item = new BMenuItem(name, pick);
 			item->SetMarked(i == selected);
-			sBackgroundMenu->AddItem(item);
+			menu->AddItem(item);
 		}
 	}
 
@@ -463,11 +471,25 @@ build_menu_bar()
 
 	BMenu* settings = new BMenu("Settings");
 	sBackgroundMenu = new BMenu("Background");
-	sBackgroundMenu->SetRadioMode(true);
 	settings->AddItem(sBackgroundMenu);
+	sShellMenu = new BMenu("Shell");
+	settings->AddItem(sShellMenu);
 	bar->AddItem(settings);
 
 	return bar;
+}
+
+
+// Hands a choice menu's entries to the window, to fill on its thread.
+static void
+post_choices(uint32 what, const char* const* names, int32 count,
+	int32 selected)
+{
+	BMessage message(what);
+	for (int32 i = 0; i < count; i++)
+		message.AddString("name", names[i]);
+	message.AddInt32("selected", selected);
+	sWindow->PostMessage(&message);
 }
 
 
@@ -537,11 +559,15 @@ void
 temino_set_background_menu(const char* const* names, int32_t count,
 	int32_t selected)
 {
-	BMessage message(kMsgBackgroundMenu);
-	for (int32 i = 0; i < count; i++)
-		message.AddString("name", names[i]);
-	message.AddInt32("selected", selected);
-	sWindow->PostMessage(&message);
+	post_choices(kMsgBackgroundMenu, names, count, selected);
+}
+
+
+void
+temino_set_shell_menu(const char* const* names, int32_t count,
+	int32_t selected)
+{
+	post_choices(kMsgShellMenu, names, count, selected);
 }
 
 

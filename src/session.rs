@@ -21,10 +21,14 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 
+use crate::shells::Kind;
 use crate::theme::Theme;
 use crate::Msg;
 
-const SHELL_INTEGRATION: &str = include_str!("shell/temino.bash");
+const BASH_INTEGRATION: &str = include_str!("shell/temino.bash");
+const ZSH_ENV: &str = include_str!("shell/zshenv");
+const ZSH_INTEGRATION: &str = include_str!("shell/temino.zsh");
+const FISH_INTEGRATION: &str = include_str!("shell/temino.fish");
 const HISTORY_LINES: usize = 20_000;
 /// How long a PS2 continuation prompt must sit unanswered before the
 /// editor comes back for the rest of the command.
@@ -470,7 +474,6 @@ pub struct Session {
     continuation_since: Option<Instant>,
     pub exit_code: Option<i32>,
     pub boot_output: Vec<u8>,
-    integration_path: String,
 }
 
 impl Session {
@@ -492,7 +495,6 @@ impl Session {
             continuation_since: None,
             exit_code: None,
             boot_output: Vec::new(),
-            integration_path: String::new(),
         }
     }
 
@@ -500,19 +502,15 @@ impl Session {
         self.cell = (width as u16, height as u16);
     }
 
-    /// Starts the shell; its output arrives as `Msg::Pty(id, ...)`.
-    pub fn start(&mut self, id: u64, sender: Sender<Msg>, credits: Arc<Credits>) -> std::io::Result<()> {
-        let dir = crate::settings_dir();
-        std::fs::create_dir_all(&dir)?;
-        self.integration_path = format!("{dir}/temino.bash");
-        std::fs::write(&self.integration_path, SHELL_INTEGRATION)?;
-
-        let shell = std::env::var("TEMINO_SHELL").unwrap_or_else(|_| default_shell());
-        let argv = vec![shell, "--rcfile".into(), self.integration_path.clone(), "-i".into()];
+    /// Starts `shell`; its output arrives as `Msg::Pty(id, ...)`.
+    pub fn start(&mut self, id: u64, shell: &str, sender: Sender<Msg>, credits: Arc<Credits>) -> std::io::Result<()> {
         let mut env: Vec<String> = std::env::vars()
-            .filter(|(key, _)| !matches!(key.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "COLUMNS" | "LINES"))
+            .filter(|(key, _)| {
+                !matches!(key.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "COLUMNS" | "LINES" | "ZDOTDIR")
+            })
             .map(|(key, value)| format!("{key}={value}"))
             .collect();
+        let argv = integrate(shell, &mut env)?;
         env.push("TERM=xterm-256color".into());
         env.push("COLORTERM=truecolor".into());
         env.push("TERM_PROGRAM=Temino".into());
@@ -673,6 +671,9 @@ impl Session {
                     }
                     self.phase = Phase::Ready;
                 }
+                // fish 4 marks commands itself as well as through the
+                // integration: the second mark changes nothing.
+                Segment::OutputStart if self.phase == Phase::Running => {}
                 Segment::OutputStart => {
                     let echo = std::mem::take(&mut self.idle_output);
                     self.idle_since = None;
@@ -902,15 +903,41 @@ impl Session {
     }
 }
 
-/// bash: on macOS a Homebrew one when there is one, since the system's is
-/// 3.2 (the integration copes, but newer is better).
-fn default_shell() -> String {
-    ["/opt/homebrew/bin/bash", "/usr/local/bin/bash"]
-        .into_iter()
-        .filter(|_| cfg!(target_os = "macos"))
-        .find(|path| std::path::Path::new(path).exists())
-        .unwrap_or("/bin/bash")
-        .to_owned()
+/// Writes `shell`'s integration script to the settings directory and
+/// returns the command line that loads it (adding to `env` what that
+/// needs). Shells Temino doesn't know are started like bash.
+fn integrate(shell: &str, env: &mut Vec<String>) -> std::io::Result<Vec<String>> {
+    let dir = crate::settings_dir();
+    std::fs::create_dir_all(&dir)?;
+    Ok(match Kind::of_path(shell) {
+        Some(Kind::Zsh) => {
+            // zsh has no --rcfile: point ZDOTDIR at a .zshenv that puts the
+            // user's back and then loads the integration.
+            let zdotdir = format!("{dir}/zsh");
+            std::fs::create_dir_all(&zdotdir)?;
+            std::fs::write(format!("{zdotdir}/.zshenv"), ZSH_ENV)?;
+            std::fs::write(format!("{zdotdir}/temino.zsh"), ZSH_INTEGRATION)?;
+            if let Ok(original) = std::env::var("ZDOTDIR") {
+                env.push(format!("TEMINO_ZDOTDIR={original}"));
+            }
+            env.push(format!("ZDOTDIR={zdotdir}"));
+            vec![shell.into(), "-l".into(), "-i".into()]
+        }
+        Some(Kind::Fish) => {
+            let path = format!("{dir}/temino.fish");
+            std::fs::write(&path, FISH_INTEGRATION)?;
+            // Through the environment, so the path needs no fish quoting.
+            env.push(format!("TEMINO_INTEGRATION={path}"));
+            let mut argv = vec![shell.to_owned()];
+            argv.extend(["--login", "--interactive", "--init-command", "source $TEMINO_INTEGRATION"].map(String::from));
+            argv
+        }
+        Some(Kind::Bash) | None => {
+            let path = format!("{dir}/temino.bash");
+            std::fs::write(&path, BASH_INTEGRATION)?;
+            vec![shell.into(), "--rcfile".into(), path, "-i".into()]
+        }
+    })
 }
 
 /// The checked-out branch of the repository containing `path`, read

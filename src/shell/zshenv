@@ -1,0 +1,13 @@
+# Temino starts zsh with ZDOTDIR pointing here, so this file runs first.
+# It puts the user's ZDOTDIR back (zsh then reads their .zprofile, .zshrc
+# and .zlogin as usual), sources their .zshenv, and loads the integration.
+typeset -g __temino_dir=${${(%):-%x}:A:h}
+if [[ -n "${TEMINO_ZDOTDIR+set}" ]]; then
+	ZDOTDIR=$TEMINO_ZDOTDIR
+	unset TEMINO_ZDOTDIR
+else
+	unset ZDOTDIR
+fi
+[[ -r "${ZDOTDIR:-$HOME}/.zshenv" ]] && builtin source "${ZDOTDIR:-$HOME}/.zshenv"
+[[ -o interactive ]] && builtin source "$__temino_dir/temino.zsh"
+unset __temino_dir

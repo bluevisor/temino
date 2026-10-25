@@ -17,6 +17,7 @@ mod pane;
 mod platform;
 mod scene;
 mod session;
+mod shells;
 mod text;
 mod theme;
 mod ui;
@@ -44,6 +45,27 @@ pub fn settings_dir() -> String {
         let config = std::env::var("XDG_CONFIG_HOME").ok().filter(|d| !d.is_empty());
         format!("{}/temino", config.unwrap_or_else(|| format!("{home}/.config")))
     }
+}
+
+/// `key=value` lines in the settings file: the value of `key`, if set.
+pub fn setting(key: &str) -> Option<String> {
+    let settings = std::fs::read_to_string(format!("{}/settings", settings_dir())).ok()?;
+    let prefix = format!("{key}=");
+    settings.lines().find_map(|line| line.strip_prefix(&prefix)).map(|value| value.trim().to_owned())
+}
+
+pub fn save_setting(key: &str, value: &str) {
+    let path = format!("{}/settings", settings_dir());
+    let prefix = format!("{key}=");
+    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.starts_with(&prefix))
+        .map(str::to_owned)
+        .collect();
+    lines.push(format!("{prefix}{value}"));
+    let _ = std::fs::create_dir_all(settings_dir());
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
 }
 
 /// Reports a fatal error the way native apps do, with an alert.

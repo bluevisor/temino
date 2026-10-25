@@ -54,6 +54,8 @@ pub struct Ctx {
     pub device_name: String,
     pub blink_epoch: Instant,
     pub toast: Option<(String, Instant)>,
+    /// The shell new panes start (Settings ▸ Shell).
+    pub shell: String,
 }
 
 impl Ctx {
@@ -128,6 +130,9 @@ pub struct Pane {
     content_height: f32,
     /// Fractions of a wheel line not yet sent to a full-screen program.
     wheel_rest: f32,
+    /// A command to run once the shell is at its prompt, then its block.
+    queued: Option<String>,
+    queued_block: Option<u64>,
 }
 
 impl Pane {
@@ -139,7 +144,9 @@ impl Pane {
         }
         session.set_cell_size(ctx.text.cell.width, ctx.text.cell.height);
         let credits = Credits::new();
-        session.start(id, ctx.sender.clone(), credits.clone()).map_err(|e| format!("starting the shell: {e}"))?;
+        session
+            .start(id, &ctx.shell, ctx.sender.clone(), credits.clone())
+            .map_err(|e| format!("starting the shell: {e}"))?;
         Ok(Pane {
             id,
             session,
@@ -158,6 +165,8 @@ impl Pane {
             reflow_at: None,
             content_height: 0.0,
             wheel_rest: 0.0,
+            queued: None,
+            queued_block: None,
         })
     }
 
@@ -167,6 +176,30 @@ impl Pane {
         for notice in notices {
             self.notice(ctx, notice);
         }
+        if self.session.phase == Phase::Ready {
+            if let Some(command) = self.queued.take() {
+                self.session.submit(&command);
+                self.queued_block = self.session.blocks.last().map(|block| block.id);
+                self.pin_to_bottom();
+            }
+        }
+    }
+
+    /// Runs `command` as if typed, as soon as the shell is at its prompt.
+    pub fn run_when_ready(&mut self, command: String) {
+        self.queued = Some(command);
+    }
+
+    /// The exit status of the `run_when_ready` command, once it finished.
+    pub fn take_queued_exit(&mut self) -> Option<i32> {
+        let id = self.queued_block?;
+        let block = self.session.blocks.iter().find(|block| block.id == id);
+        if block.is_some_and(|block| block.running()) {
+            return None;
+        }
+        self.queued_block = None;
+        // Cleared away before we looked: its status is gone.
+        Some(block.map_or(-1, |block| block.exit.unwrap_or(0)))
     }
 
     fn notice(&mut self, ctx: &mut Ctx, notice: Notice) {
@@ -361,7 +394,7 @@ impl Pane {
         self.session = Session::new(grid_size(self.rect, &ctx.text));
         self.session.set_cell_size(ctx.text.cell.width, ctx.text.cell.height);
         self.credits = Credits::new();
-        if let Err(error) = self.session.start(self.id, ctx.sender.clone(), self.credits.clone()) {
+        if let Err(error) = self.session.start(self.id, &ctx.shell, ctx.sender.clone(), self.credits.clone()) {
             ctx.show_toast(&format!("Couldn't start the shell: {error}"));
         }
         self.selection = None;

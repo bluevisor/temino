@@ -12,6 +12,7 @@ use crate::keys::Named;
 use crate::pane::{Ctx, Pane};
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
+use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{Color, Theme, BACKGROUNDS};
 use crate::Msg;
@@ -34,6 +35,13 @@ const GAP: f32 = 1.0;
 /// How far from a divider a press still grabs it.
 const GRAB: f32 = 4.0;
 const MIN_PANE: f32 = 120.0;
+/// How far a press on a tab moves before it becomes a drag.
+const DRAG_SLOP: f32 = 4.0;
+const MENU_WIDTH: f32 = 200.0;
+const MENU_ROW: f32 = 26.0;
+
+/// The colors a tab can be marked with, from its menu.
+const TAB_COLORS: [u32; 6] = [0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Axis {
@@ -169,6 +177,43 @@ struct Tab {
     focus: u64,
     /// The focused pane fills the tab (Command+Enter).
     zoomed: bool,
+    /// Set from the tab's menu; otherwise the tab shows its pane's title.
+    name: Option<String>,
+    /// An entry of TAB_COLORS.
+    color: Option<usize>,
+}
+
+/// What a row of the tab menu does.
+#[derive(Clone, Copy)]
+enum MenuAction {
+    Rename,
+    Color(Option<usize>),
+    Close,
+    CloseOthers,
+}
+
+/// A tab's menu, open at a point.
+struct TabMenu {
+    tab: usize,
+    x: f32,
+    y: f32,
+}
+
+/// A tab being renamed in place.
+struct Rename {
+    tab: usize,
+    name: String,
+    /// The whole name is selected: typing replaces it.
+    selected: bool,
+}
+
+/// How a tab is drawn in the tab list.
+struct TabView {
+    title: String,
+    panes: usize,
+    color: Option<Color>,
+    /// The name being typed, and whether it is all selected, while renaming.
+    editing: Option<(String, bool)>,
 }
 
 enum Pointer {
@@ -177,6 +222,13 @@ enum Pointer {
     Pane(u64),
     /// Resizing the split at this path.
     Divider(Divider),
+    /// Pressed on a tab: a click, or a drag that moves it in the list.
+    Tab {
+        index: usize,
+        x: f32,
+        y: f32,
+        dragging: bool,
+    },
 }
 
 pub struct App {
@@ -206,7 +258,16 @@ pub struct App {
     tab_hits: Vec<(Rect, usize)>,
     close_hits: Vec<(Rect, usize)>,
     new_tab_hit: Rect,
+    more_hits: Vec<(Rect, usize)>,
+    menu_hits: Vec<(Rect, MenuAction)>,
+    menu_rect: Rect,
     dividers: Vec<Divider>,
+    tab_menu: Option<TabMenu>,
+    renaming: Option<Rename>,
+    hover_tab: Option<usize>,
+    mouse: (f32, f32),
+    /// The pane installing a shell from Settings ▸ Shell, and which.
+    installing: Option<(u64, shells::Kind)>,
 }
 
 pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32) {
@@ -327,28 +388,10 @@ fn user_host() -> String {
     format!("{user}@{host}")
 }
 
-/// `background=<name>` in ~/config/settings/Temino/settings, as an index
-/// into BACKGROUNDS (the first when unset or unknown).
+/// `background=<name>` in the settings file, as an index into BACKGROUNDS
+/// (the first when unset or unknown).
 fn load_background() -> usize {
-    let settings = std::fs::read_to_string(format!("{}/settings", crate::settings_dir())).unwrap_or_default();
-    settings
-        .lines()
-        .find_map(|line| line.strip_prefix("background="))
-        .and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name.trim()))
-        .unwrap_or(0)
-}
-
-fn save_background(name: &str) {
-    let path = format!("{}/settings", crate::settings_dir());
-    let mut lines: Vec<String> = std::fs::read_to_string(&path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| !line.starts_with("background="))
-        .map(str::to_owned)
-        .collect();
-    lines.push(format!("background={name}"));
-    let _ = std::fs::create_dir_all(crate::settings_dir());
-    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+    crate::setting("background").and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name)).unwrap_or(0)
 }
 
 impl App {
@@ -360,6 +403,9 @@ impl App {
         let theme = Theme::dark().with_background(BACKGROUNDS[background].1);
         platform::set_background(theme.background.to_rgb8());
         platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), background);
+        let shell = shells::default_shell();
+        let (shell_names, selected) = shells::menu(&shell);
+        platform::set_shell_menu(&shell_names, selected);
         let ctx = Ctx {
             text,
             theme,
@@ -370,6 +416,7 @@ impl App {
             device_name: gpu.device_name.clone(),
             blink_epoch: Instant::now(),
             toast: None,
+            shell,
         };
         let mut app = App {
             gpu,
@@ -397,7 +444,15 @@ impl App {
             tab_hits: Vec::new(),
             close_hits: Vec::new(),
             new_tab_hit: Rect::default(),
+            more_hits: Vec::new(),
+            menu_hits: Vec::new(),
+            menu_rect: Rect::default(),
             dividers: Vec::new(),
+            tab_menu: None,
+            renaming: None,
+            hover_tab: None,
+            mouse: (0.0, 0.0),
+            installing: None,
         };
         app.new_tab()?;
         crate::trace("app: shell started");
@@ -428,7 +483,7 @@ impl App {
 
     fn new_tab(&mut self) -> Result<(), String> {
         let id = self.make_pane()?;
-        self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoomed: false });
+        self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoomed: false, name: None, color: None });
         self.switch_tab(self.tabs.len() - 1);
         Ok(())
     }
@@ -456,6 +511,8 @@ impl App {
         let tab = &mut self.tabs[tab_index];
         if !tab.root.remove(id) {
             self.tabs.remove(tab_index);
+            self.tab_menu = None;
+            self.renaming = None;
             if self.tabs.is_empty() {
                 self.quit();
                 return;
@@ -630,6 +687,7 @@ impl App {
                 if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
                     pane.feed(ctx, &bytes);
                 }
+                self.check_install(id);
                 self.dirty = true;
             }
             Msg::ShellExited(id, code) => {
@@ -727,6 +785,7 @@ impl App {
             }
             UiEvent::Close => self.quit(),
             UiEvent::Background(index) => self.set_background(index),
+            UiEvent::Shell(index) => self.set_shell(index),
             UiEvent::Wheel { dy, x, y, .. } => {
                 if let Some((id, rect)) = self.pane_at(x, y) {
                     let Self { panes, ctx, .. } = self;
@@ -745,8 +804,66 @@ impl App {
         let Some(&(name, rgb)) = BACKGROUNDS.get(index) else { return };
         self.ctx.theme = Theme::dark().with_background(rgb);
         platform::set_background(self.ctx.theme.background.to_rgb8());
-        save_background(name);
+        platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), index);
+        crate::save_setting("background", name);
         self.dirty = true;
+    }
+
+    /// Settings ▸ Shell: new panes start this shell; a missing one is
+    /// installed first, in a new tab, and picked once that succeeds.
+    fn set_shell(&mut self, index: usize) {
+        let Some(&kind) = KINDS.get(index) else { return };
+        if let Some(path) = shells::find(kind) {
+            self.use_shell(path);
+            return;
+        }
+        match shells::install_command(kind) {
+            Ok(command) => match self.new_tab() {
+                Ok(()) => {
+                    if let Some(id) = self.focused_id() {
+                        if let Some(pane) = self.pane(id) {
+                            pane.run_when_ready(command);
+                        }
+                        self.installing = Some((id, kind));
+                    }
+                }
+                Err(error) => self.ctx.show_toast(&error),
+            },
+            Err(why) => self.ctx.show_toast(&why),
+        }
+        self.refresh_shell_menu();
+    }
+
+    fn use_shell(&mut self, path: String) {
+        let Some(kind) = shells::Kind::of_path(&path) else { return };
+        crate::save_setting("shell", kind.name());
+        self.ctx.shell = path;
+        self.refresh_shell_menu();
+        self.ctx.show_toast(&format!("New tabs and panes open {}", kind.name()));
+        self.dirty = true;
+    }
+
+    fn refresh_shell_menu(&self) {
+        let (names, selected) = shells::menu(&self.ctx.shell);
+        platform::set_shell_menu(&names, selected);
+    }
+
+    /// After a Settings ▸ Shell install command finishes: use the shell if
+    /// it is there now.
+    fn check_install(&mut self, id: u64) {
+        let Some((pane_id, kind)) = self.installing else { return };
+        if pane_id != id {
+            return;
+        }
+        let Some(code) = self.pane(id).and_then(|pane| pane.take_queued_exit()) else { return };
+        self.installing = None;
+        match shells::find(kind) {
+            Some(path) => self.use_shell(path),
+            None => {
+                self.refresh_shell_menu();
+                self.ctx.show_toast(&format!("Installing {} failed (status {code})", kind.name()));
+            }
+        }
     }
 
     fn change_font_size(&mut self, size: f32) {
@@ -763,6 +880,12 @@ impl App {
 
     /// Window shortcuts (tabs, splits, font size); the rest go to the pane.
     fn key(&mut self, key: KeyEvent) {
+        if self.tab_menu.take().is_some() && key.named == Some(Named::Escape) {
+            return;
+        }
+        if self.rename_key(&key) {
+            return;
+        }
         let named = key.named;
         let several_tabs = self.tabs.len() > 1;
         if key.ctrl() && !key.cmd() {
@@ -906,19 +1029,148 @@ impl App {
         }
     }
 
+    /// Moves tab `from` to position `to` in the list; the active tab stays active.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = if self.active == from {
+            to
+        } else if from < self.active && self.active <= to {
+            self.active - 1
+        } else if to <= self.active && self.active < from {
+            self.active + 1
+        } else {
+            self.active
+        };
+    }
+
+    fn start_rename(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let name = tab.name.clone().unwrap_or_else(|| self.tab_title(index));
+        self.renaming = Some(Rename { tab: index, name, selected: true });
+    }
+
+    /// Ends renaming, keeping the name typed; an empty name goes back to the
+    /// pane's title.
+    fn finish_rename(&mut self) {
+        let Some(rename) = self.renaming.take() else { return };
+        if let Some(tab) = self.tabs.get_mut(rename.tab) {
+            let name = rename.name.trim();
+            tab.name = (!name.is_empty()).then(|| name.to_owned());
+        }
+    }
+
+    /// A key while renaming a tab; false lets it through.
+    fn rename_key(&mut self, key: &KeyEvent) -> bool {
+        let Some(rename) = self.renaming.as_mut() else { return false };
+        if key.cmd() {
+            if key.base_char() == Some('a') {
+                rename.selected = true;
+                return true;
+            }
+            self.finish_rename();
+            return false;
+        }
+        match key.named {
+            Some(Named::Enter) => self.finish_rename(),
+            Some(Named::Escape) => self.renaming = None,
+            Some(Named::Backspace | Named::Delete) if rename.selected => rename.name.clear(),
+            Some(Named::Backspace) => {
+                rename.name.pop();
+            }
+            Some(_) => {}
+            None if !key.ctrl() => {
+                let typed: String = String::from_utf8_lossy(&key.bytes).chars().filter(|c| !c.is_control()).collect();
+                if typed.is_empty() {
+                    return true;
+                }
+                if rename.selected {
+                    rename.name.clear();
+                }
+                rename.name.push_str(&typed);
+            }
+            None => {}
+        }
+        if let Some(rename) = self.renaming.as_mut() {
+            rename.selected = false;
+        }
+        true
+    }
+
+    fn open_tab_menu(&mut self, tab: usize, x: f32, y: f32) {
+        self.finish_rename();
+        self.switch_tab(tab);
+        self.tab_menu = Some(TabMenu { tab, x, y });
+    }
+
+    fn menu_action(&mut self, tab: usize, action: MenuAction) {
+        self.tab_menu = None;
+        match action {
+            MenuAction::Rename => self.start_rename(tab),
+            MenuAction::Color(color) => {
+                if let Some(tab) = self.tabs.get_mut(tab) {
+                    tab.color = color;
+                }
+            }
+            MenuAction::Close => self.close_tab(tab),
+            MenuAction::CloseOthers => {
+                for index in (0..self.tabs.len()).rev().filter(|&i| i != tab) {
+                    self.close_tab(index);
+                }
+            }
+        }
+    }
+
+    /// The tab whose slot in the list is under the pointer, along the list.
+    fn tab_slot_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.tab_hits
+            .iter()
+            .find(|(r, _)| match self.strip {
+                TabStrip::Left => y >= r.y && y < r.bottom() + 4.0,
+                TabStrip::Top => x >= r.x && x < r.right() + 4.0,
+            })
+            .map(|&(_, index)| index)
+    }
+
     fn pane_at(&self, x: f32, y: f32) -> Option<(u64, Rect)> {
         self.visible_panes().into_iter().find(|(_, rect)| rect.contains(x, y))
     }
 
     fn mouse_down(&mut self, x: f32, y: f32, pressed: i32, clicks: i32, mods: u32) {
+        if let Some(menu) = self.tab_menu.take() {
+            // A click anywhere else only closes the menu.
+            if let Some(&(_, action)) = self.menu_hits.iter().find(|(r, _)| r.contains(x, y)) {
+                self.menu_action(menu.tab, action);
+            } else if self.menu_rect.contains(x, y) {
+                self.tab_menu = Some(menu);
+            }
+            return;
+        }
+        let on_renamed = self
+            .renaming
+            .as_ref()
+            .is_some_and(|rename| self.tab_hits.iter().any(|(r, i)| *i == rename.tab && r.contains(x, y)));
+        if !on_renamed {
+            self.finish_rename();
+        }
         if self.tab_area().contains(x, y) {
+            // Control+click is the secondary click on macOS.
+            let secondary =
+                pressed & buttons::SECONDARY != 0 || (cfg!(target_os = "macos") && mods & platform::mods::CONTROL != 0);
             if let Some(&(_, index)) = self.close_hits.iter().find(|(r, _)| r.contains(x, y)) {
                 self.close_tab(index);
+            } else if let Some(&(r, index)) = self.more_hits.iter().find(|(r, _)| r.contains(x, y)) {
+                self.open_tab_menu(index, r.x, r.bottom() + 4.0);
             } else if let Some(&(_, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)) {
-                if pressed & buttons::TERTIARY != 0 {
+                if secondary {
+                    self.open_tab_menu(index, x, y);
+                } else if pressed & buttons::TERTIARY != 0 {
                     self.close_tab(index);
-                } else {
+                } else if clicks == 2 && !on_renamed {
+                    self.start_rename(index);
+                } else if !on_renamed {
                     self.switch_tab(index);
+                    self.pointer = Pointer::Tab { index, x, y, dragging: false };
                 }
             } else if self.new_tab_hit.contains(x, y) {
                 if let Err(error) = self.new_tab() {
@@ -943,6 +1195,25 @@ impl App {
     }
 
     fn mouse_moved(&mut self, x: f32, y: f32, pressed: i32) {
+        self.mouse = (x, y);
+        if let Pointer::Tab { index, x: x0, y: y0, dragging } = self.pointer {
+            if pressed == 0 {
+                self.pointer = Pointer::Idle;
+            } else {
+                let dragging = dragging || (x - x0).abs().max((y - y0).abs()) > DRAG_SLOP;
+                let mut index = index;
+                if dragging {
+                    if let Some(to) = self.tab_slot_at(x, y).filter(|&to| to != index) {
+                        self.move_tab(index, to);
+                        index = to;
+                    }
+                    self.set_cursor(Cursor::Arrow);
+                }
+                self.pointer = Pointer::Tab { index, x: x0, y: y0, dragging };
+                return;
+            }
+        }
+        self.hover_tab = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, index)| index);
         match &self.pointer {
             Pointer::Divider(divider) if pressed != 0 => {
                 let divider = divider.clone();
@@ -1032,6 +1303,7 @@ impl App {
             self.scene.set_layer(LAYER_CONTENT);
         }
         self.draw_tab_bar();
+        self.draw_tab_menu();
         self.draw_toast();
         crate::trace("render: scene built");
         match self.gpu.render(&self.scene, &mut self.ctx.text.atlas) {
@@ -1049,122 +1321,245 @@ impl App {
         }
     }
 
+    /// A tab's name, or its focused pane's title.
+    fn tab_title(&self, index: usize) -> String {
+        let tab = &self.tabs[index];
+        tab.name
+            .clone()
+            .unwrap_or_else(|| self.panes.iter().find(|p| p.id == tab.focus).map(Pane::title).unwrap_or_default())
+    }
+
     fn draw_tab_bar(&mut self) {
         self.tab_hits.clear();
         self.close_hits.clear();
+        self.more_hits.clear();
         self.new_tab_hit = Rect::default();
         if !self.tab_list_visible() {
             return;
         }
-        let width = self.width as f32;
-        // (title, number of panes) per tab.
-        let tabs: Vec<(String, usize)> = (0..self.tabs.len())
+        let tabs: Vec<TabView> = (0..self.tabs.len())
             .map(|index| {
-                let id = self.tabs[index].focus;
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
-                let title = self.panes.iter().find(|p| p.id == id).map(Pane::title).unwrap_or_default();
-                (title, leaves.len())
+                TabView {
+                    title: self.tab_title(index),
+                    panes: leaves.len(),
+                    color: self.tabs[index].color.map(|c| Color::hex(TAB_COLORS[c])),
+                    editing: self
+                        .renaming
+                        .as_ref()
+                        .filter(|rename| rename.tab == index)
+                        .map(|rename| (rename.name.clone(), rename.selected)),
+                }
             })
             .collect();
-        if self.strip == TabStrip::Left {
-            return self.draw_tab_sidebar(&tabs);
+        match self.strip {
+            TabStrip::Left => self.draw_tab_sidebar(&tabs),
+            TabStrip::Top => self.draw_tab_strip(&tabs),
         }
-        let titles: Vec<String> = tabs
-            .into_iter()
-            .map(|(title, panes)| if panes > 1 { format!("{title}  ·  {panes} panes") } else { title })
-            .collect();
-        let Self { scene, ctx, tab_hits, close_hits, new_tab_hit, active, .. } = self;
+    }
+
+    /// One tab's row: number, color dot, title (or the rename field), the
+    /// ⋯ menu button while hovered or active, an optional badge, and ×;
+    /// records the hit areas.
+    fn draw_tab(&mut self, index: usize, tab: &TabView, rect: Rect, badge: Option<String>) {
+        let current = index == self.active;
+        let hovered = self.hover_tab == Some(index);
+        // The sidebar marks colors with its bar; the strip with a dot.
+        let dot = tab.color.filter(|_| self.strip == TabStrip::Top);
+        let Self { scene, ctx, tab_hits, close_hits, more_hits, .. } = self;
         let Ctx { text, theme, .. } = ctx;
-        let bar = Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT);
-        scene.fill(bar, theme.surface.mix(theme.background, 0.5));
-        scene.fill(Rect::new(0.0, TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
-        let plus = 34.0;
-        let tab_width = ((width - 12.0 - plus) / titles.len() as f32).min(TAB_MAX_WIDTH);
         let ascent = text.ui_ascent(12.0);
-        for (index, title) in titles.iter().enumerate() {
-            let rect = Rect::new(6.0 + index as f32 * tab_width, 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
-            let current = index == *active;
-            if current {
-                scene.quad(Quad::new(rect, theme.raised).radius(6.0).border(1.0, theme.divider));
-            }
-            let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
-            let number = if index < 9 { format!("{}", index + 1) } else { String::new() };
-            let mut x = rect.x + 10.0;
-            if !number.is_empty() {
-                x += text.draw_text(scene, &number, x, baseline, UI, 11.0, theme.text_faint) + 8.0;
-            }
-            let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
-            scene.push_clip(Rect::new(x, rect.y, (close.x - 4.0 - x).max(0.0), rect.h));
-            let color = if current { theme.text } else { theme.text_dim };
-            text.draw_text(scene, title, x, baseline, UI, 12.0, color);
-            scene.pop_clip();
-            text.draw_text(scene, "×", close.x + 4.0, baseline, UI, 13.0, theme.text_faint);
-            tab_hits.push((rect, index));
-            close_hits.push((close, index));
+        let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
+        let mut x = rect.x + 12.0;
+        if index < 9 {
+            x += text.draw_text(scene, &format!("{}", index + 1), x, baseline, UI, 11.0, theme.text_faint) + 8.0;
         }
-        let px = 6.0 + titles.len() as f32 * tab_width;
+        if let Some(color) = dot {
+            scene.quad(Quad::new(Rect::new(x, rect.y + (rect.h - 8.0) / 2.0, 8.0, 8.0), color).radius(4.0));
+            x += 14.0;
+        }
+        let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
+        let mut right = close.x - 4.0;
+        if (hovered || current) && tab.editing.is_none() {
+            let more = Rect::new(close.x - 20.0, close.y, 18.0, 16.0);
+            for i in 0..3 {
+                let dot = Rect::new(more.x + 4.0 + i as f32 * 4.0, more.y + 7.0, 2.4, 2.4);
+                scene.quad(Quad::new(dot, theme.text_faint).radius(1.2));
+            }
+            more_hits.push((more, index));
+            right = more.x - 2.0;
+        }
+        if let Some(label) = badge {
+            // A small badge with the pane count.
+            let w = text.measure(&label, UI, 10.0) + 10.0;
+            let badge = Rect::new(right - w, rect.y + (rect.h - 16.0) / 2.0, w, 16.0);
+            scene.quad(Quad::new(badge, theme.divider).radius(8.0));
+            text.draw_text(scene, &label, badge.x + 5.0, badge.y + 12.0, UI, 10.0, theme.text_dim);
+            right = badge.x - 6.0;
+        }
+        if let Some((name, selected)) = &tab.editing {
+            let field = Rect::new(x - 4.0, rect.y + 4.0, (close.x - x).max(0.0), rect.h - 8.0);
+            scene.quad(Quad::new(field, theme.background).radius(4.0).border(1.0, theme.accent));
+            scene.push_clip(field.inset(2.0, 0.0));
+            let w = text.measure(name, UI, 12.0);
+            if *selected && !name.is_empty() {
+                scene.quad(
+                    Quad::new(Rect::new(x - 1.0, field.y + 3.0, w + 2.0, field.h - 6.0), theme.selection).radius(2.0),
+                );
+            }
+            text.draw_text(scene, name, x, baseline, UI, 12.0, theme.text);
+            scene.fill(Rect::new(x + w + 1.0, field.y + 4.0, 1.0, field.h - 8.0), theme.cursor);
+            scene.pop_clip();
+        } else {
+            scene.push_clip(Rect::new(x, rect.y, (right - x).max(0.0), rect.h));
+            let color = if current { theme.text } else { theme.text_dim };
+            text.draw_text(scene, &tab.title, x, baseline, UI, 12.0, color);
+            scene.pop_clip();
+        }
+        text.draw_text(scene, "×", close.x + 4.0, baseline, UI, 13.0, theme.text_faint);
+        tab_hits.push((rect, index));
+        close_hits.push((close, index));
+    }
+
+    /// The tabs as a strip across the top.
+    fn draw_tab_strip(&mut self, tabs: &[TabView]) {
+        let width = self.width as f32;
+        let theme = &self.ctx.theme;
+        self.scene.fill(Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), theme.surface.mix(theme.background, 0.5));
+        self.scene.fill(Rect::new(0.0, TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
+        let plus = 34.0;
+        let tab_width = ((width - 12.0 - plus) / tabs.len() as f32).min(TAB_MAX_WIDTH);
+        for (index, tab) in tabs.iter().enumerate() {
+            let rect = Rect::new(6.0 + index as f32 * tab_width, 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
+            if index == self.active {
+                let theme = &self.ctx.theme;
+                self.scene.quad(Quad::new(rect, theme.raised).radius(6.0).border(1.0, theme.divider));
+                if let Some(color) = tab.color {
+                    let line = Rect::new(rect.x + 8.0, rect.bottom() - 2.0, rect.w - 16.0, 2.0);
+                    self.scene.quad(Quad::new(line, color).radius(1.0));
+                }
+            }
+            let badge = (tab.panes > 1).then(|| format!("{}", tab.panes));
+            self.draw_tab(index, tab, rect, badge);
+        }
+        let Self { scene, ctx, new_tab_hit, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        let px = 6.0 + tabs.len() as f32 * tab_width;
         let plus_rect = Rect::new(px, 5.0, 26.0, TAB_BAR_HEIGHT - 9.0);
-        text.draw_text(
-            scene,
-            "+",
-            px + 8.0,
-            (plus_rect.y + (plus_rect.h + ascent) / 2.0).round(),
-            UI,
-            15.0,
-            theme.text_dim,
-        );
+        let ascent = text.ui_ascent(12.0);
+        let baseline = (plus_rect.y + (plus_rect.h + ascent) / 2.0).round();
+        text.draw_text(scene, "+", px + 8.0, baseline, UI, 15.0, theme.text_dim);
         *new_tab_hit = plus_rect;
     }
 
     /// The tabs as a list down the left side.
-    fn draw_tab_sidebar(&mut self, tabs: &[(String, usize)]) {
+    fn draw_tab_sidebar(&mut self, tabs: &[TabView]) {
         let area = self.tab_area();
-        let Self { scene, ctx, tab_hits, close_hits, new_tab_hit, active, .. } = self;
-        let Ctx { text, theme, .. } = ctx;
-        scene.fill(area, theme.surface.mix(theme.background, 0.5));
-        scene.fill(Rect::new(area.right() - 1.0, 0.0, 1.0, area.h), theme.divider);
-        let ascent = text.ui_ascent(12.0);
-        scene.push_clip(Rect::new(0.0, 0.0, area.w - 1.0, area.h));
+        let theme = &self.ctx.theme;
+        self.scene.fill(area, theme.surface.mix(theme.background, 0.5));
+        self.scene.fill(Rect::new(area.right() - 1.0, 0.0, 1.0, area.h), theme.divider);
+        self.scene.push_clip(Rect::new(0.0, 0.0, area.w - 1.0, area.h));
+        let dragged = match self.pointer {
+            Pointer::Tab { index, dragging: true, .. } => Some(index),
+            _ => None,
+        };
         let mut y = 8.0;
-        for (index, (title, panes)) in tabs.iter().enumerate() {
+        for (index, tab) in tabs.iter().enumerate() {
             let rect = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
-            let current = index == *active;
-            if current {
-                scene.quad(Quad::new(rect, theme.raised).radius(6.0).border(1.0, theme.divider));
-                scene.quad(Quad::new(Rect::new(rect.x, rect.y + 7.0, 3.0, rect.h - 14.0), theme.accent).radius(1.5));
+            let theme = &self.ctx.theme;
+            if index == self.active {
+                let fill = if dragged == Some(index) { theme.raised.mix(theme.text, 0.06) } else { theme.raised };
+                self.scene.quad(Quad::new(rect, fill).radius(6.0).border(1.0, theme.divider));
             }
-            let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
-            let mut x = rect.x + 12.0;
-            if index < 9 {
-                x += text.draw_text(scene, &format!("{}", index + 1), x, baseline, UI, 11.0, theme.text_faint) + 8.0;
+            if index == self.active || tab.color.is_some() {
+                let bar = Rect::new(rect.x, rect.y + 7.0, 3.0, rect.h - 14.0);
+                self.scene.quad(Quad::new(bar, tab.color.unwrap_or(theme.accent)).radius(1.5));
             }
-            let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
-            let mut right = close.x - 4.0;
-            if *panes > 1 {
-                // A small badge with the pane count.
-                let label = format!("{panes}");
-                let w = text.measure(&label, UI, 10.0) + 10.0;
-                let badge = Rect::new(right - w, rect.y + (rect.h - 16.0) / 2.0, w, 16.0);
-                scene.quad(Quad::new(badge, theme.divider).radius(8.0));
-                text.draw_text(scene, &label, badge.x + 5.0, badge.y + 12.0, UI, 10.0, theme.text_dim);
-                right = badge.x - 6.0;
-            }
-            scene.push_clip(Rect::new(x, rect.y, (right - x).max(0.0), rect.h));
-            let color = if current { theme.text } else { theme.text_dim };
-            text.draw_text(scene, title, x, baseline, UI, 12.0, color);
-            scene.pop_clip();
-            text.draw_text(scene, "×", close.x + 4.0, baseline, UI, 13.0, theme.text_faint);
-            tab_hits.push((rect, index));
-            close_hits.push((close, index));
+            let badge = (tab.panes > 1).then(|| format!("{}", tab.panes));
+            self.draw_tab(index, tab, rect, badge);
             y += SIDEBAR_ROW + 4.0;
         }
+        let Self { scene, ctx, new_tab_hit, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
         let plus = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
+        let ascent = text.ui_ascent(12.0);
         let baseline = (plus.y + (plus.h + ascent * 0.72) / 2.0).round();
         let label = format!("+  New tab   {}+T", platform::COMMAND_NAME);
         text.draw_text(scene, &label, plus.x + 12.0, baseline, UI, 12.0, theme.text_faint);
         *new_tab_hit = plus;
         scene.pop_clip();
+    }
+
+    /// The open tab menu: Rename, a row of colors, Close.
+    fn draw_tab_menu(&mut self) {
+        self.menu_hits.clear();
+        self.menu_rect = Rect::default();
+        let Some(menu) = &self.tab_menu else { return };
+        let Some(tab) = self.tabs.get(menu.tab) else { return };
+        let selected = tab.color;
+        let several = self.tabs.len() > 1;
+        let rows = if several { 4.0 } else { 3.0 };
+        let h = rows * MENU_ROW + 12.0 + 9.0;
+        let x = menu.x.min(self.width as f32 - MENU_WIDTH - 8.0).max(4.0);
+        let y = menu.y.min(self.height as f32 - h - 8.0).max(4.0);
+        let rect = Rect::new(x, y, MENU_WIDTH, h);
+        let (mx, my) = self.mouse;
+        let Self { scene, ctx, menu_hits, menu_rect, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        scene.set_layer(LAYER_OVERLAY);
+        scene.shadow(rect, Color::hex(0x000000).alpha(0.5), 8.0, 10.0);
+        scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
+        let ascent = text.ui_ascent(12.0);
+        let mut row_y = y + 6.0;
+        let mut item = |scene: &mut Scene, label: &str, action: MenuAction, row_y: f32| {
+            let row = Rect::new(x + 5.0, row_y, MENU_WIDTH - 10.0, MENU_ROW);
+            if row.contains(mx, my) {
+                scene.quad(Quad::new(row, theme.accent.alpha(0.22)).radius(5.0));
+            }
+            let baseline = (row.y + (row.h + ascent * 0.72) / 2.0).round();
+            text.draw_text(scene, label, row.x + 9.0, baseline, UI, 12.0, theme.text);
+            menu_hits.push((row, action));
+        };
+        item(scene, "Rename Tab…", MenuAction::Rename, row_y);
+        row_y += MENU_ROW;
+        // The colors: none, then each of TAB_COLORS.
+        let size = 16.0;
+        let step = (MENU_WIDTH - 28.0 - size) / TAB_COLORS.len() as f32;
+        let mut swatches = Vec::new();
+        for choice in std::iter::once(None).chain((0..TAB_COLORS.len()).map(Some)) {
+            let i = choice.map_or(0.0, |c| c as f32 + 1.0);
+            let swatch = Rect::new(x + 14.0 + i * step, row_y + (MENU_ROW - size) / 2.0, size, size);
+            let hit = swatch.inset(-3.0, -3.0);
+            let ring = if selected == choice {
+                theme.text
+            } else if hit.contains(mx, my) {
+                theme.text_dim
+            } else {
+                theme.divider
+            };
+            match choice {
+                Some(c) => {
+                    scene.quad(Quad::new(swatch, Color::hex(TAB_COLORS[c])).radius(size / 2.0).border(1.5, ring))
+                }
+                None => {
+                    scene.quad(Quad::new(swatch, theme.background).radius(size / 2.0).border(1.5, ring));
+                    let slash = Rect::new(swatch.x + size / 2.0 - 0.75, swatch.y + 3.0, 1.5, size - 6.0);
+                    scene.fill(slash, theme.text_faint);
+                }
+            }
+            swatches.push((hit, MenuAction::Color(choice)));
+        }
+        row_y += MENU_ROW + 4.0;
+        scene.fill(Rect::new(x + 10.0, row_y, MENU_WIDTH - 20.0, 1.0), theme.divider);
+        row_y += 5.0;
+        item(scene, "Close Tab", MenuAction::Close, row_y);
+        if several {
+            item(scene, "Close Other Tabs", MenuAction::CloseOthers, row_y + MENU_ROW);
+        }
+        menu_hits.extend(swatches);
+        scene.set_layer(LAYER_CONTENT);
+        *menu_rect = rect;
     }
 
     fn draw_toast(&mut self) {

@@ -205,8 +205,9 @@ temino_metal_render(void* handle, uint32_t width, uint32_t height,
 
 // MARK: Menu bar
 
-// Rust lists the items; picking one calls back with its tag. Tags at or
-// above kBackgroundTag pick a background.
+// Rust lists the items; picking one calls back with its tag. An item
+// tagged kChoiceTag or a multiple of it holds a submenu of choices, whose
+// entries are tagged from there up.
 typedef struct {
 	const char* menu;   // the top-level menu it goes in
 	const char* label;  // NULL for a separator
@@ -217,9 +218,9 @@ typedef struct {
 
 typedef void (*TeminoMenuCallback)(int32_t tag);
 
-static const int32_t kBackgroundTag = 1000;
+static const int32_t kChoiceTag = 1000;
 static TeminoMenuCallback sMenuCallback;
-static NSMenu* sBackgroundMenu;
+static NSMutableDictionary<NSNumber*, NSMenu*>* sChoiceMenus;
 
 
 @interface TeminoMenuTarget : NSObject
@@ -267,6 +268,7 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 	@autoreleasepool {
 		sMenuCallback = callback;
 		sMenuTarget = [TeminoMenuTarget new];
+		sChoiceMenus = [NSMutableDictionary new];
 		// Temino has its own tabs; AppKit's would add a second set of items.
 		NSWindow.allowsAutomaticWindowTabbing = NO;
 		NSString* name = @"Temino";
@@ -294,11 +296,11 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 				[menu addItem:[NSMenuItem separatorItem]];
 				continue;
 			}
-			if (items[i].tag == kBackgroundTag) {
-				// The submenu the backgrounds go in.
+			if (items[i].tag >= kChoiceTag) {
+				// The submenu the choices go in.
 				NSMenuItem* holder = [menu addItemWithTitle:@(items[i].label) action:nil keyEquivalent:@""];
-				sBackgroundMenu = [[NSMenu alloc] initWithTitle:@(items[i].label)];
-				holder.submenu = sBackgroundMenu;
+				holder.submenu = [[NSMenu alloc] initWithTitle:@(items[i].label)];
+				sChoiceMenus[@(items[i].tag)] = holder.submenu;
 				continue;
 			}
 			NSMenuItem* item = add_item(menu, @(items[i].label), @selector(pick:),
@@ -321,29 +323,22 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 }
 
 
-// Rust names the backgrounds and which is picked; the mark follows picks.
+// Rust names the choices of the submenu tagged `tag` and which is picked
+// (the app refills the menu after each pick).
 void
-temino_menu_backgrounds(const char* const* names, size_t count, size_t selected)
+temino_menu_choices(int32_t tag, const char* const* names, size_t count, size_t selected)
 {
 	@autoreleasepool {
-		if (sBackgroundMenu == nil)
+		NSMenu* menu = sChoiceMenus[@(tag)];
+		if (menu == nil)
 			return;
-		[sBackgroundMenu removeAllItems];
+		[menu removeAllItems];
 		for (size_t i = 0; i < count; i++) {
-			NSMenuItem* item = [sBackgroundMenu addItemWithTitle:@(names[i])
+			NSMenuItem* item = [menu addItemWithTitle:@(names[i])
 				action:@selector(pick:) keyEquivalent:@""];
 			item.target = sMenuTarget;
-			item.tag = kBackgroundTag + (NSInteger)i;
+			item.tag = tag + (NSInteger)i;
 			item.state = i == selected ? NSControlStateValueOn : NSControlStateValueOff;
 		}
 	}
-}
-
-
-void
-temino_menu_mark_background(size_t selected)
-{
-	for (NSMenuItem* item in sBackgroundMenu.itemArray)
-		item.state = item.tag == kBackgroundTag + (NSInteger)selected
-			? NSControlStateValueOn : NSControlStateValueOff;
 }

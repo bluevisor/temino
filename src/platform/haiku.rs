@@ -36,6 +36,7 @@ extern "C" {
     fn temino_quit();
     fn temino_set_background(r: u8, g: u8, b: u8);
     fn temino_set_background_menu(names: *const *const c_char, count: i32, selected: i32);
+    fn temino_set_shell_menu(names: *const *const c_char, count: i32, selected: i32);
     fn temino_present(pixels: *const u8, width: i32, height: i32, stride: i32);
     fn temino_set_title(title: *const c_char);
     fn temino_set_cursor(kind: i32);
@@ -148,6 +149,7 @@ extern "C" fn on_event(raw: *const RawEvent, context: *mut c_void) {
         7 => UiEvent::Focus(raw.buttons != 0),
         8 => UiEvent::Close,
         10 => UiEvent::Background(raw.key.max(0) as usize),
+        11 => UiEvent::Shell(raw.key.max(0) as usize),
         _ => return,
     };
     let _ = sender.send(Msg::Ui(event));
@@ -182,6 +184,13 @@ pub fn set_background_menu(names: &[&str], selected: usize) {
     let names: Vec<CString> = names.iter().map(|n| CString::new(*n).unwrap()).collect();
     let pointers: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
     unsafe { temino_set_background_menu(pointers.as_ptr(), pointers.len() as i32, selected as i32) }
+}
+
+/// Fills Settings ▸ Shell with these names, `selected` marked.
+pub fn set_shell_menu(names: &[String], selected: usize) {
+    let names: Vec<CString> = names.iter().map(|n| CString::new(n.as_str()).unwrap_or_default()).collect();
+    let pointers: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
+    unsafe { temino_set_shell_menu(pointers.as_ptr(), pointers.len() as i32, selected as i32) }
 }
 
 /// Copies a BGRA frame into the window's back bitmap and shows it.

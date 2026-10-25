@@ -108,6 +108,8 @@ pub enum UiEvent {
     Close,
     /// Settings ▸ Background picked this entry of `theme::BACKGROUNDS`.
     Background(usize),
+    /// Settings ▸ Shell picked this entry of `shells::KINDS`.
+    Shell(usize),
 }
 
 /// Mouse button bits, as Haiku numbers them.
