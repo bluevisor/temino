@@ -243,9 +243,14 @@ pub struct App {
     /// once there is a second tab. Hidden, tabs still switch by key.
     tab_list: Option<bool>,
     next_id: u64,
-    width: u32,
-    height: u32,
+    /// The window's size in logical pixels, and physical pixels per logical one.
+    window: (f32, f32),
     scale: f32,
+    /// Command+plus/minus: everything is drawn this much larger.
+    zoom: f32,
+    /// The window's size in zoomed pixels, which everything is laid out in.
+    width: f32,
+    height: f32,
     focused: bool,
     dirty: bool,
     title: String,
@@ -431,9 +436,11 @@ impl App {
             },
             tab_list: None,
             next_id: 1,
-            width,
-            height,
+            window: (width as f32, height as f32),
             scale: 1.0,
+            zoom: 1.0,
+            width: width as f32,
+            height: height as f32,
             focused: true,
             dirty: true,
             title: String::new(),
@@ -454,7 +461,8 @@ impl App {
             mouse: (0.0, 0.0),
             installing: None,
         };
-        app.new_tab()?;
+        app.set_zoom(crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(1.0), false);
+        app.restore_tabs()?;
         crate::trace("app: shell started");
         Ok(app)
     }
@@ -470,10 +478,13 @@ impl App {
     }
 
     /// A new pane, in the focused pane's directory.
-    fn make_pane(&mut self) -> Result<u64, String> {
+    /// A new pane, in `cwd` or else the focused pane's directory.
+    fn make_pane_in(&mut self, cwd: Option<String>) -> Result<u64, String> {
         let id = self.next_id;
         self.next_id += 1;
-        let cwd = self.focused_id().and_then(|f| self.panes.iter().find(|p| p.id == f)).map(|p| p.session.cwd.clone());
+        let cwd = cwd.or_else(|| {
+            self.focused_id().and_then(|f| self.panes.iter().find(|p| p.id == f)).map(|p| p.session.cwd.clone())
+        });
         let rect = self.content_rect();
         // Only the window's first pane greets with the banner.
         let pane = Pane::new(id, &mut self.ctx, rect, cwd, id == 1)?;
@@ -481,11 +492,66 @@ impl App {
         Ok(id)
     }
 
+    fn make_pane(&mut self) -> Result<u64, String> {
+        self.make_pane_in(None)
+    }
+
     fn new_tab(&mut self) -> Result<(), String> {
         let id = self.make_pane()?;
         self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoomed: false, name: None, color: None });
         self.switch_tab(self.tabs.len() - 1);
+        self.save_tabs();
         Ok(())
+    }
+
+    /// Reopens the tabs open at the last quit, each in its directory and
+    /// with its name and color; or one new tab.
+    fn restore_tabs(&mut self) -> Result<(), String> {
+        let saved = std::fs::read_to_string(tabs_path()).unwrap_or_default();
+        let mut active = 0;
+        for line in saved.lines() {
+            // active?, color, directory, name — separated by tabs.
+            let mut fields = line.splitn(4, '\t');
+            let (Some(current), Some(color), Some(cwd), name) = (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let cwd = Some(cwd.to_owned()).filter(|d| std::path::Path::new(d).is_dir());
+            let id = self.make_pane_in(cwd)?;
+            self.tabs.push(Tab {
+                root: Node::Leaf(id),
+                focus: id,
+                zoomed: false,
+                name: name.filter(|n| !n.is_empty()).map(str::to_owned),
+                color: color.parse().ok().filter(|&c: &usize| c < TAB_COLORS.len()),
+            });
+            if current == "*" {
+                active = self.tabs.len() - 1;
+            }
+        }
+        if self.tabs.is_empty() {
+            return self.new_tab();
+        }
+        self.switch_tab(active);
+        Ok(())
+    }
+
+    /// Writes the tabs down for `restore_tabs`.
+    fn save_tabs(&self) {
+        let lines: String = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let cwd = self.panes.iter().find(|p| p.id == tab.focus).map_or("", |p| p.session.cwd.as_str());
+                let current = if index == self.active { "*" } else { "" };
+                let color = tab.color.map(|c| c.to_string()).unwrap_or_default();
+                let name = tab.name.as_deref().unwrap_or("");
+                format!("{current}\t{color}\t{cwd}\t{name}\n")
+            })
+            .collect();
+        let _ = std::fs::create_dir_all(crate::settings_dir());
+        let _ = std::fs::write(tabs_path(), lines);
     }
 
     fn split(&mut self, axis: Axis) {
@@ -513,6 +579,9 @@ impl App {
             self.tabs.remove(tab_index);
             self.tab_menu = None;
             self.renaming = None;
+            if !self.tabs.is_empty() {
+                self.save_tabs();
+            }
             if self.tabs.is_empty() {
                 self.quit();
                 return;
@@ -626,13 +695,13 @@ impl App {
             return Rect::default();
         }
         match self.strip {
-            TabStrip::Left => Rect::new(0.0, 0.0, SIDEBAR_WIDTH.min(self.width as f32 / 2.0), self.height as f32),
-            TabStrip::Top => Rect::new(0.0, 0.0, self.width as f32, TAB_BAR_HEIGHT),
+            TabStrip::Left => Rect::new(0.0, 0.0, SIDEBAR_WIDTH.min(self.width / 2.0), self.height),
+            TabStrip::Top => Rect::new(0.0, 0.0, self.width, TAB_BAR_HEIGHT),
         }
     }
 
     fn content_rect(&self) -> Rect {
-        let (width, height) = (self.width as f32, self.height as f32);
+        let (width, height) = (self.width, self.height);
         let area = self.tab_area();
         match self.strip {
             TabStrip::Left => Rect::new(area.w, 0.0, (width - area.w).max(1.0), height),
@@ -746,6 +815,7 @@ impl App {
     }
 
     fn quit(&mut self) {
+        self.save_tabs();
         for pane in &mut self.panes {
             pane.hangup();
         }
@@ -763,16 +833,9 @@ impl App {
                 self.key(key);
             }
             UiEvent::Resize { width, height, scale } => {
-                self.width = width;
-                self.height = height;
-                if scale != self.scale {
-                    self.scale = scale;
-                    self.ctx.text.set_scale(scale);
-                    for pane in &mut self.panes {
-                        pane.cells_changed(&self.ctx.text);
-                    }
-                }
-                self.relayout();
+                self.window = (width as f32, height as f32);
+                self.scale = scale;
+                self.set_zoom(self.zoom, false);
             }
             UiEvent::Focus(focused) => {
                 self.focused = focused;
@@ -787,6 +850,7 @@ impl App {
             UiEvent::Background(index) => self.set_background(index),
             UiEvent::Shell(index) => self.set_shell(index),
             UiEvent::Wheel { dy, x, y, .. } => {
+                let (x, y) = (x / self.zoom, y / self.zoom);
                 if let Some((id, rect)) = self.pane_at(x, y) {
                     let Self { panes, ctx, .. } = self;
                     if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
@@ -794,9 +858,11 @@ impl App {
                     }
                 }
             }
-            UiEvent::MouseDown { x, y, buttons, clicks, mods } => self.mouse_down(x, y, buttons, clicks, mods),
-            UiEvent::MouseMoved { x, y, buttons } => self.mouse_moved(x, y, buttons),
-            UiEvent::MouseUp { x, y } => self.mouse_up(x, y),
+            UiEvent::MouseDown { x, y, buttons, clicks, mods } => {
+                self.mouse_down(x / self.zoom, y / self.zoom, buttons, clicks, mods)
+            }
+            UiEvent::MouseMoved { x, y, buttons } => self.mouse_moved(x / self.zoom, y / self.zoom, buttons),
+            UiEvent::MouseUp { x, y } => self.mouse_up(x / self.zoom, y / self.zoom),
         }
     }
 
@@ -866,16 +932,32 @@ impl App {
         }
     }
 
+    /// Zooms the whole window, text and chrome alike, in steps of one point
+    /// of the terminal font.
     fn change_font_size(&mut self, size: f32) {
-        let size = size.clamp(8.0, 32.0);
-        if size == self.ctx.text.cell.size {
-            return;
+        let size = size.round().clamp(8.0, 32.0);
+        self.set_zoom(size / DEFAULT_FONT_SIZE, true);
+    }
+
+    /// Lays everything out at `zoom`: a smaller logical window drawn at a
+    /// larger scale, so every size in the UI grows together.
+    fn set_zoom(&mut self, zoom: f32, announce: bool) {
+        let zoom = zoom.clamp(8.0 / DEFAULT_FONT_SIZE, 32.0 / DEFAULT_FONT_SIZE);
+        let changed = zoom != self.zoom;
+        self.zoom = zoom;
+        self.width = self.window.0 / zoom;
+        self.height = self.window.1 / zoom;
+        if self.ctx.text.scale != self.scale * zoom {
+            self.ctx.text.set_scale(self.scale * zoom);
+            for pane in &mut self.panes {
+                pane.cells_changed(&self.ctx.text);
+            }
         }
-        self.ctx.text.set_size(size);
-        for pane in &mut self.panes {
-            pane.cells_changed(&self.ctx.text);
+        self.relayout();
+        if changed && announce {
+            crate::save_setting("zoom", &format!("{zoom}"));
+            self.ctx.show_toast(&format!("Zoom {:.0}%", zoom * 100.0));
         }
-        self.ctx.show_toast(&format!("Font size {size:.0}"));
     }
 
     /// Window shortcuts (tabs, splits, font size); the rest go to the pane.
@@ -989,11 +1071,11 @@ impl App {
                     true
                 }
                 (_, Some('=' | '+')) => {
-                    self.change_font_size(self.ctx.text.cell.size + 1.0);
+                    self.change_font_size(self.zoom * DEFAULT_FONT_SIZE + 1.0);
                     true
                 }
                 (_, Some('-')) => {
-                    self.change_font_size(self.ctx.text.cell.size - 1.0);
+                    self.change_font_size(self.zoom * DEFAULT_FONT_SIZE - 1.0);
                     true
                 }
                 (_, Some('0')) => {
@@ -1058,6 +1140,7 @@ impl App {
             let name = rename.name.trim();
             tab.name = (!name.is_empty()).then(|| name.to_owned());
         }
+        self.save_tabs();
     }
 
     /// A key while renaming a tab; false lets it through.
@@ -1111,6 +1194,7 @@ impl App {
                 if let Some(tab) = self.tabs.get_mut(tab) {
                     tab.color = color;
                 }
+                self.save_tabs();
             }
             MenuAction::Close => self.close_tab(tab),
             MenuAction::CloseOthers => {
@@ -1261,7 +1345,11 @@ impl App {
     }
 
     fn mouse_up(&mut self, x: f32, y: f32) {
-        if let Pointer::Pane(id) = std::mem::replace(&mut self.pointer, Pointer::Idle) {
+        let pointer = std::mem::replace(&mut self.pointer, Pointer::Idle);
+        if let Pointer::Tab { dragging: true, .. } = pointer {
+            self.save_tabs();
+        }
+        if let Pointer::Pane(id) = pointer {
             let Self { panes, ctx, .. } = self;
             if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
                 let (ox, oy) = (pane.rect.x, pane.rect.y);
@@ -1275,8 +1363,8 @@ impl App {
     fn render(&mut self) {
         crate::trace("render: begin");
         self.dirty = false;
-        let (width, height) = (self.width as f32, self.height as f32);
-        self.scene.reset(width, height, self.scale, self.ctx.theme.background);
+        let (width, height) = (self.width, self.height);
+        self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.background);
         let focus = self.focused_id();
         let visible = self.visible_panes();
         let several = visible.len() > 1;
@@ -1424,7 +1512,7 @@ impl App {
 
     /// The tabs as a strip across the top.
     fn draw_tab_strip(&mut self, tabs: &[TabView]) {
-        let width = self.width as f32;
+        let width = self.width;
         let theme = &self.ctx.theme;
         self.scene.fill(Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), theme.surface.mix(theme.background, 0.5));
         self.scene.fill(Rect::new(0.0, TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
@@ -1501,8 +1589,8 @@ impl App {
         let several = self.tabs.len() > 1;
         let rows = if several { 4.0 } else { 3.0 };
         let h = rows * MENU_ROW + 12.0 + 9.0;
-        let x = menu.x.min(self.width as f32 - MENU_WIDTH - 8.0).max(4.0);
-        let y = menu.y.min(self.height as f32 - h - 8.0).max(4.0);
+        let x = menu.x.min(self.width - MENU_WIDTH - 8.0).max(4.0);
+        let y = menu.y.min(self.height - h - 8.0).max(4.0);
         let rect = Rect::new(x, y, MENU_WIDTH, h);
         let (mx, my) = self.mouse;
         let Self { scene, ctx, menu_hits, menu_rect, .. } = self;
@@ -1567,7 +1655,7 @@ impl App {
         let message = message.clone();
         let (right, bottom) = match self.focused_id().and_then(|id| self.panes.iter().find(|p| p.id == id)) {
             Some(pane) => (pane.rect.right(), pane.rect.y + pane.input_top()),
-            None => (self.width as f32, self.height as f32),
+            None => (self.width, self.height),
         };
         let Self { scene, ctx, .. } = self;
         let Ctx { text, theme, .. } = ctx;
@@ -1579,6 +1667,10 @@ impl App {
         text.draw_text(scene, &message, rect.x + 12.0, rect.y + 18.0, UI, 12.0, theme.text);
         scene.set_layer(LAYER_CONTENT);
     }
+}
+
+fn tabs_path() -> String {
+    format!("{}/tabs", crate::settings_dir())
 }
 
 /// TEMINO_CAPTURE: saves each frame, straight from the GPU readback, for
