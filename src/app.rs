@@ -13,7 +13,7 @@ use crate::pane::{Ctx, Pane};
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
-use crate::theme::{Color, Theme};
+use crate::theme::{Color, Theme, BACKGROUNDS};
 use crate::Msg;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
@@ -327,13 +327,39 @@ fn user_host() -> String {
     format!("{user}@{host}")
 }
 
+/// `background=<name>` in ~/config/settings/Temino/settings, as an index
+/// into BACKGROUNDS (the first when unset or unknown).
+fn load_background() -> usize {
+    let settings = std::fs::read_to_string(format!("{}/settings", crate::settings_dir())).unwrap_or_default();
+    settings
+        .lines()
+        .find_map(|line| line.strip_prefix("background="))
+        .and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name.trim()))
+        .unwrap_or(0)
+}
+
+fn save_background(name: &str) {
+    let path = format!("{}/settings", crate::settings_dir());
+    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.starts_with("background="))
+        .map(str::to_owned)
+        .collect();
+    lines.push(format!("background={name}"));
+    let _ = std::fs::create_dir_all(crate::settings_dir());
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
 impl App {
     fn new(sender: Sender<Msg>, width: u32, height: u32) -> Result<App, String> {
         let gpu = Gpu::new()?;
         let text = TextSystem::new(DEFAULT_FONT_SIZE);
         crate::trace("app: fonts ready");
-        let theme = Theme::dark();
+        let background = load_background();
+        let theme = Theme::dark().with_background(BACKGROUNDS[background].1);
         platform::set_background(theme.background.to_rgb8());
+        platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), background);
         let ctx = Ctx {
             text,
             theme,
@@ -700,6 +726,7 @@ impl App {
                 }
             }
             UiEvent::Close => self.quit(),
+            UiEvent::Background(index) => self.set_background(index),
             UiEvent::Wheel { dy, x, y, .. } => {
                 if let Some((id, rect)) = self.pane_at(x, y) {
                     let Self { panes, ctx, .. } = self;
@@ -712,6 +739,14 @@ impl App {
             UiEvent::MouseMoved { x, y, buttons } => self.mouse_moved(x, y, buttons),
             UiEvent::MouseUp { x, y } => self.mouse_up(x, y),
         }
+    }
+
+    fn set_background(&mut self, index: usize) {
+        let Some(&(name, rgb)) = BACKGROUNDS.get(index) else { return };
+        self.ctx.theme = Theme::dark().with_background(rgb);
+        platform::set_background(self.ctx.theme.background.to_rgb8());
+        save_background(name);
+        self.dirty = true;
     }
 
     fn change_font_size(&mut self, size: f32) {

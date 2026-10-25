@@ -1073,7 +1073,8 @@ impl Pane {
         }
         let tagline = format!("A modern GPU-accelerated terminal for {}", platform::OS_NAME);
         let width = text.draw_text(scene, &tagline, x, y + 22.0, UI, 13.0, theme.text_dim);
-        let device = format!("  ·  Vulkan on {device_name}");
+        let api = if cfg!(target_os = "macos") { "Metal" } else { "Vulkan" };
+        let device = format!("  ·  {api} on {device_name}");
         text.draw_text(scene, &device, x + width, y + 22.0, UI, 13.0, theme.text_faint);
         let y = y + 36.0;
         let cmd = |key: &str| format!("{}+{key}", platform::COMMAND_NAME);

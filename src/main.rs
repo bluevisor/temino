@@ -1,5 +1,5 @@
 //! Temino: a modern GPU-accelerated block terminal for Haiku, Linux and
-//! macOS, rendered with Vulkan.
+//! macOS, rendered with Vulkan (Metal on macOS).
 
 // Drawing helpers take a scene, the text system, a position and a style.
 #![allow(clippy::too_many_arguments)]
@@ -7,6 +7,10 @@
 mod app;
 mod complete;
 mod editor;
+#[cfg(not(target_os = "macos"))]
+mod gpu;
+#[cfg(target_os = "macos")]
+#[path = "metal.rs"]
 mod gpu;
 mod keys;
 mod pane;

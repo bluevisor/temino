@@ -2,7 +2,7 @@
 
 <img src="docs/icon.png" width="64" align="right" alt="">
 
-A modern GPU-accelerated terminal for [Haiku](https://www.haiku-os.org), Linux and macOS, drawn with Vulkan.
+A modern GPU-accelerated terminal for [Haiku](https://www.haiku-os.org), Linux and macOS, drawn with Vulkan (Metal on macOS).
 
 Temino works like [Warp](https://github.com/warpdotdev/warp): every command and
 its output is a **block** you can select and copy, and commands are typed in a
@@ -98,7 +98,8 @@ pastes it. Option (macOS) and Alt (Linux) are Meta for the shell.
   `BBitmap`s and draws it. Linux and macOS use the same path, with a
   [winit](https://github.com/rust-windowing/winit) window and
   [softbuffer](https://github.com/rust-windowing/softbuffer) in place of the
-  Be API (`src/platform/`); on HiDPI screens the scene is drawn at the
+  Be API (`src/platform/`); macOS draws the same scene through Metal
+  (`src/metal.rs`, `src/macos/shim.m`) instead of Vulkan. On HiDPI screens the scene is drawn at the
   display's scale, glyphs rasterized at full resolution. Frames are drawn only when something changed (or a
   spinner or the caret blinks); a 980×640 frame takes about 1 ms on an M5 Pro
   through Venus.
@@ -114,9 +115,10 @@ pastes it. Option (macOS) and Alt (Linux) are Meta for the shell.
 
 ### Linux and macOS
 
-Rust and a Vulkan driver: Mesa or NVIDIA on Linux (tested on a Jetson AGX
-Orin, Ubuntu 22.04, X11), MoltenVK on macOS (`brew install molten-vk
-vulkan-loader`; Temino finds Homebrew's loader on its own).
+Rust, plus a Vulkan driver on Linux: Mesa or NVIDIA (tested on a Jetson AGX
+Orin, Ubuntu 22.04, X11). macOS renders with Metal and needs only the Xcode
+command-line tools; `macos/bundle.sh install` builds Temino.app and copies it
+to /Applications.
 
 ```sh
 cargo build --release

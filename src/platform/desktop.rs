@@ -1,5 +1,6 @@
 //! Linux and macOS: a winit window that shows each finished frame through
 //! softbuffer, the clipboard through arboard, and a Unix pseudo-terminal.
+//! On macOS the menu bar comes from src/macos/shim.m.
 //!
 //! winit wants the main thread, so the core thread talks to it through an
 //! event-loop proxy: `present` parks the newest frame and wakes the loop,
@@ -34,6 +35,8 @@ enum Request {
     Present,
     Title(String),
     Cursor(Cursor),
+    /// The Background menu changed; it is in BACKGROUNDS.
+    Backgrounds,
     Quit,
 }
 
@@ -48,6 +51,10 @@ static FRAME: Mutex<Option<Frame>> = Mutex::new(None);
 /// Set while a Present request is queued, so frames don't pile up.
 static PRESENT_PENDING: AtomicBool = AtomicBool::new(false);
 static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+/// The Background menu's entries and the picked one.
+static BACKGROUNDS: Mutex<Option<(Vec<String>, usize)>> = Mutex::new(None);
+/// Where menu picks go; the menu calls back on the main thread.
+static MENU_SENDER: Mutex<Option<Sender<Msg>>> = Mutex::new(None);
 
 /// The window `window_new` asked for: title, size, where events go.
 type Setup = (String, u32, u32, Sender<Msg>);
@@ -64,7 +71,14 @@ fn request(request: Request) {
 }
 
 pub fn app_new(_signature: &str) {
-    let event_loop = EventLoop::<Request>::with_user_event().build().expect("creating the event loop");
+    let mut builder = EventLoop::<Request>::with_user_event();
+    #[cfg(target_os = "macos")]
+    {
+        // Temino installs its own menu bar.
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        builder.with_default_menu(false);
+    }
+    let event_loop = builder.build().expect("creating the event loop");
     let _ = PROXY.set(Mutex::new(event_loop.create_proxy()));
     EVENT_LOOP.with(|slot| *slot.borrow_mut() = Some(event_loop));
 }
@@ -77,6 +91,7 @@ pub fn window_new(title: &str, width: u32, height: u32, sender: Sender<Msg>) {
 pub fn app_run() {
     let event_loop = EVENT_LOOP.with(|slot| slot.borrow_mut().take()).expect("app_new first");
     let (title, width, height, sender) = SETUP.with(|slot| slot.borrow_mut().take()).expect("window_new first");
+    *MENU_SENDER.lock().unwrap() = Some(sender.clone());
     let mut handler = Handler {
         title,
         size: (width, height),
@@ -99,6 +114,122 @@ pub fn quit() {
 
 /// The window is always covered by the frame; nothing to do.
 pub fn set_background(_rgb: [u8; 3]) {}
+
+/// Fills Settings ▸ Background (macOS; Linux has no menu bar).
+pub fn set_background_menu(names: &[&str], selected: usize) {
+    *BACKGROUNDS.lock().unwrap() = Some((names.iter().map(|n| n.to_string()).collect(), selected));
+    request(Request::Backgrounds);
+}
+
+#[cfg(target_os = "macos")]
+mod menu {
+    use std::ffi::{c_char, CString};
+
+    use super::{KeyEvent, UiEvent, BACKGROUNDS, MENU_SENDER};
+    use crate::keys::Named;
+    use crate::platform::mods;
+    use crate::Msg;
+
+    #[repr(C)]
+    struct Item {
+        menu: *const c_char,
+        label: *const c_char,
+        key: *const c_char,
+        modifiers: u32,
+        tag: i32,
+    }
+
+    extern "C" {
+        fn temino_menu_install(items: *const Item, count: usize, callback: extern "C" fn(i32));
+        fn temino_menu_backgrounds(names: *const *const c_char, count: usize, selected: usize);
+        fn temino_menu_mark_background(selected: usize);
+    }
+
+    const SHIFT: u32 = 1 << 17;
+    const COMMAND: u32 = 1 << 20;
+    /// The tag of the Background submenu; its entries count up from here.
+    const BACKGROUND: i32 = 1000;
+
+    /// Menu, label, key equivalent, extra modifiers, and the key the item
+    /// sends, as if typed with Command: menus and shortcuts share one path.
+    /// A None label is a separator.
+    type MenuItem = (&'static str, Option<&'static str>, &'static str, u32, Option<Named>, char);
+    const ITEMS: &[MenuItem] = &[
+        ("Temino", Some("Quit Temino"), "q", 0, None, 'q'),
+        ("Shell", Some("New Tab"), "t", 0, None, 't'),
+        ("Shell", Some("Split Right"), "d", 0, None, 'd'),
+        ("Shell", Some("Split Down"), "e", 0, None, 'e'),
+        ("Shell", None, "", 0, None, '\0'),
+        ("Shell", Some("Close Pane"), "w", 0, None, 'w'),
+        ("Edit", Some("Copy"), "c", 0, None, 'c'),
+        ("Edit", Some("Copy Command"), "c", SHIFT, None, 'c'),
+        ("Edit", Some("Paste"), "v", 0, None, 'v'),
+        ("Edit", Some("Select All"), "a", 0, None, 'a'),
+        ("Edit", None, "", 0, None, '\0'),
+        ("Edit", Some("Clear"), "k", 0, None, 'k'),
+        ("View", Some("Show/Hide Tabs"), "b", 0, None, 'b'),
+        ("View", Some("Previous Tab"), "{", SHIFT, None, '['),
+        ("View", Some("Next Tab"), "}", SHIFT, None, ']'),
+        ("View", Some("Previous Pane"), "[", 0, None, '['),
+        ("View", Some("Next Pane"), "]", 0, None, ']'),
+        ("View", Some("Zoom Pane"), "\r", 0, Some(Named::Enter), '\r'),
+        ("View", None, "", 0, None, '\0'),
+        ("View", Some("Bigger Text"), "+", 0, None, '='),
+        ("View", Some("Smaller Text"), "-", 0, None, '-'),
+        ("View", Some("Default Text Size"), "0", 0, None, '0'),
+        ("View", None, "", 0, None, '\0'),
+    ];
+
+    extern "C" fn pick(tag: i32) {
+        let event = if tag >= BACKGROUND {
+            let index = (tag - BACKGROUND) as usize;
+            unsafe { temino_menu_mark_background(index) };
+            if let Some((_, selected)) = BACKGROUNDS.lock().unwrap().as_mut() {
+                *selected = index;
+            }
+            UiEvent::Background(index)
+        } else {
+            let Some(&(_, _, _, extra, named, c)) = ITEMS.get(tag as usize) else { return };
+            let shift = if extra & SHIFT != 0 { mods::SHIFT } else { 0 };
+            let bytes = if named.is_some() { Vec::new() } else { c.to_string().into_bytes() };
+            UiEvent::Key(KeyEvent { named, mods: mods::COMMAND | shift, raw_char: c as u32, bytes })
+        };
+        if let Some(sender) = MENU_SENDER.lock().unwrap().as_ref() {
+            let _ = sender.send(Msg::Ui(event));
+        }
+    }
+
+    pub fn install() {
+        let strings: Vec<[CString; 3]> = ITEMS
+            .iter()
+            .map(|(menu, label, key, ..)| [*menu, label.unwrap_or(""), *key].map(|s| CString::new(s).unwrap()))
+            .chain(std::iter::once(["View", "Background", ""].map(|s| CString::new(s).unwrap())))
+            .collect();
+        let items: Vec<Item> = strings
+            .iter()
+            .enumerate()
+            .map(|(i, [menu, label, key])| {
+                let separator = ITEMS.get(i).is_some_and(|item| item.1.is_none());
+                Item {
+                    menu: menu.as_ptr(),
+                    label: if separator { std::ptr::null() } else { label.as_ptr() },
+                    key: key.as_ptr(),
+                    modifiers: COMMAND | ITEMS.get(i).map_or(0, |item| item.3),
+                    tag: if i < ITEMS.len() { i as i32 } else { BACKGROUND },
+                }
+            })
+            .collect();
+        unsafe { temino_menu_install(items.as_ptr(), items.len(), pick) };
+        update_backgrounds();
+    }
+
+    pub fn update_backgrounds() {
+        let Some((names, selected)) = BACKGROUNDS.lock().unwrap().clone() else { return };
+        let names: Vec<CString> = names.into_iter().map(|n| CString::new(n).unwrap_or_default()).collect();
+        let pointers: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
+        unsafe { temino_menu_backgrounds(pointers.as_ptr(), pointers.len(), selected) };
+    }
+}
 
 /// Takes a BGRA frame (physical pixels) and has the window show it.
 pub fn present(pixels: &[u8], width: u32, height: u32) {
@@ -405,6 +536,8 @@ impl ApplicationHandler<Request> for Handler {
             }
         };
         window.set_cursor(CursorIcon::Text);
+        #[cfg(target_os = "macos")]
+        menu::install();
         self.scale = window.scale_factor();
         let surface = softbuffer::Context::new(window.clone())
             .and_then(|context| softbuffer::Surface::new(&context, window.clone()));
@@ -440,6 +573,11 @@ impl ApplicationHandler<Request> for Handler {
                         Cursor::ResizeRow => CursorIcon::RowResize,
                     });
                 }
+            }
+            Request::Backgrounds =>
+            {
+                #[cfg(target_os = "macos")]
+                menu::update_backgrounds()
             }
             Request::Quit => event_loop.exit(),
         }

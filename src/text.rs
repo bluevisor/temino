@@ -324,7 +324,8 @@ impl TextSystem {
     /// Draws one terminal cell's character with its top-left at (x, y).
     /// `span` is 2 for wide characters.
     pub fn draw_cell(&mut self, scene: &mut Scene, c: char, x: f32, y: f32, style: Style, color: Color, span: usize) {
-        if c == ' ' || c == '\0' {
+        // alacritty_terminal leaves '\t' in the cell a tab starts from.
+        if c == ' ' || c.is_control() {
             return;
         }
         let cell = self.cell;

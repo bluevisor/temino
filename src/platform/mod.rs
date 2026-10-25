@@ -106,6 +106,8 @@ pub enum UiEvent {
     },
     Focus(bool),
     Close,
+    /// Settings ▸ Background picked this entry of `theme::BACKGROUNDS`.
+    Background(usize),
 }
 
 /// Mouse button bits, as Haiku numbers them.

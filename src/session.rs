@@ -661,7 +661,7 @@ impl Session {
         let mut notices = Vec::new();
         for segment in self.scanner.scan(bytes) {
             match segment {
-                Segment::Data(data) => self.route(&data),
+                Segment::Data(data) => self.route(&data, theme),
                 Segment::PromptStart => {
                     self.finish_running(None, &mut notices);
                     self.phase = Phase::Prompt;
@@ -711,7 +711,10 @@ impl Session {
         notices
     }
 
-    fn route(&mut self, data: &[u8]) {
+    fn route(&mut self, data: &[u8], theme: &Theme) {
+        if self.phase != Phase::Running {
+            self.answer_queries(data, theme);
+        }
         match self.phase {
             Phase::Boot => {
                 self.boot_output.extend_from_slice(data);
@@ -729,6 +732,52 @@ impl Session {
                 }
             }
             Phase::Prompt | Phase::Submitted | Phase::Continuation | Phase::Exited => {}
+        }
+    }
+
+    /// Between commands no block's terminal sees the shell's output, so
+    /// queries there are answered here. fish asks for device attributes,
+    /// the cursor and the background before each prompt, and waits.
+    fn answer_queries(&mut self, data: &[u8], theme: &Theme) {
+        let mut reply = Vec::new();
+        let mut i = 0;
+        while let Some(at) = data[i..].iter().position(|&b| b == 0x1b) {
+            let start = i + at + 1;
+            i = start;
+            match data.get(start) {
+                Some(b'[') => {
+                    let Some(end) = data[start + 1..].iter().position(|b| (0x40..=0x7e).contains(b)) else { break };
+                    let end = start + 1 + end;
+                    match (&data[start + 1..end], data[end]) {
+                        // Primary device attributes, as alacritty answers.
+                        (b"" | b"0", b'c') => reply.extend_from_slice(b"\x1b[?6c"),
+                        (b"5", b'n') => reply.extend_from_slice(b"\x1b[0n"),
+                        (b"6", b'n') => reply.extend_from_slice(b"\x1b[1;1R"),
+                        _ => {}
+                    }
+                    i = end + 1;
+                }
+                Some(b']') => {
+                    let body = &data[start + 1..];
+                    let end = body.iter().position(|&b| b == 0x07 || b == 0x1b).unwrap_or(body.len());
+                    let color = match &body[..end] {
+                        b"10;?" => Some((10, theme.text)),
+                        b"11;?" => Some((11, theme.background)),
+                        _ => None,
+                    };
+                    if let Some((number, color)) = color {
+                        let [r, g, b] = color.to_rgb8();
+                        reply.extend(
+                            format!("\x1b]{number};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\").bytes(),
+                        );
+                    }
+                    i = start + 1 + end;
+                }
+                _ => {}
+            }
+        }
+        if !reply.is_empty() {
+            self.write(&reply);
         }
     }
 
