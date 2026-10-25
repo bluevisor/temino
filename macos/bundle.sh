@@ -1,13 +1,17 @@
 #!/bin/sh
-# Builds Temino.app from a release build; `macos/bundle.sh install` also
-# copies it to /Applications.
+# Builds a universal (arm64 + x86_64) Temino.app from release builds;
+# `macos/bundle.sh install` also copies it to /Applications.
+# Needs `rustup target add aarch64-apple-darwin x86_64-apple-darwin`.
 set -e
 cd "$(dirname "$0")/.."
-cargo build --release
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+	cargo build --release --target $target
+done
 app=target/release/Temino.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/temino "$app/Contents/MacOS/temino"
+lipo -create -output "$app/Contents/MacOS/temino" \
+	target/aarch64-apple-darwin/release/temino target/x86_64-apple-darwin/release/temino
 cp macos/Info.plist "$app/Contents/Info.plist"
 icons=$(mktemp -d)/Temino.iconset
 mkdir -p "$icons"
