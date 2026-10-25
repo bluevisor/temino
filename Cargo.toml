@@ -1,6 +1,6 @@
 [package]
 name = "temino"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A modern GPU-accelerated block terminal for Haiku, Linux and macOS"
 license = "MIT"
