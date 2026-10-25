@@ -123,7 +123,9 @@ public:
 		BView(frame, "temino", B_FOLLOW_ALL,
 			B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE),
 		fIBeam(B_CURSOR_ID_I_BEAM),
-		fArrow(B_CURSOR_ID_SYSTEM_DEFAULT)
+		fArrow(B_CURSOR_ID_SYSTEM_DEFAULT),
+		fResizeColumn(B_CURSOR_ID_RESIZE_EAST_WEST),
+		fResizeRow(B_CURSOR_ID_RESIZE_NORTH_SOUTH)
 	{
 		SetViewColor(B_TRANSPARENT_COLOR);
 		SetEventMask(0, 0);
@@ -199,7 +201,8 @@ public:
 			case kMsgCursor:
 			{
 				int32 kind = message->GetInt32("kind", 0);
-				SetViewCursor(kind == 1 ? &fArrow : &fIBeam);
+				const BCursor* cursors[] = {&fIBeam, &fArrow, &fResizeColumn, &fResizeRow};
+				SetViewCursor(cursors[kind >= 0 && kind < 4 ? kind : 0]);
 				break;
 			}
 			case B_MOUSE_WHEEL_CHANGED:
@@ -243,6 +246,8 @@ private:
 
 	BCursor fIBeam;
 	BCursor fArrow;
+	BCursor fResizeColumn;
+	BCursor fResizeRow;
 };
 
 
@@ -256,9 +261,15 @@ public:
 	}
 
 	// Every key goes to Rust, shortcuts included: the terminal decides what
-	// Alt (Haiku's Command key) combinations mean.
+	// Alt (Haiku's Command key) combinations mean. The system's own keys
+	// stay with BWindow: Ctrl+Tab (and Ctrl+`) open Deskbar's switcher,
+	// PrtScr takes a screenshot.
 	void DispatchMessage(BMessage* message, BHandler* target) override
 	{
+		if (message->what == B_KEY_DOWN && _IsSystemKey(message)) {
+			BWindow::DispatchMessage(message, target);
+			return;
+		}
 		if (message->what == B_KEY_DOWN) {
 			TeminoEvent event = {};
 			event.kind = kEventKey;
@@ -284,6 +295,16 @@ public:
 			return;
 		}
 		BWindow::DispatchMessage(message, target);
+	}
+
+	static bool _IsSystemKey(BMessage* message)
+	{
+		int32 rawKey = message->GetInt32("key", 0);
+		uint32 mods = (uint32)message->GetInt32("modifiers", 0);
+		const char* bytes = message->GetString("bytes", "");
+		if ((bytes[0] == B_TAB || rawKey == 0x11) && (mods & B_CONTROL_KEY) != 0)
+			return true;
+		return bytes[0] == B_FUNCTION_KEY && rawKey == B_PRINT_KEY;
 	}
 
 	void MessageReceived(BMessage* message) override

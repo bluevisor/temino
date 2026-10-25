@@ -1,7 +1,8 @@
 //! The Vulkan renderer. Haiku has no Vulkan WSI, so each frame renders into
 //! an offscreen BGRA image, is copied into a host-visible buffer, and the
-//! window shim blits that into a BBitmap. On the UTM VM this runs on the
-//! Mac's GPU through Venus (virtio-gpu), via the `libvulkan.so.1` shim.
+//! window layer shows that (a BBitmap on Haiku, softbuffer elsewhere). On
+//! the UTM VM this runs on the Mac's GPU through Venus (virtio-gpu); on
+//! macOS through MoltenVK.
 
 use std::ffi::CStr;
 use std::io::Cursor;
@@ -15,6 +16,30 @@ use crate::text::{Atlas, ATLAS_SIZE};
 const COLOR_FORMAT: vk::Format = vk::Format::B8G8R8A8_UNORM;
 
 pub type Result<T> = std::result::Result<T, String>;
+
+/// The Vulkan loader: the system's, or on macOS Homebrew's loader or a
+/// MoltenVK bundled next to the app.
+fn load_entry() -> Result<ash::Entry> {
+    let first = unsafe { ash::Entry::load() };
+    if cfg!(target_os = "macos") && first.is_err() {
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(dir) = exe_dir {
+            candidates.push(dir.join("../Frameworks/libvulkan.1.dylib"));
+            candidates.push(dir.join("../Frameworks/libMoltenVK.dylib"));
+        }
+        for prefix in ["/opt/homebrew/lib", "/usr/local/lib"] {
+            candidates.push(format!("{prefix}/libvulkan.1.dylib").into());
+            candidates.push(format!("{prefix}/libMoltenVK.dylib").into());
+        }
+        for path in candidates.iter().filter(|p| p.exists()) {
+            if let Ok(entry) = unsafe { ash::Entry::load_from(path) } {
+                return Ok(entry);
+            }
+        }
+    }
+    first.map_err(|e| format!("loading the Vulkan loader (libvulkan): {e}"))
+}
 
 trait Check<T> {
     fn check(self, what: &str) -> Result<T>;
@@ -73,13 +98,23 @@ pub struct Gpu {
 
 impl Gpu {
     pub fn new() -> Result<Gpu> {
-        crate::trace("gpu: loading libvulkan.so.1");
-        let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("loading libvulkan.so.1: {e}"))?;
+        crate::trace("gpu: loading the Vulkan loader");
+        let entry = load_entry()?;
         let app = vk::ApplicationInfo::default()
             .application_name(c"Temino")
             .engine_name(c"Temino")
             .api_version(vk::API_VERSION_1_1);
-        let instance_info = vk::InstanceCreateInfo::default().application_info(&app);
+        // MoltenVK is a "portability" driver, listed only when asked for.
+        let available = unsafe { entry.enumerate_instance_extension_properties(None) }.unwrap_or_default();
+        let has = |name: &CStr| available.iter().any(|e| e.extension_name_as_c_str() == Ok(name));
+        let mut extensions = Vec::new();
+        let mut flags = vk::InstanceCreateFlags::empty();
+        if has(ash::khr::portability_enumeration::NAME) {
+            extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
+            flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+        }
+        let instance_info =
+            vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&extensions).flags(flags);
         let instance = unsafe { entry.create_instance(&instance_info, None) }.check("vkCreateInstance")?;
 
         crate::trace("gpu: instance created");
@@ -101,7 +136,14 @@ impl Gpu {
         let priorities = [1.0];
         let queue_info =
             [vk::DeviceQueueCreateInfo::default().queue_family_index(family).queue_priorities(&priorities)];
-        let device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queue_info);
+        let device_extensions = unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
+        let subset = c"VK_KHR_portability_subset";
+        let mut enabled = Vec::new();
+        if device_extensions.iter().any(|e| e.extension_name_as_c_str() == Ok(subset)) {
+            enabled.push(subset.as_ptr());
+        }
+        let device_info =
+            vk::DeviceCreateInfo::default().queue_create_infos(&queue_info).enabled_extension_names(&enabled);
         let device = unsafe { instance.create_device(physical, &device_info, None) }.check("vkCreateDevice")?;
         let queue = unsafe { device.get_device_queue(family, 0) };
         crate::trace(&format!("gpu: device created on {device_name}"));
@@ -375,8 +417,7 @@ impl Gpu {
 
     /// Renders `scene` and returns the frame as tightly packed BGRA rows.
     pub fn render(&mut self, scene: &Scene, atlas: &mut Atlas) -> Result<&[u8]> {
-        let width = scene.width.max(1.0) as u32;
-        let height = scene.height.max(1.0) as u32;
+        let (width, height) = scene.pixel_size();
         self.ensure_target(width, height)?;
 
         // Instance data for both layers lives in one buffer per pipeline.

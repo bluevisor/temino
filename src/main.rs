@@ -1,4 +1,5 @@
-//! Temino: a modern GPU-accelerated terminal for Haiku, rendered with Vulkan.
+//! Temino: a modern GPU-accelerated block terminal for Haiku, Linux and
+//! macOS, rendered with Vulkan.
 
 // Drawing helpers take a scene, the text system, a position and a style.
 #![allow(clippy::too_many_arguments)]
@@ -8,6 +9,7 @@ mod complete;
 mod editor;
 mod gpu;
 mod keys;
+mod pane;
 mod platform;
 mod scene;
 mod session;
@@ -20,17 +22,27 @@ use std::thread;
 
 pub enum Msg {
     Ui(platform::UiEvent),
-    Pty(Vec<u8>),
-    ShellExited(i32),
+    /// Output from the shell of the pane with this id.
+    Pty(u64, Vec<u8>),
+    ShellExited(u64, i32),
 }
 
-/// ~/config/settings/Temino: history, the shell integration script, logs.
+/// History, the shell integration script and logs: ~/config/settings/Temino
+/// on Haiku, ~/Library/Application Support/Temino on macOS, and
+/// $XDG_CONFIG_HOME/temino (~/.config/temino) on Linux.
 pub fn settings_dir() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
-    format!("{home}/config/settings/Temino")
+    if cfg!(target_os = "haiku") {
+        format!("{home}/config/settings/Temino")
+    } else if cfg!(target_os = "macos") {
+        format!("{home}/Library/Application Support/Temino")
+    } else {
+        let config = std::env::var("XDG_CONFIG_HOME").ok().filter(|d| !d.is_empty());
+        format!("{}/temino", config.unwrap_or_else(|| format!("{home}/.config")))
+    }
 }
 
-/// Reports a fatal error the way Haiku apps do, with an alert.
+/// Reports a fatal error the way native apps do, with an alert.
 pub fn fatal(message: &str) {
     eprintln!("temino: {message}");
     let _ = std::fs::create_dir_all(settings_dir());
@@ -38,8 +50,8 @@ pub fn fatal(message: &str) {
     platform::alert(&format!("Temino: {message}"));
 }
 
-/// With TEMINO_TRACE set, appends a timestamped line to
-/// ~/config/settings/Temino/trace.log (flushed, so it survives a hang).
+/// With TEMINO_TRACE set, appends a timestamped line to trace.log in the
+/// settings directory (flushed, so it survives a hang).
 pub fn trace(message: &str) {
     use std::io::Write;
     use std::sync::OnceLock;
@@ -59,6 +71,7 @@ const HEIGHT: u32 = 640;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "haiku")]
     if args.get(1).map(String::as_str) == Some("--pty-exec") {
         std::process::exit(platform::pty_exec(&args[2..]));
     }

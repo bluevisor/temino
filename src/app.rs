@@ -1,121 +1,212 @@
-//! The core thread: owns the session, the editor and the renderer, turns
-//! window events and pty output into state, and draws frames on demand.
+//! The core thread: owns the renderer and the window's tabs, each a tree
+//! of split panes; routes window events and pty output to panes, and draws
+//! frames on demand.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::TermMode;
-
-use crate::complete::{self, Candidate, Commands, Completion, Kind};
-use crate::editor::{Editor, History};
+use crate::complete::Commands;
+use crate::editor::History;
 use crate::gpu::Gpu;
-use crate::keys::{self, Named};
-use crate::platform::{self, Cursor, KeyEvent, UiEvent};
+use crate::keys::Named;
+use crate::pane::{Ctx, Pane};
+use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
-use crate::session::{BlockKind, Credits, GridSize, Notice, Phase, Session};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{Color, Theme};
-use crate::ui::{self, GridView, Span};
 use crate::Msg;
 
-const PAD_X: f32 = 14.0;
-const ALT_PAD_Y: f32 = 8.0;
-const BLOCK_PAD_TOP: f32 = 10.0;
-const META_HEIGHT: f32 = 18.0;
-const OUTPUT_GAP: f32 = 4.0;
-const BLOCK_PAD_BOTTOM: f32 = 12.0;
-const CHIP_HEIGHT: f32 = 22.0;
-const INPUT_PAD: f32 = 10.0;
 const DEFAULT_FONT_SIZE: f32 = 14.0;
-const BLINK: Duration = Duration::from_millis(530);
-const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const MAX_EDITOR_LINES: usize = 10;
-const MENU_ROWS: usize = 8;
-/// The launch banner, in figlet's "ANSI Shadow" style.
-const BANNER: [&str; 6] = [
-    "████████╗███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ",
-    "╚══██╔══╝██╔════╝████╗ ████║██║████╗  ██║██╔═══██╗",
-    "   ██║   █████╗  ██╔████╔██║██║██╔██╗ ██║██║   ██║",
-    "   ██║   ██╔══╝  ██║╚██╔╝██║██║██║╚██╗██║██║   ██║",
-    "   ██║   ███████╗██║ ╚═╝ ██║██║██║ ╚████║╚██████╔╝",
-    "   ╚═╝   ╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ",
-];
+const TAB_BAR_HEIGHT: f32 = 34.0;
+const TAB_MAX_WIDTH: f32 = 220.0;
+const SIDEBAR_WIDTH: f32 = 200.0;
+const SIDEBAR_ROW: f32 = 30.0;
 
+/// Where the tabs are listed: down the left side (the default) or across
+/// the top (`TEMINO_TABS=top`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SelectMode {
-    Char,
-    Word,
-    Line,
+enum TabStrip {
+    Left,
+    Top,
+}
+/// Panes sit this far apart; the divider line is drawn in the gap.
+const GAP: f32 = 1.0;
+/// How far from a divider a press still grabs it.
+const GRAB: f32 = 4.0;
+const MIN_PANE: f32 = 120.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Axis {
+    /// Side by side, divided by a vertical line.
+    Row,
+    /// Stacked, divided by a horizontal line.
+    Column,
 }
 
-/// A mouse selection inside one block's output, in (line, column).
-#[derive(Clone, Copy)]
-struct Selection {
-    block: u64,
-    anchor: (usize, usize),
-    head: (usize, usize),
-    mode: SelectMode,
+enum Node {
+    Leaf(u64),
+    Split { axis: Axis, ratio: f32, first: Box<Node>, second: Box<Node> },
 }
 
-struct BlockLayout {
-    id: u64,
-    rect: Rect,
-    output_x: f32,
-    output_y: f32,
-    lines: usize,
+impl Node {
+    fn leaves(&self, out: &mut Vec<u64>) {
+        match self {
+            Node::Leaf(id) => out.push(*id),
+            Node::Split { first, second, .. } => {
+                first.leaves(out);
+                second.leaves(out);
+            }
+        }
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        match self {
+            Node::Leaf(leaf) => *leaf == id,
+            Node::Split { first, second, .. } => first.contains(id) || second.contains(id),
+        }
+    }
+
+    /// Replaces leaf `id` with a split of it and `new`.
+    fn split(&mut self, id: u64, new: u64, axis: Axis) -> bool {
+        match self {
+            Node::Leaf(leaf) if *leaf == id => {
+                *self = Node::Split {
+                    axis,
+                    ratio: 0.5,
+                    first: Box::new(Node::Leaf(id)),
+                    second: Box::new(Node::Leaf(new)),
+                };
+                true
+            }
+            Node::Leaf(_) => false,
+            Node::Split { first, second, .. } => first.split(id, new, axis) || second.split(id, new, axis),
+        }
+    }
+
+    /// Takes leaf `id` out; its sibling takes the parent's place. Returns
+    /// false when `id` is this whole node (the caller drops it).
+    fn remove(&mut self, id: u64) -> bool {
+        let Node::Split { first, second, .. } = self else { return false };
+        let keep = if matches!(**first, Node::Leaf(leaf) if leaf == id) {
+            std::mem::replace(&mut **second, Node::Leaf(0))
+        } else if matches!(**second, Node::Leaf(leaf) if leaf == id) {
+            std::mem::replace(&mut **first, Node::Leaf(0))
+        } else {
+            return first.remove(id) || second.remove(id);
+        };
+        *self = keep;
+        true
+    }
+
+    /// Lays the tree out in `rect`: each pane's rectangle, and the dividers
+    /// (with the path to their split, false = first child).
+    fn layout(&self, rect: Rect, path: &mut Vec<bool>, panes: &mut Vec<(u64, Rect)>, dividers: &mut Vec<Divider>) {
+        match self {
+            Node::Leaf(id) => panes.push((*id, rect)),
+            Node::Split { axis, ratio, first, second } => {
+                let (a, b, line) = split_rect(rect, *axis, *ratio);
+                dividers.push(Divider { line, axis: *axis, parent: rect, path: path.clone() });
+                path.push(false);
+                first.layout(a, path, panes, dividers);
+                path.pop();
+                path.push(true);
+                second.layout(b, path, panes, dividers);
+                path.pop();
+            }
+        }
+    }
+
+    fn at_path(&mut self, path: &[bool]) -> Option<&mut Node> {
+        match path.split_first() {
+            None => Some(self),
+            Some((&side, rest)) => match self {
+                Node::Split { first, second, .. } => (if side { second } else { first }).at_path(rest),
+                Node::Leaf(_) => None,
+            },
+        }
+    }
 }
 
-#[derive(Default)]
-struct Layout {
-    blocks: Vec<BlockLayout>,
-    list: Rect,
-    input: Rect,
-    editor_x: f32,
-    editor_y: f32,
-    menu_rows: Vec<(Rect, usize)>,
-    /// (block index, grid origin) when a full-screen program is shown.
-    alt: Option<(usize, f32, f32)>,
-    content_height: f32,
+fn split_rect(rect: Rect, axis: Axis, ratio: f32) -> (Rect, Rect, Rect) {
+    match axis {
+        Axis::Row => {
+            let w = ((rect.w - GAP) * ratio).round();
+            let a = Rect::new(rect.x, rect.y, w, rect.h);
+            let line = Rect::new(rect.x + w, rect.y, GAP, rect.h);
+            let b = Rect::new(rect.x + w + GAP, rect.y, rect.w - w - GAP, rect.h);
+            (a, b, line)
+        }
+        Axis::Column => {
+            let h = ((rect.h - GAP) * ratio).round();
+            let a = Rect::new(rect.x, rect.y, rect.w, h);
+            let line = Rect::new(rect.x, rect.y + h, rect.w, GAP);
+            let b = Rect::new(rect.x, rect.y + h + GAP, rect.w, rect.h - h - GAP);
+            (a, b, line)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Divider {
+    line: Rect,
+    axis: Axis,
+    /// The area the split divides, to turn the pointer into a ratio.
+    parent: Rect,
+    path: Vec<bool>,
+}
+
+impl Divider {
+    fn grab_area(&self) -> Rect {
+        match self.axis {
+            Axis::Row => Rect::new(self.line.x - GRAB, self.line.y, self.line.w + 2.0 * GRAB, self.line.h),
+            Axis::Column => Rect::new(self.line.x, self.line.y - GRAB, self.line.w, self.line.h + 2.0 * GRAB),
+        }
+    }
+}
+
+struct Tab {
+    root: Node,
+    focus: u64,
+    /// The focused pane fills the tab (Command+Enter).
+    zoomed: bool,
+}
+
+enum Pointer {
+    Idle,
+    /// A press went to this pane; drags and the release follow it.
+    Pane(u64),
+    /// Resizing the split at this path.
+    Divider(Divider),
 }
 
 pub struct App {
     gpu: Gpu,
-    text: TextSystem,
-    theme: Theme,
     scene: Scene,
-    session: Session,
-    editor: Editor,
-    history: History,
-    commands: Commands,
-    completion: Option<Completion>,
-    sender: Sender<Msg>,
-    credits: Arc<Credits>,
+    ctx: Ctx,
+    panes: Vec<Pane>,
+    tabs: Vec<Tab>,
+    active: usize,
+    strip: TabStrip,
+    /// Command+B's choice to show or hide the tab list; until then it shows
+    /// once there is a second tab. Hidden, tabs still switch by key.
+    tab_list: Option<bool>,
+    next_id: u64,
     width: u32,
     height: u32,
-    /// Distance of the viewport's bottom above the content's bottom.
-    scroll: f32,
-    scroll_target: f32,
-    selected: Option<u64>,
-    selection: Option<Selection>,
-    dragging: bool,
+    scale: f32,
     focused: bool,
-    blink_epoch: Instant,
-    layout: Layout,
-    toast: Option<(String, Instant)>,
-    bell: Option<Instant>,
     dirty: bool,
-    reflow_at: Option<Instant>,
     title: String,
     cursor: Cursor,
     quitting: bool,
-    user_host: String,
-    /// Content height of the previous frame, to keep a scrolled-up view
-    /// still while output grows below it.
-    content_height: f32,
     /// When the frame on screen goes stale on its own (spinner, blink).
     animation_at: Option<Instant>,
+    pointer: Pointer,
+    /// Per frame: the tab bar's hit areas and the active tab's dividers.
+    tab_hits: Vec<(Rect, usize)>,
+    close_hits: Vec<(Rect, usize)>,
+    new_tab_hit: Rect,
+    dividers: Vec<Divider>,
 }
 
 pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32) {
@@ -137,8 +228,8 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
             Ok(message) => {
                 crate::trace(match &message {
                     Msg::Ui(_) => "loop: ui event",
-                    Msg::Pty(_) => "loop: pty data",
-                    Msg::ShellExited(_) => "loop: shell exited",
+                    Msg::Pty(..) => "loop: pty data",
+                    Msg::ShellExited(..) => "loop: shell exited",
                 });
                 app.handle(message)
             }
@@ -181,7 +272,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
     let mut slowest = 0.0f64;
     for round in 0..frames {
         let frame = Instant::now();
-        scene.reset(width as f32, height as f32, theme.background);
+        scene.reset(width as f32, height as f32, 1.0, theme.background);
         let card = Rect::new(16.0, 16.0, 448.0, 128.0);
         scene.shadow(card, Color::hex(0x000000).alpha(0.6), 10.0, 8.0);
         scene.quad(Quad::new(card, theme.surface).radius(10.0).border(1.0, theme.divider));
@@ -197,14 +288,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
                 }
                 if round + 1 == frames {
                     println!("{frames} frames, slowest after the first {slowest:.2} ms");
-                    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-                    for bgra in pixels.chunks_exact(4) {
-                        ppm.extend_from_slice(&[bgra[2], bgra[1], bgra[0]]);
-                    }
-                    if let Err(error) = std::fs::write(path, ppm) {
-                        eprintln!("selftest: writing {path}: {error}");
-                        return 1;
-                    }
+                    write_ppm(std::ffi::OsStr::new(path), pixels, width, height);
                     println!("wrote {path}");
                 }
             }
@@ -217,17 +301,29 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
     0
 }
 
+fn host_name() -> Option<String> {
+    #[cfg(not(target_os = "haiku"))]
+    {
+        let mut buffer = [0u8; 256];
+        if unsafe { libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len()) } == 0 {
+            let end = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
+            let name = String::from_utf8_lossy(&buffer[..end]).into_owned();
+            return Some(name.trim_end_matches(".local").to_owned());
+        }
+    }
+    std::fs::read_to_string("/boot/system/settings/network/hostname").ok()
+}
+
 fn user_host() -> String {
     let user = std::env::var("USER")
         .ok()
         .filter(|u| !u.is_empty())
         .or_else(platform::user_name)
         .unwrap_or_else(|| "user".into());
-    let host = std::fs::read_to_string("/boot/system/settings/network/hostname")
-        .ok()
+    let host = host_name()
         .map(|h| h.trim().to_owned())
         .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "haiku".into());
+        .unwrap_or_else(|| platform::OS_NAME.to_lowercase());
     format!("{user}@{host}")
 }
 
@@ -238,61 +334,286 @@ impl App {
         crate::trace("app: fonts ready");
         let theme = Theme::dark();
         platform::set_background(theme.background.to_rgb8());
-        let size = grid_size(width, height, &text);
-        let mut session = Session::new(size);
-        session.set_cell_size(text.cell.width, text.cell.height);
-        let credits = Credits::new();
-        session.start(sender.clone(), credits.clone()).map_err(|e| format!("starting the shell: {e}"))?;
-        crate::trace("app: shell started");
-        let mut app = App {
-            gpu,
+        let ctx = Ctx {
             text,
             theme,
-            scene: Scene::new(),
-            session,
-            editor: Editor::new(),
             history: History::load(),
             commands: Commands::new(),
-            completion: None,
             sender,
-            credits,
+            user_host: user_host(),
+            device_name: gpu.device_name.clone(),
+            blink_epoch: Instant::now(),
+            toast: None,
+        };
+        let mut app = App {
+            gpu,
+            scene: Scene::new(),
+            ctx,
+            panes: Vec::new(),
+            tabs: Vec::new(),
+            active: 0,
+            strip: match std::env::var("TEMINO_TABS").as_deref() {
+                Ok("top") => TabStrip::Top,
+                _ => TabStrip::Left,
+            },
+            tab_list: None,
+            next_id: 1,
             width,
             height,
-            scroll: 0.0,
-            scroll_target: 0.0,
-            selected: None,
-            selection: None,
-            dragging: false,
+            scale: 1.0,
             focused: true,
-            blink_epoch: Instant::now(),
-            layout: Layout::default(),
-            toast: None,
-            bell: None,
             dirty: true,
-            reflow_at: None,
             title: String::new(),
             cursor: Cursor::IBeam,
             quitting: false,
-            user_host: user_host(),
-            content_height: 0.0,
             animation_at: None,
+            pointer: Pointer::Idle,
+            tab_hits: Vec::new(),
+            close_hits: Vec::new(),
+            new_tab_hit: Rect::default(),
+            dividers: Vec::new(),
         };
-        app.update_title();
+        app.new_tab()?;
+        crate::trace("app: shell started");
         Ok(app)
     }
 
+    // ---- panes and tabs -----------------------------------------------
+
+    fn pane(&mut self, id: u64) -> Option<&mut Pane> {
+        self.panes.iter_mut().find(|p| p.id == id)
+    }
+
+    fn focused_id(&self) -> Option<u64> {
+        self.tabs.get(self.active).map(|tab| tab.focus)
+    }
+
+    /// A new pane, in the focused pane's directory.
+    fn make_pane(&mut self) -> Result<u64, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let cwd = self.focused_id().and_then(|f| self.panes.iter().find(|p| p.id == f)).map(|p| p.session.cwd.clone());
+        let rect = self.content_rect();
+        // Only the window's first pane greets with the banner.
+        let pane = Pane::new(id, &mut self.ctx, rect, cwd, id == 1)?;
+        self.panes.push(pane);
+        Ok(id)
+    }
+
+    fn new_tab(&mut self) -> Result<(), String> {
+        let id = self.make_pane()?;
+        self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoomed: false });
+        self.switch_tab(self.tabs.len() - 1);
+        Ok(())
+    }
+
+    fn split(&mut self, axis: Axis) {
+        let Some(focus) = self.focused_id() else { return };
+        match self.make_pane() {
+            Ok(id) => {
+                let tab = &mut self.tabs[self.active];
+                tab.root.split(focus, id, axis);
+                tab.zoomed = false;
+                self.set_focus(id);
+            }
+            Err(error) => self.ctx.show_toast(&error),
+        }
+    }
+
+    /// Closes a pane, its tab when it was the last, the window after that.
+    fn close_pane(&mut self, id: u64) {
+        if let Some(index) = self.panes.iter().position(|p| p.id == id) {
+            let mut pane = self.panes.remove(index);
+            pane.hangup();
+        }
+        let Some(tab_index) = self.tabs.iter().position(|t| t.root.contains(id)) else { return };
+        let tab = &mut self.tabs[tab_index];
+        if !tab.root.remove(id) {
+            self.tabs.remove(tab_index);
+            if self.tabs.is_empty() {
+                self.quit();
+                return;
+            }
+            self.switch_tab(if tab_index < self.active || self.active >= self.tabs.len() {
+                self.active.saturating_sub(1).min(self.tabs.len() - 1)
+            } else {
+                self.active
+            });
+            return;
+        }
+        tab.zoomed = false;
+        if tab.focus == id {
+            let mut leaves = Vec::new();
+            tab.root.leaves(&mut leaves);
+            tab.focus = leaves[0];
+        }
+        self.relayout();
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        let mut leaves = Vec::new();
+        self.tabs[index].root.leaves(&mut leaves);
+        for id in leaves {
+            self.close_pane(id);
+        }
+    }
+
+    fn switch_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let before = self.focused_id();
+        self.active = index;
+        self.relayout();
+        self.focus_moved(before);
+    }
+
+    fn set_focus(&mut self, id: u64) {
+        let before = self.focused_id();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.focus = id;
+        }
+        self.relayout();
+        self.focus_moved(before);
+    }
+
+    /// Tells programs that asked (focus reporting) that focus moved.
+    fn focus_moved(&mut self, before: Option<u64>) {
+        let after = self.focused_id();
+        if before == after {
+            return;
+        }
+        self.ctx.blink_epoch = Instant::now();
+        let window = self.focused;
+        if let Some(pane) = before.and_then(|id| self.panes.iter().find(|p| p.id == id)) {
+            pane.focus_changed(false);
+        }
+        if let Some(pane) = after.and_then(|id| self.panes.iter().find(|p| p.id == id)) {
+            pane.focus_changed(window);
+        }
+    }
+
+    /// The panes of the active tab in reading order, for Command+[ and ].
+    fn cycle_focus(&mut self, delta: i32) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let mut leaves = Vec::new();
+        tab.root.leaves(&mut leaves);
+        let at = leaves.iter().position(|&id| id == tab.focus).unwrap_or(0) as i32;
+        let next = leaves[(at + delta).rem_euclid(leaves.len() as i32) as usize];
+        self.set_focus(next);
+    }
+
+    /// Moves focus to the nearest pane in a direction (Command+Option+arrow).
+    fn focus_toward(&mut self, dx: f32, dy: f32) {
+        let Some(focus) = self.focused_id() else { return };
+        let Some(from) = self.panes.iter().find(|p| p.id == focus).map(|p| p.rect) else { return };
+        let (cx, cy) = (from.x + from.w / 2.0, from.y + from.h / 2.0);
+        let best = self
+            .visible_panes()
+            .into_iter()
+            .filter(|(id, _)| *id != focus)
+            .filter_map(|(id, r)| {
+                let (px, py) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                let along = (px - cx) * dx + (py - cy) * dy;
+                let across = ((px - cx) * dy).abs() + ((py - cy) * dx).abs();
+                (along > 0.0).then_some((id, along + 2.0 * across))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((id, _)) = best {
+            self.set_focus(id);
+        }
+    }
+
+    fn toggle_zoom(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            let mut leaves = Vec::new();
+            tab.root.leaves(&mut leaves);
+            tab.zoomed = !tab.zoomed && leaves.len() > 1;
+            self.relayout();
+        }
+    }
+
+    fn tab_list_visible(&self) -> bool {
+        self.tab_list.unwrap_or(self.tabs.len() > 1)
+    }
+
+    /// The tab list's area; empty while it is hidden.
+    fn tab_area(&self) -> Rect {
+        if !self.tab_list_visible() {
+            return Rect::default();
+        }
+        match self.strip {
+            TabStrip::Left => Rect::new(0.0, 0.0, SIDEBAR_WIDTH.min(self.width as f32 / 2.0), self.height as f32),
+            TabStrip::Top => Rect::new(0.0, 0.0, self.width as f32, TAB_BAR_HEIGHT),
+        }
+    }
+
+    fn content_rect(&self) -> Rect {
+        let (width, height) = (self.width as f32, self.height as f32);
+        let area = self.tab_area();
+        match self.strip {
+            TabStrip::Left => Rect::new(area.w, 0.0, (width - area.w).max(1.0), height),
+            TabStrip::Top => Rect::new(0.0, area.h, width, (height - area.h).max(1.0)),
+        }
+    }
+
+    /// Lays out one tab: its panes' rectangles and its dividers.
+    fn tab_layout(&self, index: usize) -> (Vec<(u64, Rect)>, Vec<Divider>) {
+        let tab = &self.tabs[index];
+        let rect = self.content_rect();
+        let (mut panes, mut dividers) = (Vec::new(), Vec::new());
+        if tab.zoomed {
+            panes.push((tab.focus, rect));
+        } else {
+            tab.root.layout(rect, &mut Vec::new(), &mut panes, &mut dividers);
+        }
+        (panes, dividers)
+    }
+
+    fn visible_panes(&self) -> Vec<(u64, Rect)> {
+        if self.tabs.is_empty() {
+            return Vec::new();
+        }
+        self.tab_layout(self.active).0
+    }
+
+    /// Gives every pane (in every tab) its place, so switching tabs never
+    /// has to rewrap. Zoomed-away panes keep their size.
+    fn relayout(&mut self) {
+        for index in 0..self.tabs.len() {
+            let (rects, dividers) = self.tab_layout(index);
+            for (id, rect) in rects {
+                let text = &self.ctx.text;
+                if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+                    pane.set_rect(rect, text);
+                }
+            }
+            if index == self.active {
+                self.dividers = dividers;
+            }
+        }
+        self.dirty = true;
+    }
+
+    // ---- the loop -----------------------------------------------------
+
     fn handle(&mut self, message: Msg) {
         match message {
-            Msg::Pty(bytes) => {
-                let notices = self.session.feed(&bytes, &self.theme);
-                self.credits.release();
-                for notice in notices {
-                    self.notice(notice);
+            Msg::Pty(id, bytes) => {
+                let Self { panes, ctx, .. } = self;
+                if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
+                    pane.feed(ctx, &bytes);
                 }
                 self.dirty = true;
             }
-            Msg::ShellExited(code) => {
-                self.session.shell_exited(code);
+            Msg::ShellExited(id, code) => {
+                // With other panes around, `exit` closes this one; the last
+                // one offers a new shell instead.
+                if self.panes.len() > 1 {
+                    self.close_pane(id);
+                } else if let Some(pane) = self.pane(id) {
+                    pane.session.shell_exited(code);
+                }
                 self.dirty = true;
             }
             Msg::Ui(event) => self.ui_event(event),
@@ -300,101 +621,37 @@ impl App {
         self.update_title();
     }
 
-    fn notice(&mut self, notice: Notice) {
-        match notice {
-            Notice::Title(title) => {
-                if let Some(block) = self.session.active_mut() {
-                    block.command = if block.command.is_empty() { title } else { block.command.clone() };
-                }
-            }
-            Notice::Clipboard(text) => {
-                platform::clipboard_set(&text);
-                self.show_toast("Copied to the clipboard by the program");
-            }
-            Notice::Bell => self.bell = Some(Instant::now()),
-            Notice::Clear => {
-                self.session.clear();
-                self.selection = None;
-                self.selected = None;
-                self.scroll = 0.0;
-                self.scroll_target = 0.0;
-            }
-            Notice::Finished => {}
-        }
-    }
-
     fn tick(&mut self) {
         let now = Instant::now();
-        if self.session.tick(now) {
+        for pane in &mut self.panes {
+            if pane.tick(now) {
+                self.dirty = true;
+            }
+        }
+        if self.ctx.toast.as_ref().is_some_and(|(_, at)| now >= *at) {
+            self.ctx.toast = None;
             self.dirty = true;
         }
-        if self.reflow_at.is_some_and(|at| now >= at) {
-            self.reflow_at = None;
-            self.session.reflow();
-            self.dirty = true;
-        }
-        if self.toast.as_ref().is_some_and(|(_, at)| now >= *at) {
-            self.toast = None;
-            self.dirty = true;
-        }
-        if self.bell.is_some_and(|at| now.duration_since(at) > Duration::from_millis(180)) {
-            self.bell = None;
-            self.dirty = true;
-        }
-        if (self.scroll - self.scroll_target).abs() > 0.5 {
-            self.scroll += (self.scroll_target - self.scroll) * 0.35;
-            self.dirty = true;
-        } else if self.scroll != self.scroll_target {
-            self.scroll = self.scroll_target;
-            self.dirty = true;
-        }
-        // Animations that tick on their own (spinner, caret blink).
         if self.animation_at.is_some_and(|at| now >= at) {
             self.dirty = true;
         }
     }
 
-    fn animation_deadline(&self) -> Option<Instant> {
-        let now = Instant::now();
-        let mut next: Option<Instant> = None;
-        let mut want = |at: Instant| next = Some(next.map_or(at, |n| n.min(at)));
-        if self.focused && (self.session.editor_active() || self.session.active().is_some()) {
-            let elapsed = now.duration_since(self.blink_epoch).as_millis() as u64;
-            let period = BLINK.as_millis() as u64;
-            want(self.blink_epoch + Duration::from_millis((elapsed / period + 1) * period));
-        }
-        if self.session.active().is_some_and(|b| !b.alt_screen()) || self.session.phase == Phase::Boot {
-            want(now + Duration::from_millis(80));
-        }
-        next
-    }
-
     fn next_wakeup(&self) -> Option<Instant> {
-        let mut times = vec![self.animation_at, self.session.deadline(), self.reflow_at];
-        times.push(self.toast.as_ref().map(|(_, at)| *at));
-        times.push(self.bell.map(|at| at + Duration::from_millis(200)));
-        if (self.scroll - self.scroll_target).abs() > 0.0 {
-            times.push(Some(Instant::now() + Duration::from_millis(16)));
-        }
+        let mut times: Vec<Option<Instant>> = self.panes.iter().map(Pane::next_wakeup).collect();
+        times.push(self.animation_at);
+        times.push(self.ctx.toast.as_ref().map(|(_, at)| *at));
         times.into_iter().flatten().min()
     }
 
     fn update_title(&mut self) {
-        let title = match self.session.active() {
-            Some(block) if !block.command.is_empty() => {
-                format!("{} — Temino", block.command.lines().next().unwrap_or(""))
-            }
-            _ => format!("{} — Temino", ui::short_path(&self.session.cwd)),
-        };
+        let Some(id) = self.focused_id() else { return };
+        let Some(pane) = self.panes.iter().find(|p| p.id == id) else { return };
+        let title = format!("{} — Temino", pane.title());
         if title != self.title {
             platform::set_title(&title);
             self.title = title;
         }
-    }
-
-    fn show_toast(&mut self, message: &str) {
-        self.toast = Some((message.to_owned(), Instant::now() + Duration::from_millis(1600)));
-        self.dirty = true;
     }
 
     fn set_cursor(&mut self, cursor: Cursor) {
@@ -404,120 +661,87 @@ impl App {
         }
     }
 
-    fn pin_to_bottom(&mut self) {
-        self.scroll_target = 0.0;
-    }
-
-    fn max_scroll(&self) -> f32 {
-        (self.layout.content_height - self.layout.list.h).max(0.0)
-    }
-
-    fn scroll_by(&mut self, delta: f32) {
-        self.scroll_target = (self.scroll_target + delta).clamp(0.0, self.max_scroll());
-        self.dirty = true;
+    fn quit(&mut self) {
+        for pane in &mut self.panes {
+            pane.hangup();
+        }
+        self.quitting = true;
+        platform::quit();
     }
 
     // ---- events -------------------------------------------------------
 
     fn ui_event(&mut self, event: UiEvent) {
+        self.dirty = true;
         match event {
             UiEvent::Key(key) => {
-                self.blink_epoch = Instant::now();
+                self.ctx.blink_epoch = Instant::now();
                 self.key(key);
-                self.dirty = true;
             }
-            UiEvent::Resize { width, height } => {
+            UiEvent::Resize { width, height, scale } => {
                 self.width = width;
                 self.height = height;
-                let size = grid_size(width, height, &self.text);
-                self.session.resize(size);
-                self.reflow_at = Some(Instant::now() + Duration::from_millis(90));
-                self.dirty = true;
+                if scale != self.scale {
+                    self.scale = scale;
+                    self.ctx.text.set_scale(scale);
+                    for pane in &mut self.panes {
+                        pane.cells_changed(&self.ctx.text);
+                    }
+                }
+                self.relayout();
             }
             UiEvent::Focus(focused) => {
                 self.focused = focused;
-                self.blink_epoch = Instant::now();
-                if let Some(block) = self.session.active() {
-                    if block.term.mode().contains(TermMode::FOCUS_IN_OUT) {
-                        self.session.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+                self.ctx.blink_epoch = Instant::now();
+                if let Some(id) = self.focused_id() {
+                    if let Some(pane) = self.panes.iter().find(|p| p.id == id) {
+                        pane.focus_changed(focused);
                     }
                 }
-                self.dirty = true;
             }
-            UiEvent::Close => self.close(),
-            UiEvent::Wheel { dy, x, y, .. } => self.wheel(dy, x, y),
+            UiEvent::Close => self.quit(),
+            UiEvent::Wheel { dy, x, y, .. } => {
+                if let Some((id, rect)) = self.pane_at(x, y) {
+                    let Self { panes, ctx, .. } = self;
+                    if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
+                        pane.wheel(ctx, dy, x - rect.x, y - rect.y);
+                    }
+                }
+            }
             UiEvent::MouseDown { x, y, buttons, clicks, mods } => self.mouse_down(x, y, buttons, clicks, mods),
             UiEvent::MouseMoved { x, y, buttons } => self.mouse_moved(x, y, buttons),
             UiEvent::MouseUp { x, y } => self.mouse_up(x, y),
         }
     }
 
-    fn close(&mut self) {
-        self.session.hangup();
-        self.quitting = true;
-        platform::quit();
-    }
-
     fn change_font_size(&mut self, size: f32) {
         let size = size.clamp(8.0, 32.0);
-        if size == self.text.cell.size {
+        if size == self.ctx.text.cell.size {
             return;
         }
-        self.text.set_size(size);
-        self.session.set_cell_size(self.text.cell.width, self.text.cell.height);
-        let grid = grid_size(self.width, self.height, &self.text);
-        self.session.resize(grid);
-        self.session.reflow();
-        self.show_toast(&format!("Font size {size:.0}"));
+        self.ctx.text.set_size(size);
+        for pane in &mut self.panes {
+            pane.cells_changed(&self.ctx.text);
+        }
+        self.ctx.show_toast(&format!("Font size {size:.0}"));
     }
 
+    /// Window shortcuts (tabs, splits, font size); the rest go to the pane.
     fn key(&mut self, key: KeyEvent) {
-        let named = keys::named(&key);
-        // Alt (Haiku's Command key) shortcuts work in every mode.
-        if key.cmd() && !key.ctrl() {
-            let handled = match (named, key.base_char()) {
-                (Some(Named::Up), _) => {
-                    self.select_neighbor(-1);
+        let named = key.named;
+        let several_tabs = self.tabs.len() > 1;
+        if key.ctrl() && !key.cmd() {
+            let handled = match named {
+                Some(Named::Tab) => {
+                    self.step_tab(if key.shift() { -1 } else { 1 });
                     true
                 }
-                (Some(Named::Down), _) => {
-                    self.select_neighbor(1);
+                Some(Named::PageUp) if several_tabs && !key.shift() => {
+                    self.step_tab(-1);
                     true
                 }
-                (_, Some('c')) => {
-                    self.copy(key.shift());
-                    true
-                }
-                (_, Some('v')) => {
-                    self.paste();
-                    true
-                }
-                (_, Some('k')) => {
-                    self.clear_blocks();
-                    true
-                }
-                (_, Some('q' | 'w')) => {
-                    self.close();
-                    true
-                }
-                (_, Some('=' | '+')) => {
-                    self.change_font_size(self.text.cell.size + 1.0);
-                    true
-                }
-                (_, Some('-')) => {
-                    self.change_font_size(self.text.cell.size - 1.0);
-                    true
-                }
-                (_, Some('0')) => {
-                    self.change_font_size(DEFAULT_FONT_SIZE);
-                    true
-                }
-                (_, Some('a')) if self.session.editor_active() => {
-                    self.editor.select_all();
-                    true
-                }
-                (_, Some('z')) if self.session.editor_active() => {
-                    self.editor.undo();
+                Some(Named::PageDown) if several_tabs && !key.shift() => {
+                    self.step_tab(1);
                     true
                 }
                 _ => false,
@@ -526,1080 +750,405 @@ impl App {
                 return;
             }
         }
-
-        if let Some(block) = self.session.active() {
-            let alt = block.alt_screen();
-            let mode = *block.term.mode();
-            if !alt && key.shift() && matches!(named, Some(Named::PageUp | Named::PageDown)) {
-                let page = self.layout.list.h * 0.8;
-                self.scroll_by(if named == Some(Named::PageUp) { page } else { -page });
-                return;
-            }
-            let bytes = keys::encode(&key, mode);
-            if !bytes.is_empty() {
-                self.session.write(&bytes);
-                self.selection = None;
-                self.pin_to_bottom();
-            }
-            return;
-        }
-
-        match self.session.phase {
-            Phase::Ready | Phase::Continuation => self.editor_key(key, named),
-            Phase::Exited => {
-                if named == Some(Named::Enter) {
-                    self.restart();
+        if key.cmd() && !key.ctrl() {
+            let handled = match (named, key.base_char()) {
+                (Some(Named::Left), _) if key.option() => {
+                    self.focus_toward(-1.0, 0.0);
+                    true
                 }
-            }
-            _ => {
-                if key.ctrl() && key.base_char() == Some('c') {
-                    self.session.interrupt();
+                (Some(Named::Right), _) if key.option() => {
+                    self.focus_toward(1.0, 0.0);
+                    true
                 }
-            }
-        }
-    }
-
-    fn restart(&mut self) {
-        let size = grid_size(self.width, self.height, &self.text);
-        self.session = Session::new(size);
-        self.session.set_cell_size(self.text.cell.width, self.text.cell.height);
-        if let Err(error) = self.session.start(self.sender.clone(), self.credits.clone()) {
-            self.show_toast(&format!("Couldn't start the shell: {error}"));
-        }
-        self.selection = None;
-        self.selected = None;
-    }
-
-    fn editor_key(&mut self, key: KeyEvent, named: Option<Named>) {
-        let shift = key.shift();
-        if self.completion.is_some() {
-            match named {
-                Some(Named::Up) => return self.move_menu(-1),
-                Some(Named::Down) => return self.move_menu(1),
-                Some(Named::Tab) => return self.move_menu(if shift { -1 } else { 1 }),
-                Some(Named::Enter) => return self.accept_completion(),
-                Some(Named::Escape) => {
-                    self.completion = None;
-                    return;
+                (Some(Named::Up), _) if key.option() => {
+                    self.focus_toward(0.0, -1.0);
+                    true
                 }
-                Some(Named::Left | Named::Right | Named::Home | Named::End) => self.completion = None,
-                _ => {}
-            }
-        }
-        // Which menu was open before this key, so typing can refilter it.
-        let open_menu = self.completion.as_ref().and_then(|c| c.candidates.first()).map(|f| f.kind == Kind::History);
-        let suggestion = self.editor.suggestion(&self.history).map(str::to_owned);
-        let word = key.ctrl();
-        match named {
-            Some(Named::Enter) => {
-                if shift || key.option() {
-                    self.editor.insert("\n");
-                } else {
-                    self.submit();
+                (Some(Named::Down), _) if key.option() => {
+                    self.focus_toward(0.0, 1.0);
+                    true
                 }
-            }
-            Some(Named::Backspace) => {
-                if word {
-                    self.editor.delete_word_back()
-                } else {
-                    self.editor.backspace()
+                (Some(Named::Enter), _) => {
+                    self.toggle_zoom();
+                    true
                 }
-            }
-            Some(Named::Delete) => self.editor.delete(),
-            Some(Named::Left) => self.editor.left(word, shift),
-            Some(Named::Right) => match suggestion {
-                Some(rest) if !shift => {
-                    let take = if word { rest.split_inclusive(' ').next().unwrap_or(&rest).to_owned() } else { rest };
-                    self.editor.insert(&take);
+                (Some(Named::PageUp), _) => {
+                    self.step_tab(-1);
+                    true
                 }
-                _ => self.editor.right(word, shift),
-            },
-            Some(Named::Home) => self.editor.home(shift),
-            Some(Named::End) => match suggestion {
-                Some(rest) if !shift => self.editor.insert(&rest),
-                _ => self.editor.end(shift),
-            },
-            Some(Named::Up) => {
-                if !self.editor.vertical(false, shift) {
-                    self.editor.browse(&self.history, true);
+                (Some(Named::PageDown), _) => {
+                    self.step_tab(1);
+                    true
                 }
-            }
-            Some(Named::Down) => {
-                if !self.editor.vertical(true, shift) {
-                    self.editor.browse(&self.history, false);
-                }
-            }
-            Some(Named::Tab) => self.tab(),
-            Some(Named::Escape) => {
-                self.selected = None;
-                self.selection = None;
-                self.editor.anchor = None;
-            }
-            Some(Named::PageUp) => self.scroll_by(self.layout.list.h * 0.8),
-            Some(Named::PageDown) => self.scroll_by(-self.layout.list.h * 0.8),
-            Some(Named::Insert | Named::F(_)) => {}
-            None => {
-                if key.ctrl() {
-                    match key.base_char() {
-                        Some('c') => {
-                            if self.session.phase == Phase::Continuation {
-                                self.session.interrupt();
-                            }
-                            self.editor.clear();
-                            self.completion = None;
-                        }
-                        Some('a') => self.editor.home(shift),
-                        Some('e') => match suggestion {
-                            Some(rest) => self.editor.insert(&rest),
-                            None => self.editor.end(shift),
-                        },
-                        Some('u') => self.editor.kill_to_start(),
-                        Some('k') => self.editor.kill_to_end(),
-                        Some('w') => self.editor.delete_word_back(),
-                        Some('l') => self.clear_blocks(),
-                        Some('z') => self.editor.undo(),
-                        Some('r') => self.open_history_menu(),
-                        Some('d') => {
-                            if self.editor.text.is_empty() {
-                                self.session.submit("exit");
-                            } else {
-                                self.editor.delete();
-                            }
-                        }
-                        _ => {}
+                (_, Some('t')) => {
+                    if let Err(error) = self.new_tab() {
+                        self.ctx.show_toast(&error);
                     }
-                } else if key.cmd() {
-                    // Unbound Alt combinations: nothing at the prompt.
-                } else if let Ok(text) = std::str::from_utf8(&key.bytes) {
-                    if !text.is_empty() && !text.chars().any(char::is_control) {
-                        self.editor.insert(text);
-                        self.selected = None;
-                    }
+                    true
                 }
+                (_, Some('b')) => {
+                    self.toggle_tab_list();
+                    true
+                }
+                (_, Some('d')) => {
+                    self.split(Axis::Row);
+                    true
+                }
+                (_, Some('e')) => {
+                    self.split(Axis::Column);
+                    true
+                }
+                (_, Some('w')) => {
+                    if let Some(id) = self.focused_id() {
+                        self.close_pane(id);
+                    }
+                    true
+                }
+                (_, Some('q')) => {
+                    self.quit();
+                    true
+                }
+                // Command+Shift+[ ] (macOS-style) moves between tabs.
+                (_, Some('[' | '{')) if key.shift() => {
+                    self.step_tab(-1);
+                    true
+                }
+                (_, Some(']' | '}')) if key.shift() => {
+                    self.step_tab(1);
+                    true
+                }
+                (_, Some('[')) => {
+                    self.cycle_focus(-1);
+                    true
+                }
+                (_, Some(']')) => {
+                    self.cycle_focus(1);
+                    true
+                }
+                (_, Some(c @ '1'..='9')) => {
+                    let n = c as usize - '1' as usize;
+                    self.switch_tab(if c == '9' { self.tabs.len() - 1 } else { n });
+                    true
+                }
+                (_, Some('=' | '+')) => {
+                    self.change_font_size(self.ctx.text.cell.size + 1.0);
+                    true
+                }
+                (_, Some('-')) => {
+                    self.change_font_size(self.ctx.text.cell.size - 1.0);
+                    true
+                }
+                (_, Some('0')) => {
+                    self.change_font_size(DEFAULT_FONT_SIZE);
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                return;
             }
         }
-        // Keep an open menu in step with what was typed.
-        let edited = matches!(named, None | Some(Named::Backspace | Named::Delete)) && !key.ctrl();
-        if let (Some(history), true) = (open_menu, edited && self.completion.is_some()) {
-            if history {
-                self.open_history_menu();
-            } else {
-                self.completion =
-                    complete::complete(&self.editor.text, self.editor.cursor, &self.session.cwd, &mut self.commands)
-                        .filter(|c| c.candidates.len() > 1);
-            }
+        let Some(id) = self.focused_id() else { return };
+        let Self { panes, ctx, .. } = self;
+        if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
+            pane.key(ctx, key);
         }
     }
 
-    fn submit(&mut self) {
-        let command = self.editor.text.trim_end().to_owned();
-        self.completion = None;
-        if command.trim().is_empty() {
-            return;
-        }
-        self.history.push(&command);
-        self.editor.take();
-        self.session.submit(&command);
-        self.selected = None;
-        self.selection = None;
-        self.pin_to_bottom();
-    }
-
-    fn tab(&mut self) {
-        let Some(mut completion) =
-            complete::complete(&self.editor.text, self.editor.cursor, &self.session.cwd, &mut self.commands)
-        else {
-            platform::beep();
-            return;
-        };
-        if completion.candidates.len() == 1 {
-            let only = completion.candidates.remove(0);
-            self.replace_word(completion.start, completion.end, &only.replacement);
-            return;
-        }
-        let prefix = complete::common_prefix(&completion.candidates);
-        let current = &self.editor.text[completion.start..completion.end];
-        if prefix.len() > current.len() {
-            self.replace_word(completion.start, completion.end, &prefix);
-            completion.end = completion.start + prefix.len();
-        }
-        self.completion = Some(completion);
-    }
-
-    fn open_history_menu(&mut self) {
-        let query = self.editor.text.to_lowercase();
-        let mut seen = std::collections::HashSet::new();
-        let candidates: Vec<Candidate> = self
-            .history
-            .entries
-            .iter()
-            .rev()
-            .filter(|entry| entry.to_lowercase().contains(&query) && seen.insert(entry.as_str()))
-            .take(200)
-            .map(|entry| Candidate {
-                replacement: entry.clone(),
-                label: entry.replace('\n', " ⏎ "),
-                kind: Kind::History,
-            })
-            .collect();
-        self.completion = (!candidates.is_empty()).then_some(Completion {
-            start: 0,
-            end: self.editor.text.len(),
-            candidates,
-            selected: 0,
-        });
-    }
-
-    fn replace_word(&mut self, start: usize, end: usize, with: &str) {
-        self.editor.anchor = Some(start);
-        self.editor.cursor = end;
-        self.editor.insert(with);
-    }
-
-    fn move_menu(&mut self, delta: i32) {
-        if let Some(completion) = &mut self.completion {
-            let n = completion.candidates.len() as i32;
-            completion.selected = ((completion.selected as i32 + delta).rem_euclid(n)) as usize;
+    fn toggle_tab_list(&mut self) {
+        let visible = !self.tab_list_visible();
+        self.tab_list = Some(visible);
+        self.relayout();
+        if !visible {
+            self.ctx.show_toast(&format!("Tabs hidden · {}+B shows them", platform::COMMAND_NAME));
         }
     }
 
-    fn accept_completion(&mut self) {
-        if let Some(completion) = self.completion.take() {
-            let candidate = &completion.candidates[completion.selected];
-            if candidate.kind == Kind::History {
-                self.editor.set(&candidate.replacement);
-            } else {
-                let end = completion.end.min(self.editor.text.len());
-                self.replace_word(completion.start, end, &candidate.replacement);
-            }
+    fn step_tab(&mut self, delta: i32) {
+        let n = self.tabs.len() as i32;
+        if n > 1 {
+            self.switch_tab((self.active as i32 + delta).rem_euclid(n) as usize);
         }
     }
 
-    fn clear_blocks(&mut self) {
-        self.session.clear();
-        self.selected = None;
-        self.selection = None;
-        self.scroll = 0.0;
-        self.scroll_target = 0.0;
+    fn pane_at(&self, x: f32, y: f32) -> Option<(u64, Rect)> {
+        self.visible_panes().into_iter().find(|(_, rect)| rect.contains(x, y))
     }
 
-    fn select_neighbor(&mut self, direction: i32) {
-        let visible: Vec<u64> = self.session.blocks.iter().map(|b| b.id).collect();
-        if visible.is_empty() {
-            return;
-        }
-        let index = match self.selected.and_then(|id| visible.iter().position(|&v| v == id)) {
-            Some(i) => (i as i32 + direction).clamp(0, visible.len() as i32 - 1) as usize,
-            None if direction < 0 => visible.len() - 1,
-            None => return,
-        };
-        self.selected = Some(visible[index]);
-        self.scroll_into_view(visible[index]);
-    }
-
-    fn scroll_into_view(&mut self, id: u64) {
-        let Some(layout) = self.layout.blocks.iter().find(|b| b.id == id) else {
-            // Off screen: lay out happens in render; approximate by index.
-            return;
-        };
-        let list = self.layout.list;
-        if layout.rect.y < list.y {
-            self.scroll_by(list.y - layout.rect.y + 8.0);
-        } else if layout.rect.bottom() > list.bottom() {
-            self.scroll_by(-(layout.rect.bottom() - list.bottom()).min(layout.rect.y - list.y));
-        }
-    }
-
-    fn copy(&mut self, command_only: bool) {
-        let text = if let Some(text) = self.editor.selected_text().filter(|_| self.session.editor_active()) {
-            Some(text.to_owned())
-        } else if let Some(selection) = self.selection {
-            self.session.blocks.iter().find(|b| b.id == selection.block).map(|block| {
-                let (start, end) = normalize(selection);
-                block.text_between(start, end)
-            })
-        } else if let Some(id) = self.selected {
-            self.session.blocks.iter_mut().find(|b| b.id == id).map(|block| {
-                if command_only {
-                    block.command.clone()
+    fn mouse_down(&mut self, x: f32, y: f32, pressed: i32, clicks: i32, mods: u32) {
+        if self.tab_area().contains(x, y) {
+            if let Some(&(_, index)) = self.close_hits.iter().find(|(r, _)| r.contains(x, y)) {
+                self.close_tab(index);
+            } else if let Some(&(_, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)) {
+                if pressed & buttons::TERTIARY != 0 {
+                    self.close_tab(index);
                 } else {
-                    block.output_text()
+                    self.switch_tab(index);
                 }
-            })
-        } else {
-            None
-        };
-        match text {
-            Some(text) if !text.is_empty() => {
-                platform::clipboard_set(&text);
-                let lines = text.lines().count();
-                self.show_toast(&if lines > 1 { format!("Copied {lines} lines") } else { "Copied".to_owned() });
+            } else if self.new_tab_hit.contains(x, y) {
+                if let Err(error) = self.new_tab() {
+                    self.ctx.show_toast(&error);
+                }
             }
-            _ => platform::beep(),
+            return;
+        }
+        if let Some(divider) = self.dividers.iter().find(|d| d.grab_area().contains(x, y)) {
+            self.pointer = Pointer::Divider(divider.clone());
+            return;
+        }
+        let Some((id, rect)) = self.pane_at(x, y) else { return };
+        if self.focused_id() != Some(id) {
+            self.set_focus(id);
+        }
+        self.pointer = Pointer::Pane(id);
+        let Self { panes, ctx, .. } = self;
+        if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
+            pane.mouse_down(ctx, x - rect.x, y - rect.y, pressed, clicks, mods);
         }
     }
 
-    fn paste(&mut self) {
-        let Some(text) = platform::clipboard_get() else { return };
-        let text = text.replace("\r\n", "\n");
-        if let Some(block) = self.session.active() {
-            let bracketed = block.term.mode().contains(TermMode::BRACKETED_PASTE);
-            let body = text.replace('\n', "\r");
-            if bracketed {
-                self.session.write(format!("\x1b[200~{}\x1b[201~", body.replace("\x1b[201~", "")).as_bytes());
-            } else {
-                self.session.write(body.as_bytes());
+    fn mouse_moved(&mut self, x: f32, y: f32, pressed: i32) {
+        match &self.pointer {
+            Pointer::Divider(divider) if pressed != 0 => {
+                let divider = divider.clone();
+                let parent = divider.parent;
+                let ratio = match divider.axis {
+                    Axis::Row => (x - parent.x) / parent.w,
+                    Axis::Column => (y - parent.y) / parent.h,
+                };
+                let extent = if divider.axis == Axis::Row { parent.w } else { parent.h };
+                let low = (MIN_PANE / extent).min(0.5);
+                let ratio = ratio.clamp(low, 1.0 - low);
+                let tab = &mut self.tabs[self.active];
+                if let Some(Node::Split { ratio: r, .. }) = tab.root.at_path(&divider.path) {
+                    *r = ratio;
+                }
+                self.relayout();
+                return;
             }
-        } else if self.session.editor_active() {
-            self.editor.insert(&text);
-        }
-    }
-
-    fn wheel(&mut self, dy: f32, x: f32, y: f32) {
-        if let Some(block) = self.session.active() {
-            if block.alt_screen() {
-                let mode = *block.term.mode();
-                if mode.intersects(TermMode::MOUSE_MODE) {
-                    if let Some((column, line)) = self.alt_cell(x, y) {
-                        let button = if dy < 0.0 { 64 } else { 65 };
-                        for _ in 0..(dy.abs().ceil() as usize).max(1) {
-                            self.mouse_report(button, column, line, true);
-                        }
-                    }
-                } else if mode.contains(TermMode::ALTERNATE_SCROLL) {
-                    let arrow: &[u8] = if mode.contains(TermMode::APP_CURSOR) {
-                        if dy < 0.0 {
-                            b"\x1bOA"
-                        } else {
-                            b"\x1bOB"
-                        }
-                    } else if dy < 0.0 {
-                        b"\x1b[A"
-                    } else {
-                        b"\x1b[B"
-                    };
-                    let count = (dy.abs() * 3.0).round().max(1.0) as usize;
-                    self.session.write(&arrow.repeat(count));
+            Pointer::Pane(id) if pressed != 0 => {
+                let id = *id;
+                let Self { panes, ctx, .. } = self;
+                if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
+                    let (ox, oy) = (pane.rect.x, pane.rect.y);
+                    pane.mouse_moved(ctx, x - ox, y - oy, pressed);
                 }
                 return;
             }
+            _ => {}
         }
-        self.scroll_by(-dy * 3.0 * self.text.cell.height);
-    }
-
-    fn alt_cell(&self, x: f32, y: f32) -> Option<(usize, usize)> {
-        let (_, ox, oy) = self.layout.alt?;
-        let cell = self.text.cell;
-        let column = ((x - ox) / cell.width).floor().max(0.0) as usize;
-        let line = ((y - oy) / cell.height).floor().max(0.0) as usize;
-        Some((column.min(self.session.size.columns - 1), line.min(self.session.size.lines - 1)))
-    }
-
-    fn mouse_report(&self, button: u8, column: usize, line: usize, pressed: bool) {
-        let Some(block) = self.session.active() else { return };
-        let mode = *block.term.mode();
-        if mode.contains(TermMode::SGR_MOUSE) {
-            let end = if pressed { 'M' } else { 'm' };
-            self.session.write(format!("\x1b[<{button};{};{}{end}", column + 1, line + 1).as_bytes());
-        } else if column < 223 && line < 223 {
-            let code = if pressed { button } else { 3 };
-            self.session.write(&[0x1b, b'[', b'M', 32 + code, 33 + column as u8, 33 + line as u8]);
-        }
-    }
-
-    fn mouse_down(&mut self, x: f32, y: f32, buttons: i32, clicks: i32, mods: u32) {
-        self.dirty = true;
-        let button = if buttons & 2 != 0 {
-            2
-        } else if buttons & 4 != 0 {
-            1
-        } else {
-            0
-        };
-        if let Some((index, _, _)) = self.layout.alt {
-            let block = &self.session.blocks[index];
-            let mode = *block.term.mode();
-            if mode.intersects(TermMode::MOUSE_MODE) && mods & platform::mods::SHIFT == 0 {
-                if let Some((column, line)) = self.alt_cell(x, y) {
-                    self.mouse_report(button, column, line, true);
-                }
-                return;
-            }
-            if let Some((column, line)) = self.alt_cell(x, y) {
-                let id = block.id;
-                self.start_selection(id, line, column, clicks);
-            }
+        if self.tab_area().contains(x, y) {
+            self.set_cursor(Cursor::Arrow);
             return;
         }
-        if let Some((_, item)) = self.layout.menu_rows.iter().find(|(rect, _)| rect.contains(x, y)) {
-            let item = *item;
-            if let Some(completion) = &mut self.completion {
-                completion.selected = item;
-            }
-            self.accept_completion();
+        if let Some(divider) = self.dividers.iter().find(|d| d.grab_area().contains(x, y)) {
+            let cursor = if divider.axis == Axis::Row { Cursor::ResizeColumn } else { Cursor::ResizeRow };
+            self.set_cursor(cursor);
             return;
         }
-        self.completion = None;
-        if self.layout.input.contains(x, y) {
-            self.place_editor_cursor(x, y, mods & platform::mods::SHIFT != 0);
-            self.selected = None;
-            return;
+        let Some((id, rect)) = self.pane_at(x, y) else { return };
+        let Self { panes, ctx, .. } = self;
+        let cursor = panes.iter_mut().find(|p| p.id == id).map(|pane| pane.mouse_moved(ctx, x - rect.x, y - rect.y, 0));
+        if let Some(cursor) = cursor {
+            self.set_cursor(cursor);
         }
-        let hit =
-            self.layout.blocks.iter().find(|b| b.rect.contains(x, y)).map(|b| (b.id, b.output_x, b.output_y, b.lines));
-        let Some((id, ox, oy, lines)) = hit else {
-            self.selected = None;
-            self.selection = None;
-            return;
-        };
-        let cell = self.text.cell;
-        if button == 0 && lines > 0 && y >= oy && y < oy + lines as f32 * cell.height {
-            let line = ((y - oy) / cell.height) as usize;
-            let column = ((x - ox) / cell.width).max(0.0) as usize;
-            self.start_selection(id, line.min(lines - 1), column.min(self.session.size.columns - 1), clicks);
-            self.selected = Some(id);
-        } else {
-            self.selection = None;
-            self.selected = if self.selected == Some(id) && button == 0 { None } else { Some(id) };
-        }
-    }
-
-    fn start_selection(&mut self, block: u64, line: usize, column: usize, clicks: i32) {
-        let mode = match clicks {
-            2 => SelectMode::Word,
-            n if n >= 3 => SelectMode::Line,
-            _ => SelectMode::Char,
-        };
-        self.selection = Some(Selection { block, anchor: (line, column), head: (line, column), mode });
-        self.dragging = true;
-    }
-
-    fn mouse_moved(&mut self, x: f32, y: f32, buttons: i32) {
-        // Pointer shape: an arrow over chrome, the I-beam over text.
-        let over_text = self.layout.alt.is_some()
-            || self.layout.input.contains(x, y)
-            || self.layout.blocks.iter().any(|b| b.rect.contains(x, y) && y >= b.output_y);
-        self.set_cursor(if over_text { Cursor::IBeam } else { Cursor::Arrow });
-
-        if let Some((index, _, _)) = self.layout.alt {
-            let mode = *self.session.blocks[index].term.mode();
-            if buttons != 0 && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
-                if let Some((column, line)) = self.alt_cell(x, y) {
-                    self.mouse_report(32, column, line, true);
-                }
-                return;
-            }
-        }
-        if !self.dragging || buttons == 0 {
-            return;
-        }
-        let Some(mut selection) = self.selection else { return };
-        let cell = self.text.cell;
-        let (line, column) = if let Some((_, ox, oy)) = self.layout.alt {
-            let column = ((x - ox) / cell.width).max(0.0) as usize;
-            let line = ((y - oy) / cell.height).max(0.0) as usize;
-            (line.min(self.session.size.lines - 1), column)
-        } else {
-            let Some(layout) = self.layout.blocks.iter().find(|b| b.id == selection.block) else { return };
-            if layout.lines == 0 {
-                return;
-            }
-            let line = ((y - layout.output_y) / cell.height).floor().clamp(0.0, (layout.lines - 1) as f32) as usize;
-            let column = ((x - layout.output_x) / cell.width).max(0.0) as usize;
-            (line, column)
-        };
-        selection.head = (line, column.min(self.session.size.columns - 1));
-        self.selection = Some(selection);
-        self.dirty = true;
     }
 
     fn mouse_up(&mut self, x: f32, y: f32) {
-        if let Some((index, _, _)) = self.layout.alt {
-            let mode = *self.session.blocks[index].term.mode();
-            if mode.intersects(TermMode::MOUSE_MODE) {
-                if let Some((column, line)) = self.alt_cell(x, y) {
-                    self.mouse_report(0, column, line, false);
-                }
+        if let Pointer::Pane(id) = std::mem::replace(&mut self.pointer, Pointer::Idle) {
+            let Self { panes, ctx, .. } = self;
+            if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
+                let (ox, oy) = (pane.rect.x, pane.rect.y);
+                pane.mouse_up(ctx, x - ox, y - oy);
             }
         }
-        self.dragging = false;
-        if let Some(selection) = self.selection {
-            if selection.mode == SelectMode::Char && selection.anchor == selection.head {
-                self.selection = None;
-            }
-        }
-        self.dirty = true;
-    }
-
-    fn place_editor_cursor(&mut self, x: f32, y: f32, extend: bool) {
-        if !self.session.editor_active() {
-            return;
-        }
-        let cell = self.text.cell;
-        let line = ((y - self.layout.editor_y) / cell.height).floor().max(0.0) as usize;
-        let column = ((x - self.layout.editor_x) / cell.width).round().max(0.0) as usize;
-        let line = line.min(self.editor.line_count() - 1);
-        let to = self.editor.offset(line, column);
-        if extend {
-            self.editor.anchor.get_or_insert(self.editor.cursor);
-        } else {
-            self.editor.anchor = None;
-        }
-        self.editor.cursor = to;
     }
 
     // ---- drawing ------------------------------------------------------
 
-    fn blink_on(&self) -> bool {
-        let elapsed = Instant::now().duration_since(self.blink_epoch);
-        (elapsed.as_millis() / BLINK.as_millis()).is_multiple_of(2)
-    }
-
     fn render(&mut self) {
         crate::trace("render: begin");
         self.dirty = false;
-        self.animation_at = self.animation_deadline();
         let (width, height) = (self.width as f32, self.height as f32);
-        self.scene.reset(width, height, self.theme.background);
-        self.layout = Layout::default();
-        let alt = self.session.active().is_some_and(|b| b.alt_screen());
-        if alt {
-            self.draw_alt();
-        } else {
-            self.draw_main();
+        self.scene.reset(width, height, self.scale, self.ctx.theme.background);
+        let focus = self.focused_id();
+        let visible = self.visible_panes();
+        let several = visible.len() > 1;
+        let mut animation: Option<Instant> = None;
+        for (id, _) in &visible {
+            let focused = Some(*id) == focus && self.focused;
+            let Self { panes, ctx, scene, .. } = self;
+            let Some(pane) = panes.iter_mut().find(|p| p.id == *id) else { continue };
+            pane.draw(scene, ctx, focused);
+            if let Some(at) = pane.animation_deadline(ctx, focused) {
+                animation = Some(animation.map_or(at, |a| a.min(at)));
+            }
+            if several && Some(*id) != focus {
+                // Inactive panes recede a little, as in Warp.
+                scene.set_layer(LAYER_OVERLAY);
+                scene.fill(pane.rect, ctx.theme.background.alpha(0.35));
+                scene.set_layer(LAYER_CONTENT);
+            }
         }
-        self.draw_toast();
-        if self.bell.is_some() {
+        self.animation_at = animation;
+        for divider in &self.dividers {
             self.scene.set_layer(LAYER_OVERLAY);
-            let edge = Rect::new(0.0, 0.0, width, height);
-            self.scene.quad(Quad::new(edge, Color::TRANSPARENT).border(3.0, self.theme.warning.alpha(0.7)));
+            self.scene.fill(divider.line, self.ctx.theme.divider.mix(self.ctx.theme.text_faint, 0.35));
+            self.scene.set_layer(LAYER_CONTENT);
         }
+        self.draw_tab_bar();
+        self.draw_toast();
         crate::trace("render: scene built");
-        match self.gpu.render(&self.scene, &mut self.text.atlas) {
+        match self.gpu.render(&self.scene, &mut self.ctx.text.atlas) {
             Ok(pixels) => {
+                let (pw, ph) = self.scene.pixel_size();
                 if let Some(path) = std::env::var_os("TEMINO_CAPTURE") {
-                    write_ppm(&path, pixels, self.width, self.height);
+                    write_ppm(&path, pixels, pw, ph);
                 }
-                platform::present(pixels, self.width, self.height)
+                platform::present(pixels, pw, ph)
             }
             Err(error) => {
                 crate::fatal(&format!("rendering failed: {error}"));
-                self.close();
+                self.quit();
             }
         }
     }
 
-    fn selection_span(&self, id: u64) -> Option<Span> {
-        let selection = self.selection.filter(|s| s.block == id)?;
-        let block = self.session.blocks.iter().find(|b| b.id == id)?;
-        let (mut start, mut end) = normalize(selection);
-        let columns = self.session.size.columns;
-        match selection.mode {
-            SelectMode::Char => {}
-            SelectMode::Line => {
-                start.1 = 0;
-                end.1 = columns - 1;
-            }
-            SelectMode::Word => {
-                let grid = block.term.grid();
-                let is_word = |line: usize, column: usize| {
-                    let c = grid[block.grid_line(line)][alacritty_terminal::index::Column(column)].c;
-                    !c.is_whitespace() && !"()[]{}<>'\"`|;,".contains(c)
-                };
-                while start.1 > 0 && is_word(start.0, start.1 - 1) {
-                    start.1 -= 1;
-                }
-                while end.1 + 1 < columns && is_word(end.0, end.1 + 1) {
-                    end.1 += 1;
-                }
-            }
-        }
-        Some((start, end))
-    }
-
-    fn draw_alt(&mut self) {
-        let Some(index) = self.session.blocks.iter().rposition(|b| b.running() && b.kind == BlockKind::Command) else {
+    fn draw_tab_bar(&mut self) {
+        self.tab_hits.clear();
+        self.close_hits.clear();
+        self.new_tab_hit = Rect::default();
+        if !self.tab_list_visible() {
             return;
-        };
-        let id = self.session.blocks[index].id;
-        let selection = self.selection_span(id);
-        let blink = self.blink_on();
-        let (x, y) = (PAD_X, ALT_PAD_Y);
-        self.layout.alt = Some((index, x, y));
-        let lines = self.session.blocks[index].term.grid().screen_lines();
-        let App { scene, text, theme, session, focused, .. } = self;
-        let view = GridView {
-            block: &session.blocks[index],
-            x,
-            y,
-            first: 0,
-            last: lines,
-            cursor: true,
-            focused: *focused,
-            selection,
-            blink_on: blink,
-        };
-        ui::draw_grid(scene, text, theme, view);
-    }
-
-    fn block_height(&mut self, index: usize) -> (f32, usize) {
-        let cell = self.text.cell;
-        let columns = self.session.size.columns.max(1);
-        let block = &mut self.session.blocks[index];
-        let command_lines = if block.kind == BlockKind::Command {
-            block.command.split('\n').map(|line| line.chars().count().div_ceil(columns).max(1)).sum()
-        } else {
-            0
-        };
-        let output = if block.alt_screen() { 0 } else { block.output_lines() };
-        let mut height = BLOCK_PAD_TOP + META_HEIGHT + command_lines as f32 * cell.height + BLOCK_PAD_BOTTOM;
-        if output > 0 {
-            height += OUTPUT_GAP + output as f32 * cell.height;
         }
-        (height + 1.0, output)
-    }
-
-    fn input_height(&self) -> f32 {
-        let lines = if self.session.editor_active() { self.editor.line_count().min(MAX_EDITOR_LINES) } else { 1 };
-        INPUT_PAD + CHIP_HEIGHT + 8.0 + lines as f32 * self.text.cell.height + INPUT_PAD + 2.0
-    }
-
-    fn draw_main(&mut self) {
-        let (width, height) = (self.width as f32, self.height as f32);
-        let input_height = self.input_height();
-        let welcome_height = if self.session.blocks.is_empty() { self.welcome_height() } else { 0.0 };
-
-        let mut heights = Vec::with_capacity(self.session.blocks.len());
-        let mut total = welcome_height;
-        for index in 0..self.session.blocks.len() {
-            let h = self.block_height(index);
-            total += h.0;
-            heights.push(h);
-        }
-        // Keep the view still when output grows while scrolled up.
-        let list_max = (height - input_height).max(0.0);
-        if self.scroll_target > 0.0 && self.content_height > 0.0 && total > self.content_height {
-            let grown = total - self.content_height;
-            self.scroll += grown;
-            self.scroll_target += grown;
-        }
-        self.content_height = total;
-        let max_scroll = (total - list_max).max(0.0);
-        self.scroll_target = self.scroll_target.min(max_scroll);
-        self.scroll = self.scroll.min(max_scroll);
-        let (top, input_y) =
-            if total <= list_max { (0.0, total) } else { (list_max - total + self.scroll.round(), list_max) };
-        self.layout.list = Rect::new(0.0, 0.0, width, input_y);
-        self.layout.content_height = total;
-
-        self.scene.push_clip(Rect::new(0.0, 0.0, width, input_y));
-        if welcome_height > 0.0 {
-            self.draw_welcome(top);
-        }
-        let mut y = top + welcome_height;
-        for (index, (block_height, output)) in heights.into_iter().enumerate() {
-            if y + block_height > 0.0 && y < input_y {
-                self.draw_block(index, y, block_height, output);
-            }
-            y += block_height;
-        }
-        self.scene.pop_clip();
-
-        if total > list_max && list_max > 40.0 {
-            let thumb = (list_max / total * list_max).max(24.0);
-            let position = (1.0 - self.scroll / max_scroll.max(1.0)) * (list_max - thumb);
-            let bar = Rect::new(width - 6.0, position + 2.0, 3.0, thumb - 4.0);
-            self.scene.quad(Quad::new(bar, self.theme.text_faint.alpha(0.45)).radius(1.5));
-        }
-        self.draw_input(input_y, input_height);
-    }
-
-    /// Whether the window is wide enough for the ASCII-art banner.
-    fn banner_fits(&self) -> bool {
-        self.session.size.columns >= BANNER[0].chars().count() + 2
-    }
-
-    fn welcome_height(&self) -> f32 {
-        let title = if self.banner_fits() { BANNER.len() as f32 * self.text.cell.height } else { 30.0 };
-        24.0 + title + 30.0 + 2.0 * 28.0 + 12.0
-    }
-
-    fn draw_welcome(&mut self, top: f32) {
-        let banner = self.banner_fits();
-        let App { scene, text, theme, gpu, .. } = self;
-        let x = PAD_X + 6.0;
-        let mut y = top + 24.0;
-        if banner {
-            // The three leaves of the Haiku logo, left to right: green,
-            // orange, peach, blended by hue so green turns yellow on its way
-            // to orange. Top rows catch a little light like the leaves'
-            // upper edges; the box-drawing "shadow" strokes sit darker.
-            let leaves = [Color::hex(0x5ae202), Color::hex(0xff8203), Color::hex(0xffc468)];
-            let columns = BANNER[0].chars().count() as f32 - 1.0;
-            for (row, line) in BANNER.iter().enumerate() {
-                let light = 0.22 * (1.0 - row as f32 / (BANNER.len() - 1) as f32);
-                for (column, c) in line.chars().enumerate() {
-                    let t = column as f32 / columns * 2.0;
-                    let leaf =
-                        if t < 1.0 { leaves[0].mix_hue(leaves[1], t) } else { leaves[1].mix_hue(leaves[2], t - 1.0) };
-                    let color = if c == '█' {
-                        leaf.mix(Color::hex(0xffffff), light)
-                    } else {
-                        leaf.mix(theme.background, 0.55)
-                    };
-                    let cx = x + column as f32 * text.cell.width;
-                    text.draw_cell(scene, c, cx, y, Style::default(), color, 1);
-                }
-                y += text.cell.height;
-            }
-        } else {
-            text.draw_text(scene, "Temino", x, y + 26.0, UI_BOLD, 28.0, theme.text);
-            y += 30.0;
-        }
-        let tagline = "A modern GPU-accelerated terminal for Haiku";
-        let width = text.draw_text(scene, tagline, x, y + 22.0, UI, 13.0, theme.text_dim);
-        let device = format!("  ·  Vulkan on {}", gpu.device_name);
-        text.draw_text(scene, &device, x + width, y + 22.0, UI, 13.0, theme.text_faint);
-        let y = y + 36.0;
-        let rows: [&[(&str, &str)]; 2] = [
-            &[
-                ("Enter", "run"),
-                ("Shift+Enter", "new line"),
-                ("Tab", "complete"),
-                ("↑ ↓", "history"),
-                ("Ctrl+R", "search history"),
-            ],
-            &[
-                ("Alt+K", "clear"),
-                ("Alt+↑ ↓", "select blocks"),
-                ("Alt+C", "copy"),
-                ("Alt+V", "paste"),
-                ("Alt+ + −", "font size"),
-            ],
-        ];
-        for (row, hints) in rows.iter().enumerate() {
-            let mut hx = x;
-            let hy = y + row as f32 * 28.0;
-            for (key, label) in hints.iter() {
-                hx += ui::hint(scene, text, theme, key, label, hx, hy) + 18.0;
-            }
-        }
-    }
-
-    fn draw_block(&mut self, index: usize, y: f32, block_height: f32, output: usize) {
         let width = self.width as f32;
-        let cell = self.text.cell;
-        let blink = self.blink_on();
-        let id = self.session.blocks[index].id;
-        let selection = self.selection_span(id);
-        let selected = self.selected == Some(id);
-        let focused = self.focused;
-        let user_columns = self.session.size.columns.max(1);
-        let App { scene, text, theme, session, layout, .. } = self;
-        let block = &session.blocks[index];
-        let rect = Rect::new(0.0, y, width, block_height - 1.0);
-
-        if selected {
-            scene.fill(rect, theme.accent.alpha(0.07));
-            scene.fill(Rect::new(0.0, y, 3.0, rect.h), theme.accent);
-        } else if block.failed() {
-            scene.fill(rect, theme.error.alpha(0.055));
-            scene.fill(Rect::new(0.0, y, 3.0, rect.h), theme.error.alpha(0.8));
+        // (title, number of panes) per tab.
+        let tabs: Vec<(String, usize)> = (0..self.tabs.len())
+            .map(|index| {
+                let id = self.tabs[index].focus;
+                let mut leaves = Vec::new();
+                self.tabs[index].root.leaves(&mut leaves);
+                let title = self.panes.iter().find(|p| p.id == id).map(Pane::title).unwrap_or_default();
+                (title, leaves.len())
+            })
+            .collect();
+        if self.strip == TabStrip::Left {
+            return self.draw_tab_sidebar(&tabs);
         }
-
-        // Meta line: where it ran, and how it went.
+        let titles: Vec<String> = tabs
+            .into_iter()
+            .map(|(title, panes)| if panes > 1 { format!("{title}  ·  {panes} panes") } else { title })
+            .collect();
+        let Self { scene, ctx, tab_hits, close_hits, new_tab_hit, active, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        let bar = Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT);
+        scene.fill(bar, theme.surface.mix(theme.background, 0.5));
+        scene.fill(Rect::new(0.0, TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
+        let plus = 34.0;
+        let tab_width = ((width - 12.0 - plus) / titles.len() as f32).min(TAB_MAX_WIDTH);
         let ascent = text.ui_ascent(12.0);
-        let baseline = (y + BLOCK_PAD_TOP + (META_HEIGHT + ascent * 0.72) / 2.0).round();
-        let mut x = PAD_X;
-        if block.kind == BlockKind::Background {
-            text.draw_text(scene, "Background output", x, baseline, UI, 12.0, theme.text_faint);
-        } else {
-            x += text.draw_text(scene, &ui::short_path(&block.cwd), x, baseline, UI, 12.0, theme.text_dim);
-            if let Some(branch) = &block.branch {
-                x += 10.0;
-                x += text.draw_text(scene, "⎇ ", x, baseline, UI, 12.0, theme.variable.alpha(0.9));
-                text.draw_text(scene, branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+        for (index, title) in titles.iter().enumerate() {
+            let rect = Rect::new(6.0 + index as f32 * tab_width, 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
+            let current = index == *active;
+            if current {
+                scene.quad(Quad::new(rect, theme.raised).radius(6.0).border(1.0, theme.divider));
             }
-            let (status, color) = if block.running() {
-                let frame = (block.started.elapsed().as_millis() / 80) as usize % SPINNER.len();
-                (format!("{}  {}", SPINNER[frame], ui::format_duration(block.duration())), theme.accent)
-            } else {
-                match block.exit {
-                    Some(0) | None => (format!("{}  ✓", ui::format_duration(block.duration())), theme.success),
-                    Some(code) => (format!("{}  exit {code}", ui::format_duration(block.duration())), theme.error),
-                }
-            };
-            let status_width = text.measure(&status, UI, 12.0);
-            text.draw_text(scene, &status, width - PAD_X - status_width, baseline, UI, 12.0, color);
-        }
-
-        // The command, wrapped to the grid width.
-        let mut line_y = y + BLOCK_PAD_TOP + META_HEIGHT;
-        if block.kind == BlockKind::Command {
-            for line in block.command.split('\n') {
-                let chars: Vec<char> = line.chars().collect();
-                for chunk in chars.chunks(user_columns).chain(chars.is_empty().then_some(&[][..])) {
-                    let s: String = chunk.iter().collect();
-                    text.draw_mono(scene, &s, PAD_X, line_y, Style::BOLD, theme.text);
-                    line_y += cell.height;
-                }
+            let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
+            let number = if index < 9 { format!("{}", index + 1) } else { String::new() };
+            let mut x = rect.x + 10.0;
+            if !number.is_empty() {
+                x += text.draw_text(scene, &number, x, baseline, UI, 11.0, theme.text_faint) + 8.0;
             }
+            let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
+            scene.push_clip(Rect::new(x, rect.y, (close.x - 4.0 - x).max(0.0), rect.h));
+            let color = if current { theme.text } else { theme.text_dim };
+            text.draw_text(scene, title, x, baseline, UI, 12.0, color);
+            scene.pop_clip();
+            text.draw_text(scene, "×", close.x + 4.0, baseline, UI, 13.0, theme.text_faint);
+            tab_hits.push((rect, index));
+            close_hits.push((close, index));
         }
-
-        let output_y = line_y + OUTPUT_GAP;
-        if output > 0 {
-            // Only the visible slice of long output is drawn.
-            let first = ((-output_y) / cell.height).floor().max(0.0) as usize;
-            let last = (((scene.height - output_y) / cell.height).ceil().max(0.0) as usize).min(output);
-            if first < last {
-                let view = GridView {
-                    block,
-                    x: PAD_X,
-                    y: output_y + first as f32 * cell.height,
-                    first,
-                    last,
-                    cursor: block.running(),
-                    focused,
-                    selection,
-                    blink_on: blink,
-                };
-                ui::draw_grid(scene, text, theme, view);
-            }
-        }
-        scene.fill(Rect::new(0.0, y + block_height - 1.0, width, 1.0), theme.divider);
-        layout.blocks.push(BlockLayout { id, rect, output_x: PAD_X, output_y, lines: output });
+        let px = 6.0 + titles.len() as f32 * tab_width;
+        let plus_rect = Rect::new(px, 5.0, 26.0, TAB_BAR_HEIGHT - 9.0);
+        text.draw_text(
+            scene,
+            "+",
+            px + 8.0,
+            (plus_rect.y + (plus_rect.h + ascent) / 2.0).round(),
+            UI,
+            15.0,
+            theme.text_dim,
+        );
+        *new_tab_hit = plus_rect;
     }
 
-    fn draw_input(&mut self, y: f32, height: f32) {
-        let width = self.width as f32;
-        let cell = self.text.cell;
-        let blink = self.blink_on() && self.focused;
-        let phase = self.session.phase;
-        let App { scene, text, theme, session, editor, history, commands, layout, completion, user_host, .. } = self;
-        let panel = Rect::new(0.0, y, width, height);
-        layout.input = panel;
-        scene.fill(panel, theme.surface);
-        scene.fill(Rect::new(0.0, y, width, 1.0), theme.divider);
-
-        // Context chips.
-        let chip_y = y + INPUT_PAD;
-        let mut x = PAD_X;
-        x += ui::chip(scene, text, &ui::short_path(&session.cwd), x, chip_y, CHIP_HEIGHT, theme.raised, theme.accent)
-            + 6.0;
-        if let Some(branch) = &session.branch {
-            x += ui::chip(scene, text, &format!("⎇ {branch}"), x, chip_y, CHIP_HEIGHT, theme.raised, theme.variable)
-                + 6.0;
+    /// The tabs as a list down the left side.
+    fn draw_tab_sidebar(&mut self, tabs: &[(String, usize)]) {
+        let area = self.tab_area();
+        let Self { scene, ctx, tab_hits, close_hits, new_tab_hit, active, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        scene.fill(area, theme.surface.mix(theme.background, 0.5));
+        scene.fill(Rect::new(area.right() - 1.0, 0.0, 1.0, area.h), theme.divider);
+        let ascent = text.ui_ascent(12.0);
+        scene.push_clip(Rect::new(0.0, 0.0, area.w - 1.0, area.h));
+        let mut y = 8.0;
+        for (index, (title, panes)) in tabs.iter().enumerate() {
+            let rect = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
+            let current = index == *active;
+            if current {
+                scene.quad(Quad::new(rect, theme.raised).radius(6.0).border(1.0, theme.divider));
+                scene.quad(Quad::new(Rect::new(rect.x, rect.y + 7.0, 3.0, rect.h - 14.0), theme.accent).radius(1.5));
+            }
+            let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
+            let mut x = rect.x + 12.0;
+            if index < 9 {
+                x += text.draw_text(scene, &format!("{}", index + 1), x, baseline, UI, 11.0, theme.text_faint) + 8.0;
+            }
+            let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
+            let mut right = close.x - 4.0;
+            if *panes > 1 {
+                // A small badge with the pane count.
+                let label = format!("{panes}");
+                let w = text.measure(&label, UI, 10.0) + 10.0;
+                let badge = Rect::new(right - w, rect.y + (rect.h - 16.0) / 2.0, w, 16.0);
+                scene.quad(Quad::new(badge, theme.divider).radius(8.0));
+                text.draw_text(scene, &label, badge.x + 5.0, badge.y + 12.0, UI, 10.0, theme.text_dim);
+                right = badge.x - 6.0;
+            }
+            scene.push_clip(Rect::new(x, rect.y, (right - x).max(0.0), rect.h));
+            let color = if current { theme.text } else { theme.text_dim };
+            text.draw_text(scene, title, x, baseline, UI, 12.0, color);
+            scene.pop_clip();
+            text.draw_text(scene, "×", close.x + 4.0, baseline, UI, 13.0, theme.text_faint);
+            tab_hits.push((rect, index));
+            close_hits.push((close, index));
+            y += SIDEBAR_ROW + 4.0;
         }
-        ui::chip(scene, text, user_host, x, chip_y, CHIP_HEIGHT, theme.raised, theme.text_dim);
-
-        let editor_y = chip_y + CHIP_HEIGHT + 8.0;
-        let text_x = PAD_X + 2.0 * cell.width;
-        layout.editor_x = text_x;
-        layout.editor_y = editor_y;
-        let prompt_color = match phase {
-            Phase::Continuation => theme.warning,
-            _ => theme.accent,
-        };
-        let prompt = if text.has_glyph('❯', 0) { "❯" } else { ">" };
-        text.draw_mono(scene, prompt, PAD_X, editor_y, Style::BOLD, prompt_color);
-
-        let status = |scene: &mut Scene, text: &mut TextSystem, message: &str, color: Color| {
-            let baseline = editor_y + text.cell.baseline;
-            text.draw_text(scene, message, text_x, baseline, UI, 13.0, color);
-        };
-        match phase {
-            Phase::Boot => status(scene, text, "Starting bash…", theme.text_faint),
-            Phase::Exited => {
-                let code = session.exit_code.unwrap_or(0);
-                status(
-                    scene,
-                    text,
-                    &format!("The shell exited (status {code}). Press Enter to start a new one."),
-                    theme.text_dim,
-                )
-            }
-            Phase::Running => {
-                let message = "Running · keystrokes go to the program · Ctrl+C interrupts · Alt+C copies";
-                status(scene, text, message, theme.text_faint)
-            }
-            Phase::Prompt | Phase::Submitted => {}
-            Phase::Ready | Phase::Continuation => {
-                let first_line = editor.position(editor.cursor).0.saturating_sub(MAX_EDITOR_LINES - 1);
-                if editor.text.is_empty() {
-                    let hint = if phase == Phase::Continuation {
-                        "The command needs more input; Ctrl+C cancels it"
-                    } else {
-                        "Type a command · Tab completes · ↑ history · Shift+Enter new line"
-                    };
-                    status(scene, text, hint, theme.text_faint);
-                }
-                // Selection.
-                if let Some((a, b)) = editor.selection() {
-                    let (l0, c0) = editor.position(a);
-                    let (l1, c1) = editor.position(b);
-                    for line in l0..=l1 {
-                        if line < first_line || line >= first_line + MAX_EDITOR_LINES {
-                            continue;
-                        }
-                        let from = if line == l0 { c0 } else { 0 };
-                        let to = if line == l1 {
-                            c1
-                        } else {
-                            editor.text.split('\n').nth(line).map_or(0, |l| l.chars().count()) + 1
-                        };
-                        let ly = editor_y + (line - first_line) as f32 * cell.height;
-                        let rect = Rect::new(
-                            text_x + from as f32 * cell.width,
-                            ly,
-                            (to.saturating_sub(from)) as f32 * cell.width,
-                            cell.height,
-                        );
-                        scene.fill(rect, theme.selection);
-                    }
-                }
-                // Text with syntax colors.
-                let spans = ui::highlight(&editor.text, editor.cursor, commands, theme);
-                let mut colors = vec![theme.text; editor.text.len()];
-                for (start, end, color) in spans {
-                    for slot in &mut colors[start..end.min(editor.text.len())] {
-                        *slot = color;
-                    }
-                }
-                let (mut line, mut column) = (0usize, 0usize);
-                for (offset, c) in editor.text.char_indices() {
-                    if c == '\n' {
-                        line += 1;
-                        column = 0;
-                        continue;
-                    }
-                    if line >= first_line && line < first_line + MAX_EDITOR_LINES {
-                        let cx = text_x + column as f32 * cell.width;
-                        let cy = editor_y + (line - first_line) as f32 * cell.height;
-                        text.draw_cell(scene, c, cx, cy, Style::default(), colors[offset], 1);
-                    }
-                    column += 1;
-                }
-                if let Some(rest) = editor.suggestion(history) {
-                    let (sl, sc) = editor.position(editor.text.len());
-                    if sl >= first_line {
-                        let sy = editor_y + (sl - first_line) as f32 * cell.height;
-                        text.draw_mono(
-                            scene,
-                            rest,
-                            text_x + sc as f32 * cell.width,
-                            sy,
-                            Style::default(),
-                            theme.text_faint,
-                        );
-                    }
-                }
-                if blink {
-                    let (cl, cc) = editor.position(editor.cursor);
-                    if cl >= first_line {
-                        let cy = editor_y + (cl - first_line) as f32 * cell.height;
-                        scene.fill(
-                            Rect::new(text_x + cc as f32 * cell.width - 1.0, cy + 1.0, 2.0, cell.height - 2.0),
-                            theme.cursor,
-                        );
-                    }
-                }
-                if let Some(completion) = completion {
-                    let (_, word_column) = editor.position(completion.start.min(editor.text.len()));
-                    draw_menu(
-                        scene,
-                        text,
-                        theme,
-                        layout,
-                        completion,
-                        text_x + word_column as f32 * cell.width,
-                        editor_y,
-                    );
-                }
-            }
-        }
+        let plus = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
+        let baseline = (plus.y + (plus.h + ascent * 0.72) / 2.0).round();
+        let label = format!("+  New tab   {}+T", platform::COMMAND_NAME);
+        text.draw_text(scene, &label, plus.x + 12.0, baseline, UI, 12.0, theme.text_faint);
+        *new_tab_hit = plus;
+        scene.pop_clip();
     }
 
     fn draw_toast(&mut self) {
-        let Some((message, _)) = &self.toast else { return };
-        let App { scene, text, theme, layout, width, .. } = self;
+        let Some((message, _)) = &self.ctx.toast else { return };
+        let message = message.clone();
+        let (right, bottom) = match self.focused_id().and_then(|id| self.panes.iter().find(|p| p.id == id)) {
+            Some(pane) => (pane.rect.right(), pane.rect.y + pane.input_top()),
+            None => (self.width as f32, self.height as f32),
+        };
+        let Self { scene, ctx, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
-        let w = text.measure(message, UI, 12.0) + 24.0;
-        let bottom = if layout.input.h > 0.0 { layout.input.y } else { scene.height };
-        let rect = Rect::new(*width as f32 - w - 14.0, bottom - 40.0, w, 28.0);
+        let w = text.measure(&message, UI, 12.0) + 24.0;
+        let rect = Rect::new(right - w - 14.0, bottom - 40.0, w, 28.0);
         scene.shadow(rect, Color::hex(0x000000).alpha(0.5), 14.0, 8.0);
         scene.quad(Quad::new(rect, theme.raised).radius(14.0).border(1.0, theme.divider));
-        text.draw_text(scene, message, rect.x + 12.0, rect.y + 18.0, UI, 12.0, theme.text);
+        text.draw_text(scene, &message, rect.x + 12.0, rect.y + 18.0, UI, 12.0, theme.text);
         scene.set_layer(LAYER_CONTENT);
     }
-}
-
-fn draw_menu(
-    scene: &mut Scene,
-    text: &mut TextSystem,
-    theme: &Theme,
-    layout: &mut Layout,
-    completion: &Completion,
-    x: f32,
-    editor_y: f32,
-) {
-    let cell = text.cell;
-    scene.set_layer(LAYER_OVERLAY);
-    let rows = completion.candidates.len().min(MENU_ROWS);
-    let row_height = cell.height + 6.0;
-    let first = completion.selected.saturating_sub(rows - 1);
-    let label_width = completion.candidates[first..first + rows]
-        .iter()
-        .map(|c| c.label.chars().count().min(80) as f32 * cell.width)
-        .fold(0.0, f32::max);
-    let width = (label_width + 90.0).clamp(220.0, scene.width - 2.0 * PAD_X);
-    let footer = if completion.candidates.len() > rows { 18.0 } else { 0.0 };
-    let height = rows as f32 * row_height + 8.0 + footer;
-    let x = (x - 10.0).min(scene.width - width - PAD_X).max(PAD_X);
-    let y = (editor_y - height - 10.0).max(4.0);
-    let rect = Rect::new(x, y, width, height);
-    scene.shadow(rect, Color::hex(0x000000).alpha(0.55), 8.0, 10.0);
-    scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
-    scene.push_clip(rect.inset(4.0, 4.0));
-    for row in 0..rows {
-        let item = first + row;
-        let candidate = &completion.candidates[item];
-        let ry = y + 4.0 + row as f32 * row_height;
-        let row_rect = Rect::new(x + 4.0, ry, width - 8.0, row_height);
-        if item == completion.selected {
-            scene.quad(Quad::new(row_rect, theme.accent.alpha(0.22)).radius(5.0));
-        }
-        let color = match candidate.kind {
-            Kind::Directory => theme.accent,
-            Kind::Command => theme.success,
-            _ => theme.text,
-        };
-        let label: String = candidate.label.chars().take(80).collect();
-        text.draw_mono(scene, &label, x + 12.0, ry + 3.0, Style::default(), color);
-        let tag = match candidate.kind {
-            Kind::Command => "command",
-            Kind::Directory => "folder",
-            Kind::File => "file",
-            Kind::History => "history",
-        };
-        let tag_width = text.measure(tag, UI, 11.0);
-        text.draw_text(
-            scene,
-            tag,
-            x + width - tag_width - 12.0,
-            ry + 3.0 + text.cell.baseline - 1.0,
-            UI,
-            11.0,
-            theme.text_faint,
-        );
-        layout.menu_rows.push((row_rect, item));
-    }
-    if completion.candidates.len() > rows {
-        let more = format!("{} of {}", completion.selected + 1, completion.candidates.len());
-        let w = text.measure(&more, UI, 10.0);
-        text.draw_text(scene, &more, x + width - w - 12.0, y + height - 8.0, UI, 10.0, theme.text_faint);
-    }
-    scene.pop_clip();
-    scene.set_layer(LAYER_CONTENT);
 }
 
 /// TEMINO_CAPTURE: saves each frame, straight from the GPU readback, for
@@ -1611,20 +1160,4 @@ fn write_ppm(path: &std::ffi::OsStr, bgra: &[u8], width: u32, height: u32) {
         ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
     }
     let _ = std::fs::write(path, ppm);
-}
-
-fn normalize(selection: Selection) -> ((usize, usize), (usize, usize)) {
-    if selection.anchor <= selection.head {
-        (selection.anchor, selection.head)
-    } else {
-        (selection.head, selection.anchor)
-    }
-}
-
-fn grid_size(width: u32, height: u32, text: &TextSystem) -> GridSize {
-    let cell = text.cell;
-    GridSize {
-        columns: (((width as f32 - 2.0 * PAD_X) / cell.width).floor() as usize).max(10),
-        lines: (((height as f32 - 2.0 * ALT_PAD_Y) / cell.height).floor() as usize).max(3),
-    }
 }

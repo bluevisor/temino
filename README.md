@@ -2,7 +2,7 @@
 
 <img src="docs/icon.png" width="64" align="right" alt="">
 
-A modern GPU-accelerated terminal for [Haiku](https://www.haiku-os.org), drawn with Vulkan.
+A modern GPU-accelerated terminal for [Haiku](https://www.haiku-os.org), Linux and macOS, drawn with Vulkan.
 
 Temino works like [Warp](https://github.com/warpdotdev/warp): every command and
 its output is a **block** you can select and copy, and commands are typed in a
@@ -31,6 +31,11 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
   [alacritty_terminal](https://crates.io/crates/alacritty_terminal): 256 and
   true colors, the alternate screen, mouse reporting, bracketed paste, OSC 52
   copy (not paste), and color and size queries.
+- **Tabs and splits.** Each tab holds a tree of panes split side by side or
+  stacked; drag a divider to resize, zoom one pane to fill the tab, and new
+  panes start in the current pane's directory. Tabs are listed down the left
+  side once there is a second one (`TEMINO_TABS=top` puts them across the
+  top instead).
 - **GPU text.** Glyphs come from a 2048² atlas (fontdue) and are drawn as
   instanced quads; rounded rectangles, borders and shadows are a signed
   distance field shader. Box-drawing and block characters are drawn
@@ -38,20 +43,33 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
 
 ## Keys
 
+**Cmd** below is the shortcut modifier: Alt on Haiku (its Command key), ⌘ on
+macOS, Ctrl+Shift (or Super) on Linux.
+
 | Key | |
 |---|---|
 | Enter / Shift+Enter | run / new line |
 | Tab, Ctrl+R, ↑ ↓ | complete, search history, browse history |
 | → or End at the end of the line | accept the suggestion (Ctrl+→ one word) |
-| Alt+C, Alt+Shift+C, Alt+V | copy (selection, else the selected block's output), copy the block's command, paste |
-| Alt+↑ / Alt+↓ | select the previous / next block |
-| Alt+K, Ctrl+L | clear the blocks |
-| Alt+= / Alt+- / Alt+0 | font size |
+| Cmd+T | new tab |
+| Cmd+D / Cmd+E | split the pane right / down |
+| Cmd+W, Cmd+Q | close the pane (its tab with its last pane), quit |
+| Cmd+[ / Cmd+], Cmd+Option+arrows | previous / next pane, the pane in that direction |
+| Cmd+Enter | zoom the pane to the whole tab, and back |
+| Cmd+1…8, Cmd+9 | a tab, the last tab |
+| Cmd+B | hide / show the tab list |
+| Ctrl+PageUp / PageDown, Ctrl+Tab / Ctrl+Shift+Tab | previous / next tab (on Haiku Ctrl+Tab stays the window switcher) |
+| Cmd+C, Cmd+Shift+C, Cmd+V | copy (selection, else the selected block's output), copy the block's command, paste |
+| Cmd+↑ / Cmd+↓ | select the previous / next block |
+| Cmd+K, Ctrl+L | clear the blocks |
+| Cmd+= / Cmd+- / Cmd+0 | font size |
 | Ctrl+C | interrupt the running program (at the prompt: clear the line) |
 | Shift+PageUp / PageDown | scroll while a program runs |
 
-Alt is Haiku's Command key. Click a block to select it; drag over output to
-select text (double-click: word, triple: line).
+Click a block to select it; drag over output to select text (double-click:
+word, triple: line). Click a pane to focus it; middle-click a tab to close it.
+On Linux a selection also goes to the primary selection, and middle-click
+pastes it. Option (macOS) and Alt (Linux) are Meta for the shell.
 
 ## How it works
 
@@ -77,17 +95,41 @@ select text (double-click: word, triple: line).
 - **Rendering.** Haiku has no Vulkan window-system integration, so each frame
   renders into an offscreen `B8G8R8A8` image, is copied into a host-visible
   buffer and handed to the window thread, which copies it into one of two
-  `BBitmap`s and draws it. Frames are drawn only when something changed (or a
+  `BBitmap`s and draws it. Linux and macOS use the same path, with a
+  [winit](https://github.com/rust-windowing/winit) window and
+  [softbuffer](https://github.com/rust-windowing/softbuffer) in place of the
+  Be API (`src/platform/`); on HiDPI screens the scene is drawn at the
+  display's scale, glyphs rasterized at full resolution. Frames are drawn only when something changed (or a
   spinner or the caret blinks); a 980×640 frame takes about 1 ms on an M5 Pro
   through Venus.
-- **No fork().** The shell is started with `load_image()`, through a
+- **No fork() on Haiku.** The shell is started with `load_image()`, through a
   `temino --pty-exec` helper that makes the session and controlling tty and
   then execs bash. On this Haiku build, fork() makes the parent's Venus memory
   mappings copy-on-write, which stalls the Venus command ring (Venus aborts)
   and hung the VM when the process exited. See the
   [driver note](https://github.com/bluevisor/haiku-arm64-chromium/blob/main/gpu/README.md).
+  Linux and macOS start it the usual way, `openpty` and fork/exec.
 
 ## Building
+
+### Linux and macOS
+
+Rust and a Vulkan driver: Mesa or NVIDIA on Linux (tested on a Jetson AGX
+Orin, Ubuntu 22.04, X11), MoltenVK on macOS (`brew install molten-vk
+vulkan-loader`; Temino finds Homebrew's loader on its own).
+
+```sh
+cargo build --release
+target/release/temino --selftest /tmp/frame.ppm
+target/release/temino
+```
+
+Settings live in `~/.config/temino` on Linux and `~/Library/Application
+Support/Temino` on macOS. On macOS Temino prefers Homebrew's bash; the
+system's bash 3.2 also works (the integration marks command output with a
+DEBUG trap there, since PS0 needs bash 4.4).
+
+### Haiku
 
 On Haiku (tested on arm64, hrev60290) with Rust, a C++ compiler and a Vulkan driver
 (`libvulkan.so.1` on the library path):
@@ -105,9 +147,9 @@ From a Mac, `haiku/deploy.sh` copies the tree to the VM (`HOST`, default
 presses to a window for scripted tests. After editing a shader, run
 `shaders/build.sh` (needs `glslc`).
 
-Set `TEMINO_TRACE=1` to log startup and frame stages to
-`~/config/settings/Temino/trace.log`. History, the shell integration script
-and crash logs live in the same directory. `TEMINO_SHELL` picks another bash.
+Set `TEMINO_TRACE=1` to log startup and frame stages to `trace.log` in the
+settings directory (`~/config/settings/Temino` on Haiku). History, the shell
+integration script and crash logs live in the same directory. `TEMINO_SHELL` picks another bash.
 `TEMINO_CAPTURE=frame.ppm` saves every frame as it's drawn, for screenshots.
 
 ## Credits
@@ -115,8 +157,11 @@ and crash logs live in the same directory. `TEMINO_SHELL` picks another bash.
 - The rounded-rectangle and shadow shader math follows `rect_shader.wgsl`
   from Warp's UI framework (`warpui`, MIT).
 - [alacritty_terminal](https://github.com/alacritty/alacritty) (Apache-2.0),
-  [fontdue](https://github.com/mooman219/fontdue), [ash](https://github.com/ash-rs/ash).
+  [fontdue](https://github.com/mooman219/fontdue), [ash](https://github.com/ash-rs/ash),
+  and on Linux and macOS winit, softbuffer and
+  [arboard](https://github.com/1Password/arboard).
 - [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL OFL 1.1), bundled;
-  UI text uses Haiku's Noto Sans.
+  UI text uses the system's Noto Sans (Haiku), Ubuntu or DejaVu Sans (Linux)
+  or Arial (macOS).
 
 Temino is MIT licensed.

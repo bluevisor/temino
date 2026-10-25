@@ -500,13 +500,14 @@ impl Session {
         self.cell = (width as u16, height as u16);
     }
 
-    pub fn start(&mut self, sender: Sender<Msg>, credits: Arc<Credits>) -> std::io::Result<()> {
+    /// Starts the shell; its output arrives as `Msg::Pty(id, ...)`.
+    pub fn start(&mut self, id: u64, sender: Sender<Msg>, credits: Arc<Credits>) -> std::io::Result<()> {
         let dir = crate::settings_dir();
         std::fs::create_dir_all(&dir)?;
         self.integration_path = format!("{dir}/temino.bash");
         std::fs::write(&self.integration_path, SHELL_INTEGRATION)?;
 
-        let shell = std::env::var("TEMINO_SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let shell = std::env::var("TEMINO_SHELL").unwrap_or_else(|_| default_shell());
         let argv = vec![shell, "--rcfile".into(), self.integration_path.clone(), "-i".into()];
         let mut env: Vec<String> = std::env::vars()
             .filter(|(key, _)| !matches!(key.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "COLUMNS" | "LINES"))
@@ -515,6 +516,10 @@ impl Session {
         env.push("TERM=xterm-256color".into());
         env.push("COLORTERM=truecolor".into());
         env.push("TERM_PROGRAM=Temino".into());
+        if cfg!(target_os = "macos") {
+            // The system bash's "default shell is now zsh" notice.
+            env.push("BASH_SILENCE_DEPRECATION_WARNING=1".into());
+        }
         env.push(format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION")));
 
         let (pid, master) =
@@ -531,7 +536,7 @@ impl Session {
                     Ok(0) => break,
                     Ok(n) => {
                         credits.acquire();
-                        if data_sender.send(Msg::Pty(buffer[..n].to_vec())).is_err() {
+                        if data_sender.send(Msg::Pty(id, buffer[..n].to_vec())).is_err() {
                             break;
                         }
                     }
@@ -554,7 +559,7 @@ impl Session {
 
         thread::Builder::new().name("temino shell waiter".into()).spawn(move || {
             let code = crate::platform::wait(pid);
-            let _ = sender.send(Msg::ShellExited(code));
+            let _ = sender.send(Msg::ShellExited(id, code));
         })?;
 
         self.shell = Some(Shell { pid, master, writer });
@@ -846,6 +851,17 @@ impl Session {
     pub fn clear(&mut self) {
         self.blocks.retain(|b| b.running());
     }
+}
+
+/// bash: on macOS a Homebrew one when there is one, since the system's is
+/// 3.2 (the integration copes, but newer is better).
+fn default_shell() -> String {
+    ["/opt/homebrew/bin/bash", "/usr/local/bin/bash"]
+        .into_iter()
+        .filter(|_| cfg!(target_os = "macos"))
+        .find(|path| std::path::Path::new(path).exists())
+        .unwrap_or("/bin/bash")
+        .to_owned()
 }
 
 /// The checked-out branch of the repository containing `path`, read

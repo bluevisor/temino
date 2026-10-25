@@ -32,6 +32,7 @@ __temino_precmd() {
 	local status=$?
 	builtin printf '\e]133;D;%s\a\e]7;file://%s%s\a\e]133;A\a' \
 		"$status" "${HOSTNAME:-localhost}" "$PWD"
+	__temino_ran=
 	return $status
 }
 
@@ -42,5 +43,16 @@ else
 fi
 PS1='\[\e]133;B\a\]'
 PS2='\[\e]6973;cont\a\]'
-PS0='\e]133;C\a'
+if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
+	PS0='\e]133;C\a'
+else
+	# No PS0 before bash 4.4 (macOS ships 3.2): mark the output start from
+	# the DEBUG trap, once per command line.
+	__temino_preexec() {
+		[[ -n "$__temino_ran" || "$BASH_COMMAND" == __temino_precmd* ]] && return
+		__temino_ran=1
+		builtin printf '\e]133;C\a'
+	}
+	trap '__temino_preexec' DEBUG
+fi
 export TEMINO=1
