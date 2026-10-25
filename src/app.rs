@@ -43,6 +43,9 @@ const MENU_ROW: f32 = 26.0;
 /// The colors a tab can be marked with, from its menu.
 const TAB_COLORS: [u32; 6] = [0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5];
 
+/// Separates the panes of a tab in the saved tabs file.
+const LAYOUT_SEPARATOR: char = '\u{1f}';
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Axis {
     /// Side by side, divided by a vertical line.
@@ -504,23 +507,25 @@ impl App {
         Ok(())
     }
 
-    /// Reopens the tabs open at the last quit, each in its directory and
-    /// with its name and color; or one new tab.
+    /// Reopens the tabs open at the last quit, each with its panes in their
+    /// directories, its name and its color; or one new tab.
     fn restore_tabs(&mut self) -> Result<(), String> {
         let saved = std::fs::read_to_string(tabs_path()).unwrap_or_default();
         let mut active = 0;
         for line in saved.lines() {
-            // active?, color, directory, name — separated by tabs.
+            // active?, color, panes, name — separated by tabs.
             let mut fields = line.splitn(4, '\t');
-            let (Some(current), Some(color), Some(cwd), name) = (fields.next(), fields.next(), fields.next(), fields.next())
+            let (Some(current), Some(color), Some(layout), name) = (fields.next(), fields.next(), fields.next(), fields.next())
             else {
                 continue;
             };
-            let cwd = Some(cwd.to_owned()).filter(|d| std::path::Path::new(d).is_dir());
-            let id = self.make_pane_in(cwd)?;
+            let mut focus = None;
+            let root = self.restore_node(&mut layout.split(LAYOUT_SEPARATOR), &mut focus)?;
+            let mut leaves = Vec::new();
+            root.leaves(&mut leaves);
             self.tabs.push(Tab {
-                root: Node::Leaf(id),
-                focus: id,
+                focus: focus.unwrap_or(leaves[0]),
+                root,
                 zoomed: false,
                 name: name.filter(|n| !n.is_empty()).map(str::to_owned),
                 color: color.parse().ok().filter(|&c: &usize| c < TAB_COLORS.len()),
@@ -536,6 +541,37 @@ impl App {
         Ok(())
     }
 
+    /// Rebuilds one node written by `save_node`, opening its panes. A bare
+    /// directory (the older format, one pane a tab) is a focused pane.
+    fn restore_node<'a>(
+        &mut self,
+        tokens: &mut impl Iterator<Item = &'a str>,
+        focus: &mut Option<u64>,
+    ) -> Result<Node, String> {
+        let token = tokens.next().unwrap_or("");
+        let axis = match token.get(..1) {
+            Some("R") => Some(Axis::Row),
+            Some("C") => Some(Axis::Column),
+            _ => None,
+        };
+        if let (Some(axis), Ok(ratio)) = (axis, token[1..].parse::<f32>()) {
+            let first = Box::new(self.restore_node(tokens, focus)?);
+            let second = Box::new(self.restore_node(tokens, focus)?);
+            return Ok(Node::Split { axis, ratio: ratio.clamp(0.05, 0.95), first, second });
+        }
+        let (focused, cwd) = match token.get(..1) {
+            Some("F") => (true, &token[1..]),
+            Some("P") => (false, &token[1..]),
+            _ => (true, token),
+        };
+        let cwd = Some(cwd.to_owned()).filter(|d| std::path::Path::new(d).is_dir());
+        let id = self.make_pane_in(cwd)?;
+        if focused && focus.is_none() {
+            *focus = Some(id);
+        }
+        Ok(Node::Leaf(id))
+    }
+
     /// Writes the tabs down for `restore_tabs`.
     fn save_tabs(&self) {
         let lines: String = self
@@ -543,15 +579,33 @@ impl App {
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                let cwd = self.panes.iter().find(|p| p.id == tab.focus).map_or("", |p| p.session.cwd.as_str());
+                let mut layout = Vec::new();
+                self.save_node(&tab.root, tab.focus, &mut layout);
+                let layout = layout.join(&LAYOUT_SEPARATOR.to_string());
                 let current = if index == self.active { "*" } else { "" };
                 let color = tab.color.map(|c| c.to_string()).unwrap_or_default();
                 let name = tab.name.as_deref().unwrap_or("");
-                format!("{current}\t{color}\t{cwd}\t{name}\n")
+                format!("{current}\t{color}\t{layout}\t{name}\n")
             })
             .collect();
         let _ = std::fs::create_dir_all(crate::settings_dir());
         let _ = std::fs::write(tabs_path(), lines);
+    }
+
+    /// A node in prefix order: `R`/`C` and the ratio for a split, then its
+    /// two sides; `F` (focused) or `P` and the directory for a pane.
+    fn save_node(&self, node: &Node, focus: u64, out: &mut Vec<String>) {
+        match node {
+            Node::Leaf(id) => {
+                let cwd = self.panes.iter().find(|p| p.id == *id).map_or("", |p| p.session.cwd.as_str());
+                out.push(format!("{}{cwd}", if *id == focus { 'F' } else { 'P' }));
+            }
+            Node::Split { axis, ratio, first, second } => {
+                out.push(format!("{}{ratio}", if *axis == Axis::Row { 'R' } else { 'C' }));
+                self.save_node(first, focus, out);
+                self.save_node(second, focus, out);
+            }
+        }
     }
 
     fn split(&mut self, axis: Axis) {
@@ -562,6 +616,7 @@ impl App {
                 tab.root.split(focus, id, axis);
                 tab.zoomed = false;
                 self.set_focus(id);
+                self.save_tabs();
             }
             Err(error) => self.ctx.show_toast(&error),
         }
@@ -600,6 +655,7 @@ impl App {
             tab.focus = leaves[0];
         }
         self.relayout();
+        self.save_tabs();
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -1346,7 +1402,7 @@ impl App {
 
     fn mouse_up(&mut self, x: f32, y: f32) {
         let pointer = std::mem::replace(&mut self.pointer, Pointer::Idle);
-        if let Pointer::Tab { dragging: true, .. } = pointer {
+        if matches!(pointer, Pointer::Tab { dragging: true, .. } | Pointer::Divider(_)) {
             self.save_tabs();
         }
         if let Pointer::Pane(id) = pointer {
