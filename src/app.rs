@@ -14,7 +14,7 @@ use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
-use crate::theme::{Color, Theme, BACKGROUNDS};
+use crate::theme::{Color, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
 use crate::Msg;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
@@ -403,13 +403,30 @@ fn load_background() -> usize {
     crate::setting("background").and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name)).unwrap_or(0)
 }
 
+/// `opacity=<percent>` in the settings file, as an index into OPACITIES
+/// (fully opaque when unset, unknown, or off macOS, whose windows are the
+/// only ones that show through).
+fn load_opacity() -> usize {
+    crate::setting("opacity")
+        .filter(|_| cfg!(target_os = "macos"))
+        .and_then(|value| OPACITIES.iter().position(|o| o.to_string() == value))
+        .unwrap_or(0)
+}
+
+fn opacity_names() -> Vec<String> {
+    OPACITIES.iter().map(|o| format!("{o}%")).collect()
+}
+
 impl App {
     fn new(sender: Sender<Msg>, width: u32, height: u32) -> Result<App, String> {
         let gpu = Gpu::new()?;
         let text = TextSystem::new(DEFAULT_FONT_SIZE);
         crate::trace("app: fonts ready");
         let background = load_background();
-        let theme = Theme::dark().with_background(BACKGROUNDS[background].1);
+        let opacity = load_opacity();
+        let theme =
+            Theme::dark().with_background(BACKGROUNDS[background].1).with_opacity(OPACITIES[opacity] as f32 / 100.0);
+        platform::set_opacity_menu(&opacity_names(), opacity);
         platform::set_background(theme.background.to_rgb8());
         platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), background);
         let shell = shells::default_shell();
@@ -517,7 +534,8 @@ impl App {
         for line in saved.lines() {
             // active?, color, panes, name — separated by tabs.
             let mut fields = line.splitn(4, '\t');
-            let (Some(current), Some(color), Some(layout), name) = (fields.next(), fields.next(), fields.next(), fields.next())
+            let (Some(current), Some(color), Some(layout), name) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
             else {
                 continue;
             };
@@ -912,6 +930,7 @@ impl App {
             UiEvent::Close => self.quit(),
             UiEvent::Background(index) => self.set_background(index),
             UiEvent::Shell(index) => self.set_shell(index),
+            UiEvent::Opacity(index) => self.set_opacity(index),
             UiEvent::Wheel { dy, x, y, .. } => {
                 let (x, y) = (x / self.zoom, y / self.zoom);
                 if let Some((id, rect)) = self.pane_at(x, y) {
@@ -931,10 +950,18 @@ impl App {
 
     fn set_background(&mut self, index: usize) {
         let Some(&(name, rgb)) = BACKGROUNDS.get(index) else { return };
-        self.ctx.theme = Theme::dark().with_background(rgb);
+        self.ctx.theme = Theme::dark().with_background(rgb).with_opacity(self.ctx.theme.opacity);
         platform::set_background(self.ctx.theme.background.to_rgb8());
         platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), index);
         crate::save_setting("background", name);
+        self.dirty = true;
+    }
+
+    fn set_opacity(&mut self, index: usize) {
+        let Some(&percent) = OPACITIES.get(index) else { return };
+        self.ctx.theme.opacity = percent as f32 / 100.0;
+        platform::set_opacity_menu(&opacity_names(), index);
+        crate::save_setting("opacity", &percent.to_string());
         self.dirty = true;
     }
 
@@ -1432,7 +1459,7 @@ impl App {
         crate::trace("render: begin");
         self.dirty = false;
         let (width, height) = (self.width, self.height);
-        self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.background);
+        self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.window());
         let focus = self.focused_id();
         let visible = self.visible_panes();
         let several = visible.len() > 1;
@@ -1582,7 +1609,7 @@ impl App {
     fn draw_tab_strip(&mut self, tabs: &[TabView]) {
         let width = self.width;
         let theme = &self.ctx.theme;
-        self.scene.fill(Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), theme.surface.mix(theme.background, 0.5));
+        self.scene.fill(Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), theme.panel(SURFACE_LIFT / 2.0));
         self.scene.fill(Rect::new(0.0, TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
         let plus = 34.0;
         let tab_width = ((width - 12.0 - plus) / tabs.len() as f32).min(TAB_MAX_WIDTH);
@@ -1613,7 +1640,7 @@ impl App {
     fn draw_tab_sidebar(&mut self, tabs: &[TabView]) {
         let area = self.tab_area();
         let theme = &self.ctx.theme;
-        self.scene.fill(area, theme.surface.mix(theme.background, 0.5));
+        self.scene.fill(area, theme.panel(SURFACE_LIFT / 2.0));
         self.scene.fill(Rect::new(area.right() - 1.0, 0.0, 1.0, area.h), theme.divider);
         self.scene.push_clip(Rect::new(0.0, 0.0, area.w - 1.0, area.h));
         let dragged = match self.pointer {

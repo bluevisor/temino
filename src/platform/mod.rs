@@ -132,6 +132,9 @@ pub enum UiEvent {
     Background(usize),
     /// Settings ▸ Shell picked this entry of `shells::KINDS`.
     Shell(usize),
+    /// Settings ▸ Background Opacity picked this entry of `theme::OPACITIES`.
+    #[allow(dead_code)] // only the macOS menu sends it
+    Opacity(usize),
 }
 
 /// Mouse button bits, as Haiku numbers them.

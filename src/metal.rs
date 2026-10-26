@@ -90,7 +90,9 @@ impl Gpu {
             self.glyphs.extend_from_slice(&layer.glyphs);
         }
         let (lo, hi) = atlas.dirty.take().map_or((-1, -1), |(lo, hi)| (lo as i64, hi as i64));
-        let clear = scene.clear.to_array();
+        // The pipelines blend premultiplied colors; clear with one too.
+        let [r, g, b, a] = scene.clear.to_array();
+        let clear = [r * a, g * a, b * a, a];
         let mut error = [0u8; 1024];
         let pixels = unsafe {
             temino_metal_render(

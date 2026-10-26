@@ -116,6 +116,8 @@ pub struct Theme {
     pub variable: Color,
     pub selection: Color,
     pub cursor: Color,
+    /// How much the window's background covers what's behind it (macOS).
+    pub opacity: f32,
     /// ANSI 0-15.
     pub ansi: [Color; 16],
 }
@@ -130,6 +132,12 @@ pub const BACKGROUNDS: [(&str, u32); 6] = [
     ("Forest", 0x0c1a14),
 ];
 
+/// How far `surface` is lifted from the background toward white.
+pub const SURFACE_LIFT: f32 = 0.025;
+
+/// Settings ▸ Background Opacity: percentages offered in the menu.
+pub const OPACITIES: [u32; 9] = [100, 95, 90, 85, 80, 75, 70, 60, 50];
+
 impl Theme {
     /// The dark theme on another background; panels and dividers are
     /// lifted from it by the same steps as on the default one.
@@ -137,10 +145,29 @@ impl Theme {
         let background = Color::hex(rgb);
         let white = Color::hex(0xffffff);
         self.background = background;
-        self.surface = background.mix(white, 0.025);
+        self.surface = background.mix(white, SURFACE_LIFT);
         self.raised = background.mix(white, 0.0625);
         self.divider = background.mix(white, 0.083);
         self
+    }
+
+    /// The window background and the panels laid on it, see-through by
+    /// `opacity`.
+    pub fn with_opacity(mut self, opacity: f32) -> Theme {
+        self.opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+
+    /// The window background, as see-through as the settings say.
+    pub fn window(&self) -> Color {
+        self.background.alpha(self.opacity)
+    }
+
+    /// A panel lifted from the background by `lift`, to draw over it: the
+    /// color of `background.mix(white, lift)`, but only as opaque as the
+    /// background under it.
+    pub fn panel(&self, lift: f32) -> Color {
+        Color::hex(0xffffff).alpha(lift)
     }
 
     pub fn dark() -> Theme {
@@ -160,6 +187,7 @@ impl Theme {
             variable: Color::hex(0xc792ea),
             selection: Color::hex(0x6cb6ff).alpha(0.30),
             cursor: Color::hex(0x6cb6ff),
+            opacity: 1.0,
             ansi: [
                 Color::hex(0x1d2028),
                 Color::hex(0xf2737a),

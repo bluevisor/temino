@@ -4,6 +4,8 @@
 
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
+#import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 
 #include <stdint.h>
 #include <string.h>
@@ -236,6 +238,28 @@ static NSMutableDictionary<NSNumber*, NSMenu*>* sChoiceMenus;
 @end
 
 static TeminoMenuTarget* sMenuTarget;
+static NSMenu* sSettingsMenu;
+
+
+@interface TeminoSettingsTarget : NSObject
+- (void)showSettings:(id)sender;
+@end
+
+@implementation TeminoSettingsTarget
+// Settings are menus of choices; Command+, pops them up at the top left
+// of the window, the way a settings window would open there.
+- (void)showSettings:(id)sender
+{
+	NSWindow* window = NSApp.keyWindow ?: NSApp.mainWindow;
+	if (sSettingsMenu == nil || window == nil)
+		return;
+	NSRect content = [window contentRectForFrameRect:window.frame];
+	NSPoint at = NSMakePoint(NSMinX(content) + 12, NSMaxY(content) - 8);
+	[sSettingsMenu popUpMenuPositioningItem:nil atLocation:at inView:nil];
+}
+@end
+
+static TeminoSettingsTarget* sSettingsTarget;
 
 
 static NSMenu*
@@ -279,6 +303,10 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 		add_item(app, [@"About " stringByAppendingString:name],
 			@selector(orderFrontStandardAboutPanel:), @"", 0);
 		[app addItem:[NSMenuItem separatorItem]];
+		sSettingsTarget = [TeminoSettingsTarget new];
+		add_item(app, @"Settings…", @selector(showSettings:), @",", NSEventModifierFlagCommand).target =
+			sSettingsTarget;
+		[app addItem:[NSMenuItem separatorItem]];
 		NSMenu* services = [[NSMenu alloc] initWithTitle:@"Services"];
 		[app addItemWithTitle:@"Services" action:nil keyEquivalent:@""].submenu = services;
 		NSApp.servicesMenu = services;
@@ -309,6 +337,7 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 			item.tag = items[i].tag;
 		}
 
+		sSettingsMenu = top_menu(bar, @"Settings");
 		NSMenu* window = top_menu(bar, @"Window");
 		add_item(window, @"Minimize", @selector(performMiniaturize:), @"m", NSEventModifierFlagCommand);
 		add_item(window, @"Zoom", @selector(performZoom:), @"", 0);
@@ -340,5 +369,45 @@ temino_menu_choices(int32_t tag, const char* const* names, size_t count, size_t 
 			item.tag = tag + (NSInteger)i;
 			item.state = i == selected ? NSControlStateValueOn : NSControlStateValueOff;
 		}
+	}
+}
+
+
+// MARK: Presenting
+
+// Shows a frame of premultiplied BGRA pixels in the view through a layer
+// of its own, keeping alpha so a see-through background shows the desktop
+// (softbuffer, used elsewhere, draws every pixel opaque).
+void
+temino_layer_present(void* view_handle, const uint32_t* pixels, uint32_t width, uint32_t height)
+{
+	@autoreleasepool {
+		NSView* view = (__bridge NSView*)view_handle;
+		static const void* kLayerKey = &kLayerKey;
+		CALayer* layer = objc_getAssociatedObject(view, kLayerKey);
+		if (layer == nil) {
+			view.wantsLayer = YES;
+			layer = [CALayer layer];
+			layer.anchorPoint = CGPointZero;
+			layer.geometryFlipped = YES;
+			layer.contentsGravity = kCAGravityTopLeft;
+			[view.layer addSublayer:layer];
+			objc_setAssociatedObject(view, kLayerKey, layer, OBJC_ASSOCIATION_RETAIN);
+		}
+		NSData* data = [NSData dataWithBytes:pixels length:(NSUInteger)width * height * 4];
+		CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
+		CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+		CGImageRef image = CGImageCreate(width, height, 8, 32, (size_t)width * 4, space,
+			kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little, provider, NULL, false,
+			kCGRenderingIntentDefault);
+		CGColorSpaceRelease(space);
+		CGDataProviderRelease(provider);
+		[CATransaction begin];
+		[CATransaction setDisableActions:YES];
+		layer.frame = view.layer.bounds;
+		layer.contentsScale = view.window.backingScaleFactor ?: 1.0;
+		layer.contents = (__bridge id)image;
+		[CATransaction commit];
+		CGImageRelease(image);
 	}
 }

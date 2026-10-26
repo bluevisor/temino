@@ -29,6 +29,12 @@ use super::{buttons, mods, Cursor, KeyEvent, UiEvent};
 use crate::keys::Named;
 use crate::Msg;
 
+#[cfg(target_os = "macos")]
+extern "C" {
+    /// Shows a premultiplied BGRA frame in the view, alpha and all.
+    fn temino_layer_present(view: *mut std::ffi::c_void, pixels: *const u32, width: u32, height: u32);
+}
+
 /// What the core thread asks of the window thread.
 #[derive(Debug)]
 enum Request {
@@ -56,13 +62,14 @@ static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 enum Choice {
     Background,
     Shell,
+    Opacity,
 }
 
 /// A choice menu's entries and the picked one.
 type Choices = (Vec<String>, usize);
 
 /// Each choice menu, by `Choice`.
-static CHOICES: Mutex<[Option<Choices>; 2]> = Mutex::new([None, None]);
+static CHOICES: Mutex<[Option<Choices>; 3]> = Mutex::new([None, None, None]);
 /// Where menu picks go; the menu calls back on the main thread.
 static MENU_SENDER: Mutex<Option<Sender<Msg>>> = Mutex::new(None);
 
@@ -108,6 +115,8 @@ pub fn app_run() {
         sender,
         window: None,
         surface: None,
+        #[cfg(target_os = "macos")]
+        view: None,
         scale: 1.0,
         modifiers: ModifiersState::empty(),
         pointer: (0.0, 0.0),
@@ -125,14 +134,19 @@ pub fn quit() {
 /// The window is always covered by the frame; nothing to do.
 pub fn set_background(_rgb: [u8; 3]) {}
 
-/// Fills View ▸ Background.
+/// Fills Settings ▸ Background.
 pub fn set_background_menu(names: &[&str], selected: usize) {
     set_choices(Choice::Background, names.iter().map(|n| n.to_string()).collect(), selected);
 }
 
-/// Fills Shell ▸ Default Shell.
+/// Fills Settings ▸ Default Shell.
 pub fn set_shell_menu(names: &[String], selected: usize) {
     set_choices(Choice::Shell, names.to_vec(), selected);
+}
+
+/// Fills Settings ▸ Background Opacity.
+pub fn set_opacity_menu(names: &[String], selected: usize) {
+    set_choices(Choice::Opacity, names.to_vec(), selected);
 }
 
 fn set_choices(choice: Choice, names: Vec<String>, selected: usize) {
@@ -168,8 +182,12 @@ mod menu {
     /// Choice submenus have tags CHOICE, 2 * CHOICE…; their entries count
     /// up from there.
     const CHOICE: i32 = 1000;
-    const SUBMENUS: [(&str, &str, Choice); 2] =
-        [("View", "Background", Choice::Background), ("Shell", "Default Shell", Choice::Shell)];
+    /// All under Settings, which Temino ▸ Settings… (Command+,) pops up.
+    const SUBMENUS: [(&str, &str, Choice); 3] = [
+        ("Settings", "Background", Choice::Background),
+        ("Settings", "Background Opacity", Choice::Opacity),
+        ("Settings", "Default Shell", Choice::Shell),
+    ];
 
     fn choice_tag(choice: Choice) -> i32 {
         CHOICE * (choice as i32 + 1)
@@ -204,13 +222,13 @@ mod menu {
         ("View", Some("Bigger Text"), "+", 0, None, '='),
         ("View", Some("Smaller Text"), "-", 0, None, '-'),
         ("View", Some("Default Text Size"), "0", 0, None, '0'),
-        ("View", None, "", 0, None, '\0'),
-        ("Shell", None, "", 0, None, '\0'),
     ];
 
     extern "C" fn pick(tag: i32) {
         // The app answers a pick by refilling the menu with the new mark.
-        let event = if tag >= choice_tag(Choice::Shell) {
+        let event = if tag >= choice_tag(Choice::Opacity) {
+            UiEvent::Opacity((tag - choice_tag(Choice::Opacity)) as usize)
+        } else if tag >= choice_tag(Choice::Shell) {
             UiEvent::Shell((tag - choice_tag(Choice::Shell)) as usize)
         } else if tag >= choice_tag(Choice::Background) {
             UiEvent::Background((tag - choice_tag(Choice::Background)) as usize)
@@ -266,9 +284,13 @@ pub fn present(pixels: &[u8], width: u32, height: u32) {
         let mut slot = FRAME.lock().unwrap();
         let frame = slot.get_or_insert_with(|| Frame { pixels: Vec::new(), width: 0, height: 0 });
         frame.pixels.clear();
-        // Little-endian BGRA is 0xAARRGGBB; softbuffer wants the top byte clear.
+        // Little-endian BGRA is 0xAARRGGBB. softbuffer wants the top byte
+        // clear; macOS keeps it, as premultiplied alpha the window shows.
+        let keep = if cfg!(target_os = "macos") { 0xff } else { 0 };
         frame.pixels.extend(
-            pixels[..(width * height * 4) as usize].chunks_exact(4).map(|p| u32::from_le_bytes([p[0], p[1], p[2], 0])),
+            pixels[..(width * height * 4) as usize]
+                .chunks_exact(4)
+                .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3] & keep])),
         );
         frame.width = width;
         frame.height = height;
@@ -419,6 +441,10 @@ struct Handler {
     sender: Sender<Msg>,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    /// The window's NSView, which frames are shown in (with their alpha)
+    /// in place of softbuffer.
+    #[cfg(target_os = "macos")]
+    view: Option<*mut std::ffi::c_void>,
     scale: f64,
     modifiers: ModifiersState,
     /// The pointer, in logical pixels.
@@ -463,6 +489,14 @@ impl Handler {
     }
 
     fn draw(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(view) = self.view {
+            let slot = FRAME.lock().unwrap();
+            if let Some(frame) = slot.as_ref().filter(|f| f.pixels.len() == (f.width * f.height) as usize) {
+                unsafe { temino_layer_present(view, frame.pixels.as_ptr(), frame.width, frame.height) };
+            }
+            return;
+        }
         let Some(surface) = &mut self.surface else { return };
         let slot = FRAME.lock().unwrap();
         let Some(frame) = slot.as_ref() else { return };
@@ -554,7 +588,9 @@ impl ApplicationHandler<Request> for Handler {
         }
         let attributes = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_inner_size(LogicalSize::new(self.size.0, self.size.1));
+            .with_inner_size(LogicalSize::new(self.size.0, self.size.1))
+            // Settings ▸ Background Opacity lets the desktop show through.
+            .with_transparent(cfg!(target_os = "macos"));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -567,6 +603,16 @@ impl ApplicationHandler<Request> for Handler {
         #[cfg(target_os = "macos")]
         menu::install();
         self.scale = window.scale_factor();
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) {
+                self.view = Some(handle.ns_view.as_ptr());
+                self.window = Some(window);
+                self.send_size();
+                return;
+            }
+        }
         let surface = softbuffer::Context::new(window.clone())
             .and_then(|context| softbuffer::Surface::new(&context, window.clone()));
         match surface {
