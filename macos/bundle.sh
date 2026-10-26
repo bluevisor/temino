@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds Temino.app for Apple silicon and for Intel, as
-# target/<target>/release/Temino.app, and zips each into
-# target/release/Temino-<version>-macos-<arch>.zip;
+# target/<target>/release/Temino.app, and packs each into
+# target/release/Temino-<version>-macos-<arch>.dmg (and .zip for the updater);
 # `macos/bundle.sh install` also copies this Mac's build to /Applications.
 # Needs `rustup target add aarch64-apple-darwin x86_64-apple-darwin`.
 set -e
@@ -29,7 +29,14 @@ for arch in arm64 x86_64; do
 	mkdir -p target/release
 	rm -f "$zip"
 	ditto -c -k --keepParent "$app" "$zip"
-	echo "built $app and $zip"
+	# The DMG is what people download; the zip is what the updater fetches.
+	dmg=target/release/Temino-$version-macos-$arch.dmg
+	stage=$(mktemp -d)/Temino
+	mkdir -p "$stage"
+	ditto "$app" "$stage/Temino.app"
+	ln -s /Applications "$stage/Applications"
+	hdiutil create -quiet -ov -volname Temino -srcfolder "$stage" -format UDZO "$dmg"
+	echo "built $app, $zip and $dmg"
 done
 if [ "$1" = install ]; then
 	target=$([ "$(uname -m)" = arm64 ] && echo aarch64 || echo x86_64)-apple-darwin
