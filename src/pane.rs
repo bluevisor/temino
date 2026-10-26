@@ -323,8 +323,12 @@ impl Pane {
 
     pub fn key(&mut self, ctx: &mut Ctx, key: KeyEvent) {
         let named = keys::named(&key);
+        // At the prompt, ⌘←/→ and ⌘⌫ are line editing (see editor_key).
+        let line_edit = key.line_mod()
+            && self.session.editor_active()
+            && matches!(named, Some(Named::Left | Named::Right | Named::Backspace));
         // Command shortcuts work in every mode.
-        if key.cmd() && !key.ctrl() {
+        if key.cmd() && !key.ctrl() && !line_edit {
             let handled = match (named, key.base_char()) {
                 (Some(Named::Up), _) => {
                     self.select_neighbor(-1);
