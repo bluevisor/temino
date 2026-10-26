@@ -6,6 +6,11 @@ fn main() {
         for framework in ["AppKit", "Metal"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
+        // Run outside the bundle, AppKit takes the name (and the camera and
+        // microphone reasons) from this copy of Info.plist.
+        println!("cargo:rerun-if-changed=macos/Info.plist");
+        let plist = format!("{}/macos/Info.plist", std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        println!("cargo:rustc-link-arg-bins=-Wl,-sectcreate,__TEXT,__info_plist,{plist}");
         return;
     }
     // The shim needs the Be API headers, so only a Haiku build compiles it;
