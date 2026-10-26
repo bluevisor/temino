@@ -43,6 +43,9 @@ const CJK_FONTS: &[(&str, u32)] = &[
     ("/boot/system/non-packaged/data/fonts/NotoSansCJK/NotoSansCJK-Regular.ttc", 7),
     ("/boot/system/data/fonts/otfonts/NotoSansCJK-Regular.ttc", 7),
     ("/boot/system/data/fonts/ttfonts/NotoSansCJK-Regular.ttc", 7),
+    // Stock Haiku: Japanese-default variable fonts (weight axis defaults to 400).
+    ("/boot/system/data/fonts/otfonts/NotoSansMonoCJKjp-VF.otf", 0),
+    ("/boot/system/data/fonts/otfonts/NotoSansCJKjp-VF.otf", 0),
     ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 7),
     ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 7),
     ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 7),

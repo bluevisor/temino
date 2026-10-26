@@ -45,7 +45,7 @@ echo ">> packaging for $pkgarch on $host"
 src='~/src/temino-cross'
 COPYFILE_DISABLE=1 tar czf - --no-xattrs haiku README.md LICENSE Cargo.toml assets/fonts/JetBrainsMono-OFL.txt "$bin" \
 	| ssh "$host" "rm -rf $src && mkdir -p $src && cd $src && tar xzf -"
-pkg=$(ssh "$host" "cd $src && TEMINO_BIN=$bin TEMINO_ARCH=$pkgarch haiku/package.sh" | tail -1)
+pkg=$(ssh "$host" "cd $src && TEMINO_PKG_REV=${TEMINO_PKG_REV:-1} TEMINO_BIN=$bin TEMINO_ARCH=$pkgarch haiku/package.sh" | tail -1)
 mkdir -p dist
 scp -q "$host:$src/$pkg" dist/
 echo ">> dist/$(basename "$pkg")"
