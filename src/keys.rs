@@ -1,31 +1,9 @@
-//! Haiku key events → bytes for the program in the terminal (xterm
-//! encoding). Special keys are identified by Haiku's physical key codes,
-//! since their byte values collide with control characters (B_HOME is ^A).
+//! Key events → bytes for the program in the terminal (xterm encoding).
+//! The platform layer names the special keys; this turns them into escapes.
 
 use alacritty_terminal::term::TermMode;
 
 use crate::platform::KeyEvent;
-
-/// Physical key codes from Haiku's keyboard layout.
-pub mod code {
-    pub const ESCAPE: i32 = 0x01;
-    pub const F1: i32 = 0x02;
-    pub const F12: i32 = 0x0d;
-    pub const BACKSPACE: i32 = 0x1e;
-    pub const INSERT: i32 = 0x1f;
-    pub const HOME: i32 = 0x20;
-    pub const PAGE_UP: i32 = 0x21;
-    pub const TAB: i32 = 0x26;
-    pub const DELETE: i32 = 0x34;
-    pub const END: i32 = 0x35;
-    pub const PAGE_DOWN: i32 = 0x36;
-    pub const ENTER: i32 = 0x47;
-    pub const UP: i32 = 0x57;
-    pub const KEYPAD_ENTER: i32 = 0x5b;
-    pub const LEFT: i32 = 0x61;
-    pub const DOWN: i32 = 0x62;
-    pub const RIGHT: i32 = 0x63;
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Named {
@@ -48,45 +26,7 @@ pub enum Named {
 
 /// The special key an event stands for, if any.
 pub fn named(event: &KeyEvent) -> Option<Named> {
-    let by_code = match event.key {
-        code::UP => Some(Named::Up),
-        code::DOWN => Some(Named::Down),
-        code::LEFT => Some(Named::Left),
-        code::RIGHT => Some(Named::Right),
-        code::HOME => Some(Named::Home),
-        code::END => Some(Named::End),
-        code::PAGE_UP => Some(Named::PageUp),
-        code::PAGE_DOWN => Some(Named::PageDown),
-        code::INSERT => Some(Named::Insert),
-        code::DELETE => Some(Named::Delete),
-        code::BACKSPACE => Some(Named::Backspace),
-        code::TAB => Some(Named::Tab),
-        code::ENTER | code::KEYPAD_ENTER => Some(Named::Enter),
-        code::ESCAPE => Some(Named::Escape),
-        k @ code::F1..=code::F12 => Some(Named::F((k - code::F1 + 1) as u8)),
-        _ => None,
-    };
-    if by_code.is_some() {
-        return by_code;
-    }
-    // The keypad with Num Lock off sends navigation bytes.
-    let keypad = matches!(event.key, 0x37..=0x39 | 0x48..=0x4a | 0x58..=0x5a | 0x64 | 0x65);
-    if keypad && event.bytes.len() == 1 {
-        return match event.bytes[0] {
-            0x1e => Some(Named::Up),
-            0x1f => Some(Named::Down),
-            0x1c => Some(Named::Left),
-            0x1d => Some(Named::Right),
-            0x01 => Some(Named::Home),
-            0x04 => Some(Named::End),
-            0x0b => Some(Named::PageUp),
-            0x0c => Some(Named::PageDown),
-            0x05 => Some(Named::Insert),
-            0x7f => Some(Named::Delete),
-            _ => None,
-        };
-    }
-    None
+    event.named
 }
 
 /// xterm's modifier parameter: 1 + shift + 2·alt + 4·ctrl.
@@ -177,8 +117,8 @@ pub fn encode(event: &KeyEvent, mode: TermMode) -> Vec<u8> {
         };
     }
     if meta && !bytes.is_empty() {
-        // Alt as Meta: ESC prefix, using the unshifted key when Haiku's
-        // keymap turned the Command combination into something else.
+        // Alt as Meta: ESC prefix, using the unshifted key when the
+        // keymap turned the combination into something else.
         if let Some(base) = event.base_char().filter(|c| c.is_ascii_graphic()) {
             if !event.shift() && bytes.len() == 1 && !bytes[0].is_ascii_graphic() {
                 bytes = vec![base as u8];

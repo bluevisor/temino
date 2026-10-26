@@ -18,7 +18,17 @@ const MONO_FONTS: [&[u8]; 4] = [
     include_bytes!("../assets/fonts/JetBrainsMonoNL-BoldItalic.ttf"),
 ];
 
-const SYSTEM_FONTS: &str = "/boot/system/data/fonts/ttfonts";
+/// Where each system keeps the UI and fallback faces, searched in order.
+const SYSTEM_FONTS: &[&str] = &[
+    "/boot/system/data/fonts/ttfonts",
+    "/usr/share/fonts/truetype/noto",
+    "/usr/share/fonts/noto",
+    "/usr/share/fonts/truetype/dejavu",
+    "/usr/share/fonts/TTF",
+    "/System/Library/Fonts/Supplemental",
+    "/System/Library/Fonts",
+    "/Library/Fonts",
+];
 
 /// Index of a font in `TextSystem::fonts`.
 pub type FontId = u8;
@@ -137,12 +147,20 @@ pub struct TextSystem {
     cache: HashMap<GlyphKey, Option<CachedGlyph>>,
     lookup: HashMap<(char, FontId), (FontId, u16)>,
     pub atlas: Atlas,
+    /// In logical pixels, though each is a whole number of physical ones.
     pub cell: CellMetrics,
+    /// Physical pixels per logical one: glyphs rasterize at this density.
+    pub scale: f32,
 }
 
 fn load_system_font(name: &str) -> Option<Font> {
-    let data = std::fs::read(format!("{SYSTEM_FONTS}/{name}")).ok()?;
+    let data = SYSTEM_FONTS.iter().find_map(|dir| std::fs::read(format!("{dir}/{name}")).ok())?;
     Font::from_bytes(data, FontSettings::default()).ok()
+}
+
+/// The first of `names` that loads.
+fn first_font(names: &[&str]) -> Option<Font> {
+    names.iter().find_map(|name| load_system_font(name))
 }
 
 impl TextSystem {
@@ -150,14 +168,23 @@ impl TextSystem {
         let mut fonts: Vec<Font> =
             MONO_FONTS.iter().map(|data| Font::from_bytes(*data, FontSettings::default()).unwrap()).collect();
         // The UI face; the bundled mono stands in when Noto Sans is missing.
-        let ui = load_system_font("NotoSans-Regular.ttf")
+        let ui = first_font(&["NotoSans-Regular.ttf", "Ubuntu-R.ttf", "DejaVuSans.ttf", "Arial.ttf"])
             .unwrap_or_else(|| Font::from_bytes(MONO_FONTS[0], FontSettings::default()).unwrap());
-        let ui_bold = load_system_font("NotoSans-Bold.ttf")
+        let ui_bold = first_font(&["NotoSans-Bold.ttf", "Ubuntu-B.ttf", "DejaVuSans-Bold.ttf", "Arial Bold.ttf"])
             .unwrap_or_else(|| Font::from_bytes(MONO_FONTS[1], FontSettings::default()).unwrap());
         fonts.push(ui);
         fonts.push(ui_bold);
         let mut fallbacks = Vec::new();
-        for name in ["NotoSansSymbols-Regular.ttf", "NotoSans-Regular.ttf", "NotoMono-Regular.ttf"] {
+        for name in [
+            "NotoSansSymbols-Regular.ttf",
+            "NotoSansSymbols2-Regular.ttf",
+            "NotoSans-Regular.ttf",
+            "NotoMono-Regular.ttf",
+            "DejaVuSans.ttf",
+            "DejaVuSansMono.ttf",
+            "Apple Symbols.ttf",
+            "Arial Unicode.ttf",
+        ] {
             if let Some(font) = load_system_font(name) {
                 fallbacks.push(fonts.len() as FontId);
                 fonts.push(font);
@@ -170,26 +197,42 @@ impl TextSystem {
             lookup: HashMap::new(),
             atlas: Atlas::new(),
             cell: CellMetrics { width: 0.0, height: 0.0, baseline: 0.0, size, underline: 0.0, stroke: 1.0 },
+            scale: 1.0,
         };
         system.set_size(size);
         system
     }
 
+    pub fn set_scale(&mut self, scale: f32) {
+        if scale > 0.0 && scale != self.scale {
+            self.scale = scale;
+            self.set_size(self.cell.size);
+        }
+    }
+
+    /// Rounds a logical coordinate to the nearest physical pixel.
+    fn snap(&self, v: f32) -> f32 {
+        (v * self.scale).round() / self.scale
+    }
+
     pub fn set_size(&mut self, size: f32) {
+        // Metrics are worked out in physical pixels, so cells tile exactly.
+        let s = self.scale;
+        let physical = size * s;
         let font = &self.fonts[0];
-        let line = font.horizontal_line_metrics(size).expect("mono font has horizontal metrics");
-        let width = font.metrics('M', size).advance_width.round().max(1.0);
+        let line = font.horizontal_line_metrics(physical).expect("mono font has horizontal metrics");
+        let width = font.metrics('M', physical).advance_width.round().max(1.0);
         // A little extra leading reads better than the font's tight default.
         let height = (line.new_line_size * 1.12).round();
         let extra = height - (line.ascent - line.descent);
         let baseline = (extra / 2.0 + line.ascent).round();
         self.cell = CellMetrics {
-            width,
-            height,
-            baseline,
+            width: width / s,
+            height: height / s,
+            baseline: baseline / s,
             size,
-            underline: (baseline + (size * 0.12).max(1.0)).round(),
-            stroke: (size / 14.0).round().max(1.0),
+            underline: (baseline + (physical * 0.12).max(1.0)).round() / s,
+            stroke: (physical / 14.0).round().max(1.0) / s,
         };
         self.cache.clear();
         self.atlas.clear();
@@ -231,18 +274,19 @@ impl TextSystem {
     }
 
     fn glyph(&mut self, font: FontId, glyph: u16, size: f32) -> Option<CachedGlyph> {
-        let key = GlyphKey { font, glyph: glyph as u32, size: (size * 8.0) as u32 };
+        let s = self.scale;
+        let key = GlyphKey { font, glyph: glyph as u32, size: (size * s * 8.0) as u32 };
         if let Some(cached) = self.cache.get(&key) {
             return *cached;
         }
-        let (metrics, coverage) = self.fonts[font as usize].rasterize_indexed(glyph, size);
+        let (metrics, coverage) = self.fonts[font as usize].rasterize_indexed(glyph, size * s);
         let entry = self.store(metrics.width, metrics.height, &coverage).map(|uv| CachedGlyph {
             uv,
-            width: metrics.width as f32,
-            height: metrics.height as f32,
-            left: metrics.xmin as f32,
-            top: -(metrics.ymin as f32 + metrics.height as f32),
-            advance: metrics.advance_width,
+            width: metrics.width as f32 / s,
+            height: metrics.height as f32 / s,
+            left: metrics.xmin as f32 / s,
+            top: -(metrics.ymin as f32 + metrics.height as f32) / s,
+            advance: metrics.advance_width / s,
         });
         let entry = entry.or({
             // Zero-size glyphs (spaces) still need their advance.
@@ -252,7 +296,7 @@ impl TextSystem {
                 height: 0.0,
                 left: 0.0,
                 top: 0.0,
-                advance: metrics.advance_width,
+                advance: metrics.advance_width / s,
             })
         });
         self.cache.insert(key, entry);
@@ -280,7 +324,8 @@ impl TextSystem {
     /// Draws one terminal cell's character with its top-left at (x, y).
     /// `span` is 2 for wide characters.
     pub fn draw_cell(&mut self, scene: &mut Scene, c: char, x: f32, y: f32, style: Style, color: Color, span: usize) {
-        if c == ' ' || c == '\0' {
+        // alacritty_terminal leaves '\t' in the cell a tab starts from.
+        if c == ' ' || c.is_control() {
             return;
         }
         let cell = self.cell;
@@ -302,7 +347,7 @@ impl TextSystem {
             gx = x + ((slot - glyph.width) / 2.0).max(0.0);
         }
         let gy = y + cell.baseline + glyph.top;
-        scene.glyph(Rect::new(gx.round(), gy.round(), glyph.width, glyph.height), glyph.uv, color);
+        scene.glyph(Rect::new(self.snap(gx), self.snap(gy), glyph.width, glyph.height), glyph.uv, color);
     }
 
     /// Lays out proportional text on a baseline; returns the advance.
@@ -322,7 +367,7 @@ impl TextSystem {
             let Some(glyph) = self.glyph(face, index, size) else { continue };
             if glyph.width > 0.0 {
                 let rect =
-                    Rect::new((pen + glyph.left).round(), (baseline + glyph.top).round(), glyph.width, glyph.height);
+                    Rect::new(self.snap(pen + glyph.left), self.snap(baseline + glyph.top), glyph.width, glyph.height);
                 scene.glyph(rect, glyph.uv, color);
             }
             pen += glyph.advance;
@@ -362,20 +407,21 @@ impl TextSystem {
         if !(0x2500..=0x259f).contains(&code) {
             return None;
         }
-        let key = GlyphKey { font: BUILTIN, glyph: code, size: (self.cell.size * 8.0) as u32 };
+        let s = self.scale;
+        let key = GlyphKey { font: BUILTIN, glyph: code, size: (self.cell.size * s * 8.0) as u32 };
         if let Some(cached) = self.cache.get(&key) {
             return *cached;
         }
-        let w = self.cell.width as usize;
-        let h = self.cell.height as usize;
-        let coverage = draw_builtin(code, w, h, self.cell.stroke as usize)?;
+        let w = (self.cell.width * s).round() as usize;
+        let h = (self.cell.height * s).round() as usize;
+        let coverage = draw_builtin(code, w, h, (self.cell.stroke * s).round() as usize)?;
         let entry = self.store(w, h, &coverage).map(|uv| CachedGlyph {
             uv,
-            width: w as f32,
-            height: h as f32,
+            width: w as f32 / s,
+            height: h as f32 / s,
             left: 0.0,
             top: 0.0,
-            advance: w as f32,
+            advance: w as f32 / s,
         });
         self.cache.insert(key, entry);
         entry

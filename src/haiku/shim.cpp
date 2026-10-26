@@ -17,6 +17,8 @@
 #include <Clipboard.h>
 #include <Cursor.h>
 #include <Locker.h>
+#include <MenuBar.h>
+#include <MenuItem.h>
 #include <Message.h>
 #include <Screen.h>
 #include <String.h>
@@ -74,12 +76,19 @@ enum {
 	kEventFocus = 7,
 	kEventClose = 8,
 	kEventQuit = 9,
+	kEventBackground = 10,
+	kEventShell = 11,
 };
 
 enum {
 	kMsgFrame = 'rfrm',
 	kMsgTitle = 'rttl',
 	kMsgCursor = 'rcur',
+	kMsgMenuKey = 'rmky',
+	kMsgBackground = 'rbgd',
+	kMsgBackgroundMenu = 'rbgm',
+	kMsgShell = 'rshl',
+	kMsgShellMenu = 'rshm',
 };
 
 
@@ -93,6 +102,8 @@ static std::atomic<bool> sFramePending(false);
 static rgb_color sBackground = { 16, 18, 24, 255 };
 
 static class TeminoWindow* sWindow;
+static BMenu* sBackgroundMenu;
+static BMenu* sShellMenu;
 static class TeminoView* sView;
 static std::atomic<bool> sQuitting(false);
 
@@ -123,7 +134,9 @@ public:
 		BView(frame, "temino", B_FOLLOW_ALL,
 			B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE),
 		fIBeam(B_CURSOR_ID_I_BEAM),
-		fArrow(B_CURSOR_ID_SYSTEM_DEFAULT)
+		fArrow(B_CURSOR_ID_SYSTEM_DEFAULT),
+		fResizeColumn(B_CURSOR_ID_RESIZE_EAST_WEST),
+		fResizeRow(B_CURSOR_ID_RESIZE_NORTH_SOUTH)
 	{
 		SetViewColor(B_TRANSPARENT_COLOR);
 		SetEventMask(0, 0);
@@ -199,7 +212,8 @@ public:
 			case kMsgCursor:
 			{
 				int32 kind = message->GetInt32("kind", 0);
-				SetViewCursor(kind == 1 ? &fArrow : &fIBeam);
+				const BCursor* cursors[] = {&fIBeam, &fArrow, &fResizeColumn, &fResizeRow};
+				SetViewCursor(cursors[kind >= 0 && kind < 4 ? kind : 0]);
 				break;
 			}
 			case B_MOUSE_WHEEL_CHANGED:
@@ -243,6 +257,8 @@ private:
 
 	BCursor fIBeam;
 	BCursor fArrow;
+	BCursor fResizeColumn;
+	BCursor fResizeRow;
 };
 
 
@@ -256,9 +272,15 @@ public:
 	}
 
 	// Every key goes to Rust, shortcuts included: the terminal decides what
-	// Alt (Haiku's Command key) combinations mean.
+	// Alt (Haiku's Command key) combinations mean. The system's own keys
+	// stay with BWindow: Ctrl+Tab (and Ctrl+`) open Deskbar's switcher,
+	// PrtScr takes a screenshot.
 	void DispatchMessage(BMessage* message, BHandler* target) override
 	{
+		if (message->what == B_KEY_DOWN && _IsSystemKey(message)) {
+			BWindow::DispatchMessage(message, target);
+			return;
+		}
 		if (message->what == B_KEY_DOWN) {
 			TeminoEvent event = {};
 			event.kind = kEventKey;
@@ -286,13 +308,68 @@ public:
 		BWindow::DispatchMessage(message, target);
 	}
 
+	static bool _IsSystemKey(BMessage* message)
+	{
+		int32 rawKey = message->GetInt32("key", 0);
+		uint32 mods = (uint32)message->GetInt32("modifiers", 0);
+		const char* bytes = message->GetString("bytes", "");
+		if ((bytes[0] == B_TAB || rawKey == 0x11) && (mods & B_CONTROL_KEY) != 0)
+			return true;
+		return bytes[0] == B_FUNCTION_KEY && rawKey == B_PRINT_KEY;
+	}
+
 	void MessageReceived(BMessage* message) override
 	{
 		if (message->what == kMsgTitle) {
 			SetTitle(message->GetString("title", "Temino"));
 			return;
 		}
+		if (message->what == kMsgBackground || message->what == kMsgShell) {
+			TeminoEvent event = {};
+			event.kind = message->what == kMsgBackground ? kEventBackground : kEventShell;
+			event.key = message->GetInt32("index", 0);
+			emit(event);
+			return;
+		}
+		if (message->what == kMsgBackgroundMenu) {
+			_FillChoices(sBackgroundMenu, kMsgBackground, message);
+			return;
+		}
+		if (message->what == kMsgShellMenu) {
+			_FillChoices(sShellMenu, kMsgShell, message);
+			return;
+		}
+		if (message->what == kMsgMenuKey) {
+			// A menu item acts as its own shortcut: the same key event goes
+			// to Rust, so menus and keys share one code path.
+			TeminoEvent event = {};
+			event.kind = kEventKey;
+			event.key = message->GetInt32("key", 0);
+			event.modifiers = (uint32)message->GetInt32("modifiers", 0);
+			event.raw_char = message->GetInt32("raw_char", 0);
+			event.bytes[0] = (uint8)event.raw_char;
+			event.nbytes = 1;
+			emit(event);
+			return;
+		}
 		BWindow::MessageReceived(message);
+	}
+
+	// Rust names a menu's choices and which is picked; picks come back as
+	// `what` messages and the app refills the menu with the new mark.
+	static void _FillChoices(BMenu* menu, uint32 what, BMessage* message)
+	{
+		while (BMenuItem* item = menu->RemoveItem((int32)0))
+			delete item;
+		int32 selected = message->GetInt32("selected", 0);
+		const char* name;
+		for (int32 i = 0; message->FindString("name", i, &name) == B_OK; i++) {
+			BMessage* pick = new BMessage(what);
+			pick->AddInt32("index", i);
+			BMenuItem* item = new BMenuItem(name, pick);
+			item->SetMarked(i == selected);
+			menu->AddItem(item);
+		}
 	}
 
 	void WindowActivated(bool active) override
@@ -336,6 +413,88 @@ public:
 };
 
 
+// A menu item that sends Command+`shortcut` (plus `modifiers`) to the
+// terminal. Its shortcut is drawn in the menu; BWindow never matches it
+// because TeminoWindow hands every key to Rust first.
+static BMenuItem*
+menu_key(const char* label, char shortcut, uint32 modifiers = 0,
+	int32 key = 0, char bytes = 0)
+{
+	BMessage* message = new BMessage(kMsgMenuKey);
+	message->AddInt32("key", key);
+	message->AddInt32("modifiers", (int32)(B_COMMAND_KEY | modifiers));
+	message->AddInt32("raw_char", bytes != 0 ? bytes : shortcut);
+	return new BMenuItem(label, message, shortcut, modifiers);
+}
+
+
+static BMenuBar*
+build_menu_bar()
+{
+	BMenuBar* bar = new BMenuBar(BRect(0, 0, 0, 0), "menu");
+
+	BMenu* app = new BMenu("Temino");
+	app->AddItem(menu_key("New tab", 'T'));
+	app->AddItem(menu_key("Split right", 'D'));
+	app->AddItem(menu_key("Split down", 'E'));
+	app->AddSeparatorItem();
+	app->AddItem(menu_key("Close pane", 'W'));
+	app->AddSeparatorItem();
+	app->AddItem(menu_key("Check for updates", 'U'));
+	app->AddItem(menu_key("Quit", 'Q'));
+	bar->AddItem(app);
+
+	BMenu* edit = new BMenu("Edit");
+	edit->AddItem(menu_key("Copy", 'C'));
+	edit->AddItem(menu_key("Copy command", 'C', B_SHIFT_KEY));
+	edit->AddItem(menu_key("Paste", 'V'));
+	edit->AddItem(menu_key("Select all", 'A'));
+	edit->AddSeparatorItem();
+	edit->AddItem(menu_key("Clear", 'K'));
+	bar->AddItem(edit);
+
+	BMenu* view = new BMenu("View");
+	view->AddItem(menu_key("Show/hide tabs", 'B'));
+	view->AddItem(menu_key("Previous tab", '{', B_SHIFT_KEY));
+	view->AddItem(menu_key("Next tab", '}', B_SHIFT_KEY));
+	view->AddItem(menu_key("Previous pane", '['));
+	view->AddItem(menu_key("Next pane", ']'));
+	// Enter has no shortcut character, so the label carries it.
+	BMessage* zoom = new BMessage(kMsgMenuKey);
+	zoom->AddInt32("key", 0x47);
+	zoom->AddInt32("modifiers", (int32)B_COMMAND_KEY);
+	zoom->AddInt32("raw_char", B_ENTER);
+	view->AddItem(new BMenuItem("Zoom pane (Alt+Enter)", zoom));
+	view->AddSeparatorItem();
+	view->AddItem(menu_key("Bigger text", '+'));
+	view->AddItem(menu_key("Smaller text", '-'));
+	view->AddItem(menu_key("Default text size", '0'));
+	bar->AddItem(view);
+
+	BMenu* settings = new BMenu("Settings");
+	sBackgroundMenu = new BMenu("Background");
+	settings->AddItem(sBackgroundMenu);
+	sShellMenu = new BMenu("Shell");
+	settings->AddItem(sShellMenu);
+	bar->AddItem(settings);
+
+	return bar;
+}
+
+
+// Hands a choice menu's entries to the window, to fill on its thread.
+static void
+post_choices(uint32 what, const char* const* names, int32 count,
+	int32 selected)
+{
+	BMessage message(what);
+	for (int32 i = 0; i < count; i++)
+		message.AddString("name", names[i]);
+	message.AddInt32("selected", selected);
+	sWindow->PostMessage(&message);
+}
+
+
 extern "C" {
 
 
@@ -359,7 +518,15 @@ temino_window_new(const char* title, int32_t width, int32_t height,
 	BRect frame(left, top, left + width - 1, top + height - 1);
 
 	sWindow = new TeminoWindow(frame, title);
-	sView = new TeminoView(sWindow->Bounds());
+	BMenuBar* menuBar = build_menu_bar();
+	sWindow->AddChild(menuBar);
+	// The terminal keeps the size Rust asked for; the window grows by the
+	// menu bar's height.
+	float menuHeight = menuBar->Frame().Height() + 1;
+	sWindow->ResizeBy(0, menuHeight);
+	BRect viewFrame = sWindow->Bounds();
+	viewFrame.top = menuHeight;
+	sView = new TeminoView(viewFrame);
 	sWindow->AddChild(sView);
 	sWindow->Show();
 }
@@ -387,6 +554,22 @@ temino_set_background(uint8_t r, uint8_t g, uint8_t b)
 {
 	BAutolock lock(sFrameLock);
 	sBackground = make_color(r, g, b, 255);
+}
+
+
+void
+temino_set_background_menu(const char* const* names, int32_t count,
+	int32_t selected)
+{
+	post_choices(kMsgBackgroundMenu, names, count, selected);
+}
+
+
+void
+temino_set_shell_menu(const char* const* names, int32_t count,
+	int32_t selected)
+{
+	post_choices(kMsgShellMenu, names, count, selected);
 }
 
 

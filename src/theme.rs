@@ -120,7 +120,29 @@ pub struct Theme {
     pub ansi: [Color; 16],
 }
 
+/// Settings ▸ Background: the names in the menu and their colors.
+pub const BACKGROUNDS: [(&str, u32); 6] = [
+    ("Midnight", 0x0f1117),
+    ("Black", 0x000000),
+    ("Graphite", 0x1c1c1f),
+    ("Navy", 0x0b1528),
+    ("Plum", 0x1a1122),
+    ("Forest", 0x0c1a14),
+];
+
 impl Theme {
+    /// The dark theme on another background; panels and dividers are
+    /// lifted from it by the same steps as on the default one.
+    pub fn with_background(mut self, rgb: u32) -> Theme {
+        let background = Color::hex(rgb);
+        let white = Color::hex(0xffffff);
+        self.background = background;
+        self.surface = background.mix(white, 0.025);
+        self.raised = background.mix(white, 0.0625);
+        self.divider = background.mix(white, 0.083);
+        self
+    }
+
     pub fn dark() -> Theme {
         Theme {
             background: Color::hex(0x0f1117),

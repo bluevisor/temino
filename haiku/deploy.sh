@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 ssh "$HOST" "date -u -s '$(date -u '+%Y-%m-%d %H:%M:%S')'" >/dev/null
 
 COPYFILE_DISABLE=1 tar --no-xattrs --exclude ./target --exclude ./dist --exclude ./.git -czf - . \
-	| ssh "$HOST" 'mkdir -p ~/src/temino && tar xzf - -C ~/src/temino 2>/dev/null'
+	| ssh "$HOST" 'rm -rf ~/src/temino/src && mkdir -p ~/src/temino && tar xzf - -C ~/src/temino 2>/dev/null'
 ssh "$HOST" 'cd ~/src/temino && cargo build --release 2>&1 | grep -Ev "^\s+(Compiling|Downloaded|Downloading)" | tail -40'
 
 if [ "$1" != "--no-run" ]; then

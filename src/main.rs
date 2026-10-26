@@ -1,4 +1,5 @@
-//! Temino: a modern GPU-accelerated terminal for Haiku, rendered with Vulkan.
+//! Temino: a modern GPU-accelerated block terminal for Haiku, Linux and
+//! macOS, rendered with Vulkan (Metal on macOS).
 
 // Drawing helpers take a scene, the text system, a position and a style.
 #![allow(clippy::too_many_arguments)]
@@ -6,31 +7,71 @@
 mod app;
 mod complete;
 mod editor;
+#[cfg(not(target_os = "macos"))]
+mod gpu;
+#[cfg(target_os = "macos")]
+#[path = "metal.rs"]
 mod gpu;
 mod keys;
+mod pane;
 mod platform;
 mod scene;
 mod session;
+mod shells;
 mod text;
 mod theme;
 mod ui;
+mod update;
 
 use std::sync::mpsc;
 use std::thread;
 
 pub enum Msg {
     Ui(platform::UiEvent),
-    Pty(Vec<u8>),
-    ShellExited(i32),
+    /// Output from the shell of the pane with this id.
+    Pty(u64, Vec<u8>),
+    ShellExited(u64, i32),
+    /// A message for the user from another thread (the updater).
+    Notice(String),
 }
 
-/// ~/config/settings/Temino: history, the shell integration script, logs.
+/// History, the shell integration script and logs: ~/config/settings/Temino
+/// on Haiku, ~/Library/Application Support/Temino on macOS, and
+/// $XDG_CONFIG_HOME/temino (~/.config/temino) on Linux.
 pub fn settings_dir() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
-    format!("{home}/config/settings/Temino")
+    if cfg!(target_os = "haiku") {
+        format!("{home}/config/settings/Temino")
+    } else if cfg!(target_os = "macos") {
+        format!("{home}/Library/Application Support/Temino")
+    } else {
+        let config = std::env::var("XDG_CONFIG_HOME").ok().filter(|d| !d.is_empty());
+        format!("{}/temino", config.unwrap_or_else(|| format!("{home}/.config")))
+    }
 }
 
-/// Reports a fatal error the way Haiku apps do, with an alert.
+/// `key=value` lines in the settings file: the value of `key`, if set.
+pub fn setting(key: &str) -> Option<String> {
+    let settings = std::fs::read_to_string(format!("{}/settings", settings_dir())).ok()?;
+    let prefix = format!("{key}=");
+    settings.lines().find_map(|line| line.strip_prefix(&prefix)).map(|value| value.trim().to_owned())
+}
+
+pub fn save_setting(key: &str, value: &str) {
+    let path = format!("{}/settings", settings_dir());
+    let prefix = format!("{key}=");
+    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.starts_with(&prefix))
+        .map(str::to_owned)
+        .collect();
+    lines.push(format!("{prefix}{value}"));
+    let _ = std::fs::create_dir_all(settings_dir());
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+/// Reports a fatal error the way native apps do, with an alert.
 pub fn fatal(message: &str) {
     eprintln!("temino: {message}");
     let _ = std::fs::create_dir_all(settings_dir());
@@ -38,8 +79,8 @@ pub fn fatal(message: &str) {
     platform::alert(&format!("Temino: {message}"));
 }
 
-/// With TEMINO_TRACE set, appends a timestamped line to
-/// ~/config/settings/Temino/trace.log (flushed, so it survives a hang).
+/// With TEMINO_TRACE set, appends a timestamped line to trace.log in the
+/// settings directory (flushed, so it survives a hang).
 pub fn trace(message: &str) {
     use std::io::Write;
     use std::sync::OnceLock;
@@ -59,6 +100,7 @@ const HEIGHT: u32 = 640;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "haiku")]
     if args.get(1).map(String::as_str) == Some("--pty-exec") {
         std::process::exit(platform::pty_exec(&args[2..]));
     }

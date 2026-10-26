@@ -1,10 +1,12 @@
-//! The C ABI of `src/haiku/shim.cpp`: the window, frame presentation, the
+//! Haiku: the C ABI of `src/haiku/shim.cpp`: the window, frame presentation, the
 //! clipboard and the pseudo-terminal, plus the events the window delivers.
 
 use std::ffi::{c_char, c_void, CString};
 use std::io;
 use std::sync::mpsc::Sender;
 
+use super::{Cursor, KeyEvent, UiEvent};
+use crate::keys::Named;
 use crate::Msg;
 
 #[repr(C)]
@@ -33,6 +35,8 @@ extern "C" {
     fn temino_app_run();
     fn temino_quit();
     fn temino_set_background(r: u8, g: u8, b: u8);
+    fn temino_set_background_menu(names: *const *const c_char, count: i32, selected: i32);
+    fn temino_set_shell_menu(names: *const *const c_char, count: i32, selected: i32);
     fn temino_present(pixels: *const u8, width: i32, height: i32, stride: i32);
     fn temino_set_title(title: *const c_char);
     fn temino_set_cursor(kind: i32);
@@ -58,54 +62,69 @@ extern "C" {
     fn temino_user_name() -> *const c_char;
 }
 
-/// Haiku modifier bits (`B_SHIFT_KEY` and friends). Haiku calls Alt the
-/// Command key; it is the shortcut modifier, like Cmd on a Mac.
-pub mod mods {
-    pub const SHIFT: u32 = 0x01;
-    pub const COMMAND: u32 = 0x02;
-    pub const CONTROL: u32 = 0x04;
-    pub const OPTION: u32 = 0x40;
+/// Haiku's physical key codes for the keys whose bytes collide with
+/// control characters (B_HOME is ^A), so they are told apart by code.
+mod code {
+    pub const ESCAPE: i32 = 0x01;
+    pub const F1: i32 = 0x02;
+    pub const F12: i32 = 0x0d;
+    pub const BACKSPACE: i32 = 0x1e;
+    pub const INSERT: i32 = 0x1f;
+    pub const HOME: i32 = 0x20;
+    pub const PAGE_UP: i32 = 0x21;
+    pub const TAB: i32 = 0x26;
+    pub const DELETE: i32 = 0x34;
+    pub const END: i32 = 0x35;
+    pub const PAGE_DOWN: i32 = 0x36;
+    pub const ENTER: i32 = 0x47;
+    pub const UP: i32 = 0x57;
+    pub const KEYPAD_ENTER: i32 = 0x5b;
+    pub const LEFT: i32 = 0x61;
+    pub const DOWN: i32 = 0x62;
+    pub const RIGHT: i32 = 0x63;
 }
 
-#[derive(Debug, Clone)]
-pub struct KeyEvent {
-    /// Haiku's physical key code.
-    pub key: i32,
-    pub mods: u32,
-    pub raw_char: u32,
-    /// The UTF-8 the keymap produced (control characters included).
-    pub bytes: Vec<u8>,
-}
-
-impl KeyEvent {
-    pub fn shift(&self) -> bool {
-        self.mods & mods::SHIFT != 0
+/// The special key a Haiku key code (and its bytes) stands for.
+fn named(key: i32, bytes: &[u8]) -> Option<Named> {
+    let by_code = match key {
+        code::UP => Some(Named::Up),
+        code::DOWN => Some(Named::Down),
+        code::LEFT => Some(Named::Left),
+        code::RIGHT => Some(Named::Right),
+        code::HOME => Some(Named::Home),
+        code::END => Some(Named::End),
+        code::PAGE_UP => Some(Named::PageUp),
+        code::PAGE_DOWN => Some(Named::PageDown),
+        code::INSERT => Some(Named::Insert),
+        code::DELETE => Some(Named::Delete),
+        code::BACKSPACE => Some(Named::Backspace),
+        code::TAB => Some(Named::Tab),
+        code::ENTER | code::KEYPAD_ENTER => Some(Named::Enter),
+        code::ESCAPE => Some(Named::Escape),
+        k @ code::F1..=code::F12 => Some(Named::F((k - code::F1 + 1) as u8)),
+        _ => None,
+    };
+    if by_code.is_some() {
+        return by_code;
     }
-    pub fn ctrl(&self) -> bool {
-        self.mods & mods::CONTROL != 0
+    // The keypad with Num Lock off sends navigation bytes.
+    let keypad = matches!(key, 0x37..=0x39 | 0x48..=0x4a | 0x58..=0x5a | 0x64 | 0x65);
+    if keypad && bytes.len() == 1 {
+        return match bytes[0] {
+            0x1e => Some(Named::Up),
+            0x1f => Some(Named::Down),
+            0x1c => Some(Named::Left),
+            0x1d => Some(Named::Right),
+            0x01 => Some(Named::Home),
+            0x04 => Some(Named::End),
+            0x0b => Some(Named::PageUp),
+            0x0c => Some(Named::PageDown),
+            0x05 => Some(Named::Insert),
+            0x7f => Some(Named::Delete),
+            _ => None,
+        };
     }
-    pub fn cmd(&self) -> bool {
-        self.mods & mods::COMMAND != 0
-    }
-    pub fn option(&self) -> bool {
-        self.mods & mods::OPTION != 0
-    }
-    /// The unmodified character of the key, lowercased.
-    pub fn base_char(&self) -> Option<char> {
-        char::from_u32(self.raw_char).map(|c| c.to_ascii_lowercase())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum UiEvent {
-    Key(KeyEvent),
-    MouseDown { x: f32, y: f32, buttons: i32, clicks: i32, mods: u32 },
-    MouseUp { x: f32, y: f32 },
-    MouseMoved { x: f32, y: f32, buttons: i32 },
-    Wheel { dx: f32, dy: f32, x: f32, y: f32, mods: u32 },
-    Resize { width: u32, height: u32 },
-    Focus(bool),
-    Close,
+    None
 }
 
 extern "C" fn on_event(raw: *const RawEvent, context: *mut c_void) {
@@ -113,19 +132,24 @@ extern "C" fn on_event(raw: *const RawEvent, context: *mut c_void) {
     // `window_new`, which lives for the rest of the process.
     let (raw, sender) = unsafe { (&*raw, &*(context as *const Sender<Msg>)) };
     let event = match raw.kind {
-        1 => UiEvent::Key(KeyEvent {
-            key: raw.key,
-            mods: raw.modifiers,
-            raw_char: raw.raw_char as u32,
-            bytes: raw.bytes[..raw.nbytes.clamp(0, 16) as usize].to_vec(),
-        }),
+        1 => {
+            let bytes = raw.bytes[..raw.nbytes.clamp(0, 16) as usize].to_vec();
+            UiEvent::Key(KeyEvent {
+                named: named(raw.key, &bytes),
+                mods: raw.modifiers,
+                raw_char: raw.raw_char as u32,
+                bytes,
+            })
+        }
         2 => UiEvent::MouseDown { x: raw.x, y: raw.y, buttons: raw.buttons, clicks: raw.clicks, mods: raw.modifiers },
         3 => UiEvent::MouseUp { x: raw.x, y: raw.y },
         4 => UiEvent::MouseMoved { x: raw.x, y: raw.y, buttons: raw.buttons },
         5 => UiEvent::Wheel { dx: raw.dx, dy: raw.dy, x: raw.x, y: raw.y, mods: raw.modifiers },
-        6 => UiEvent::Resize { width: raw.width.max(1) as u32, height: raw.height.max(1) as u32 },
+        6 => UiEvent::Resize { width: raw.width.max(1) as u32, height: raw.height.max(1) as u32, scale: 1.0 },
         7 => UiEvent::Focus(raw.buttons != 0),
         8 => UiEvent::Close,
+        10 => UiEvent::Background(raw.key.max(0) as usize),
+        11 => UiEvent::Shell(raw.key.max(0) as usize),
         _ => return,
     };
     let _ = sender.send(Msg::Ui(event));
@@ -155,6 +179,20 @@ pub fn set_background(rgb: [u8; 3]) {
     unsafe { temino_set_background(rgb[0], rgb[1], rgb[2]) }
 }
 
+/// Fills Settings ▸ Background with these names, `selected` marked.
+pub fn set_background_menu(names: &[&str], selected: usize) {
+    let names: Vec<CString> = names.iter().map(|n| CString::new(*n).unwrap()).collect();
+    let pointers: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
+    unsafe { temino_set_background_menu(pointers.as_ptr(), pointers.len() as i32, selected as i32) }
+}
+
+/// Fills Settings ▸ Shell with these names, `selected` marked.
+pub fn set_shell_menu(names: &[String], selected: usize) {
+    let names: Vec<CString> = names.iter().map(|n| CString::new(n.as_str()).unwrap_or_default()).collect();
+    let pointers: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
+    unsafe { temino_set_shell_menu(pointers.as_ptr(), pointers.len() as i32, selected as i32) }
+}
+
 /// Copies a BGRA frame into the window's back bitmap and shows it.
 pub fn present(pixels: &[u8], width: u32, height: u32) {
     debug_assert!(pixels.len() >= (width * height * 4) as usize);
@@ -165,12 +203,6 @@ pub fn set_title(title: &str) {
     if let Ok(title) = CString::new(title.replace('\0', "")) {
         unsafe { temino_set_title(title.as_ptr()) }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Cursor {
-    IBeam = 0,
-    Arrow = 1,
 }
 
 pub fn set_cursor(cursor: Cursor) {
@@ -261,4 +293,11 @@ pub fn user_name() -> Option<String> {
 
 pub fn hangup(pid: i32) {
     unsafe { temino_hangup(pid) }
+}
+
+/// Haiku has no primary selection.
+pub fn selection_set(_text: &str) {}
+
+pub fn selection_get() -> Option<String> {
+    None
 }
