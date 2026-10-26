@@ -56,6 +56,9 @@ pub struct Ctx {
     pub toast: Option<(String, Instant)>,
     /// The shell new panes start (Settings ▸ Shell).
     pub shell: String,
+    /// An input method is composing at the cursor: the prompt's hint stays
+    /// out of its way.
+    pub composing: bool,
 }
 
 impl Ctx {
@@ -1406,7 +1409,7 @@ impl Pane {
             Phase::Prompt | Phase::Submitted => {}
             Phase::Ready | Phase::Continuation => {
                 let first_line = editor.position(editor.cursor).0.saturating_sub(MAX_EDITOR_LINES - 1);
-                if editor.text.is_empty() {
+                if editor.text.is_empty() && !ctx.composing {
                     let hint = if phase == Phase::Continuation {
                         "The command needs more input; Ctrl+C cancels it"
                     } else {

@@ -458,6 +458,7 @@ impl App {
             blink_epoch: Instant::now(),
             toast: None,
             shell,
+            composing: false,
         };
         let mut app = App {
             gpu,
@@ -1624,6 +1625,7 @@ impl App {
         self.dirty = false;
         let (width, height) = (self.width, self.height);
         self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.window());
+        self.ctx.composing = !self.preedit.is_empty();
         let focus = self.focused_id();
         let visible = self.visible_panes();
         let several = visible.len() > 1;
