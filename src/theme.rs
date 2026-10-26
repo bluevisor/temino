@@ -135,7 +135,7 @@ pub const BACKGROUNDS: [(&str, u32); 6] = [
 /// How far `surface` is lifted from the background toward white.
 pub const SURFACE_LIFT: f32 = 0.025;
 
-/// Settings ▸ Background Opacity: percentages offered in the menu.
+/// Settings ▸ Background opacity: the percentages to pick from.
 pub const OPACITIES: [u32; 9] = [100, 95, 90, 85, 80, 75, 70, 60, 50];
 
 impl Theme {

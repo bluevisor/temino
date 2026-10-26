@@ -34,8 +34,12 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
 - **Tabs and splits.** Each tab holds a tree of panes split side by side or
   stacked; drag a divider to resize, zoom one pane to fill the tab, and new
   panes start in the current pane's directory. Tabs are listed down the left
-  side once there is a second one (`TEMINO_TABS=top` puts them across the
-  top instead).
+  side once there is a second one, or across the top (Settings, or
+  `TEMINO_TABS=top`).
+- **Settings in a tab.** Cmd+, opens them: background color, text size,
+  default shell, tab list position and updates; on macOS also how
+  see-through the background is and whether the desktop behind it is
+  blurred. On macOS frames render straight into the window's Metal layer.
 - **GPU text.** Glyphs come from a 2048² atlas (fontdue) and are drawn as
   instanced quads; rounded rectangles, borders and shadows are a signed
   distance field shader. Box-drawing and block characters are drawn
@@ -170,8 +174,8 @@ Temino ▸ Check for Updates (Cmd+U). It downloads the build for your system and
 swaps it in; the new version runs from the next launch. It replaces
 Temino.app on macOS and the `temino` binary on Linux. On Haiku it replaces the
 package in `~/config/packages` when you quit, because swapping the package
-stops a running Temino. To turn off the daily check, put `updates=off` in the
-`settings` file. Updates need `curl`.
+stops a running Temino. To turn off the daily check, switch it off in
+Settings (or put `updates=off` in the `settings` file). Updates need `curl`.
 
 ## Credits
 

@@ -1,6 +1,7 @@
-//! Linux and macOS: a winit window that shows each finished frame through
-//! softbuffer, the clipboard through arboard, and a Unix pseudo-terminal.
-//! On macOS the menu bar comes from src/macos/shim.m.
+//! Linux and macOS: a winit window, the clipboard through arboard, and a
+//! Unix pseudo-terminal. On Linux each finished frame is shown through
+//! softbuffer; on macOS frames render straight into the window's Metal
+//! layer (src/macos/shim.m, which also has the menu bar).
 //!
 //! winit wants the main thread, so the core thread talks to it through an
 //! event-loop proxy: `present` parks the newest frame and wakes the loop,
@@ -31,8 +32,8 @@ use crate::Msg;
 
 #[cfg(target_os = "macos")]
 extern "C" {
-    /// Shows a premultiplied BGRA frame in the view, alpha and all.
-    fn temino_layer_present(view: *mut std::ffi::c_void, pixels: *const u32, width: u32, height: u32);
+    /// Gives the view the Metal layer that src/metal.rs renders into.
+    fn temino_metal_attach(view: *mut std::ffi::c_void);
 }
 
 /// What the core thread asks of the window thread.
@@ -41,8 +42,7 @@ enum Request {
     Present,
     Title(String),
     Cursor(Cursor),
-    /// A choice menu changed; it is in CHOICES.
-    Choices(Choice),
+    Blur(bool),
     Quit,
 }
 
@@ -57,19 +57,8 @@ static FRAME: Mutex<Option<Frame>> = Mutex::new(None);
 /// Set while a Present request is queued, so frames don't pile up.
 static PRESENT_PENDING: AtomicBool = AtomicBool::new(false);
 static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
-/// The menus of choices Rust fills (macOS; Linux has no menu bar).
-#[derive(Clone, Copy, Debug)]
-enum Choice {
-    Background,
-    Shell,
-    Opacity,
-}
-
-/// A choice menu's entries and the picked one.
-type Choices = (Vec<String>, usize);
-
-/// Each choice menu, by `Choice`.
-static CHOICES: Mutex<[Option<Choices>; 3]> = Mutex::new([None, None, None]);
+/// Whether the window blurs what's behind it, kept for when it opens.
+static BLUR: AtomicBool = AtomicBool::new(false);
 /// Where menu picks go; the menu calls back on the main thread.
 static MENU_SENDER: Mutex<Option<Sender<Msg>>> = Mutex::new(None);
 
@@ -116,7 +105,7 @@ pub fn app_run() {
         window: None,
         surface: None,
         #[cfg(target_os = "macos")]
-        view: None,
+        on_layer: false,
         scale: 1.0,
         modifiers: ModifiersState::empty(),
         pointer: (0.0, 0.0),
@@ -134,31 +123,21 @@ pub fn quit() {
 /// The window is always covered by the frame; nothing to do.
 pub fn set_background(_rgb: [u8; 3]) {}
 
-/// Fills Settings ▸ Background.
-pub fn set_background_menu(names: &[&str], selected: usize) {
-    set_choices(Choice::Background, names.iter().map(|n| n.to_string()).collect(), selected);
-}
+// Settings are picked in the Settings tab here, not from menus.
+pub fn set_background_menu(_names: &[&str], _selected: usize) {}
+pub fn set_shell_menu(_names: &[String], _selected: usize) {}
 
-/// Fills Settings ▸ Default Shell.
-pub fn set_shell_menu(names: &[String], selected: usize) {
-    set_choices(Choice::Shell, names.to_vec(), selected);
-}
-
-/// Fills Settings ▸ Background Opacity.
-pub fn set_opacity_menu(names: &[String], selected: usize) {
-    set_choices(Choice::Opacity, names.to_vec(), selected);
-}
-
-fn set_choices(choice: Choice, names: Vec<String>, selected: usize) {
-    CHOICES.lock().unwrap()[choice as usize] = Some((names, selected));
-    request(Request::Choices(choice));
+/// Blurs what shows through a see-through background (macOS).
+pub fn set_blur(on: bool) {
+    BLUR.store(on, Ordering::Release);
+    request(Request::Blur(on));
 }
 
 #[cfg(target_os = "macos")]
 mod menu {
     use std::ffi::{c_char, CString};
 
-    use super::{Choice, KeyEvent, UiEvent, CHOICES, MENU_SENDER};
+    use super::{KeyEvent, UiEvent, MENU_SENDER};
     use crate::keys::Named;
     use crate::platform::mods;
     use crate::Msg;
@@ -174,24 +153,10 @@ mod menu {
 
     extern "C" {
         fn temino_menu_install(items: *const Item, count: usize, callback: extern "C" fn(i32));
-        fn temino_menu_choices(tag: i32, names: *const *const c_char, count: usize, selected: usize);
     }
 
     const SHIFT: u32 = 1 << 17;
     const COMMAND: u32 = 1 << 20;
-    /// Choice submenus have tags CHOICE, 2 * CHOICE…; their entries count
-    /// up from there.
-    const CHOICE: i32 = 1000;
-    /// All under Settings, which Temino ▸ Settings… (Command+,) pops up.
-    const SUBMENUS: [(&str, &str, Choice); 3] = [
-        ("Settings", "Background", Choice::Background),
-        ("Settings", "Background Opacity", Choice::Opacity),
-        ("Settings", "Default Shell", Choice::Shell),
-    ];
-
-    fn choice_tag(choice: Choice) -> i32 {
-        CHOICE * (choice as i32 + 1)
-    }
 
     /// Menu, label, key equivalent, extra modifiers, and the key the item
     /// sends, as if typed with Command: menus and shortcuts share one path.
@@ -199,6 +164,7 @@ mod menu {
     type MenuItem = (&'static str, Option<&'static str>, &'static str, u32, Option<Named>, char);
     const ITEMS: &[MenuItem] = &[
         ("Temino", Some("Check for Updates…"), "u", 0, None, 'u'),
+        ("Temino", Some("Settings…"), ",", 0, None, ','),
         ("Temino", None, "", 0, None, '\0'),
         ("Temino", Some("Quit Temino"), "q", 0, None, 'q'),
         ("Shell", Some("New Tab"), "t", 0, None, 't'),
@@ -225,19 +191,10 @@ mod menu {
     ];
 
     extern "C" fn pick(tag: i32) {
-        // The app answers a pick by refilling the menu with the new mark.
-        let event = if tag >= choice_tag(Choice::Opacity) {
-            UiEvent::Opacity((tag - choice_tag(Choice::Opacity)) as usize)
-        } else if tag >= choice_tag(Choice::Shell) {
-            UiEvent::Shell((tag - choice_tag(Choice::Shell)) as usize)
-        } else if tag >= choice_tag(Choice::Background) {
-            UiEvent::Background((tag - choice_tag(Choice::Background)) as usize)
-        } else {
-            let Some(&(_, _, _, extra, named, c)) = ITEMS.get(tag as usize) else { return };
-            let shift = if extra & SHIFT != 0 { mods::SHIFT } else { 0 };
-            let bytes = if named.is_some() { Vec::new() } else { c.to_string().into_bytes() };
-            UiEvent::Key(KeyEvent { named, mods: mods::COMMAND | shift, raw_char: c as u32, bytes })
-        };
+        let Some(&(_, _, _, extra, named, c)) = ITEMS.get(tag as usize) else { return };
+        let shift = if extra & SHIFT != 0 { mods::SHIFT } else { 0 };
+        let bytes = if named.is_some() { Vec::new() } else { c.to_string().into_bytes() };
+        let event = UiEvent::Key(KeyEvent { named, mods: mods::COMMAND | shift, raw_char: c as u32, bytes });
         if let Some(sender) = MENU_SENDER.lock().unwrap().as_ref() {
             let _ = sender.send(Msg::Ui(event));
         }
@@ -247,33 +204,22 @@ mod menu {
         let strings: Vec<[CString; 3]> = ITEMS
             .iter()
             .map(|(menu, label, key, ..)| [*menu, label.unwrap_or(""), *key].map(|s| CString::new(s).unwrap()))
-            .chain(SUBMENUS.iter().map(|(menu, label, _)| [*menu, label, ""].map(|s| CString::new(s).unwrap())))
             .collect();
         let items: Vec<Item> = strings
             .iter()
             .enumerate()
             .map(|(i, [menu, label, key])| {
-                let separator = ITEMS.get(i).is_some_and(|item| item.1.is_none());
+                let separator = ITEMS[i].1.is_none();
                 Item {
                     menu: menu.as_ptr(),
                     label: if separator { std::ptr::null() } else { label.as_ptr() },
                     key: key.as_ptr(),
-                    modifiers: COMMAND | ITEMS.get(i).map_or(0, |item| item.3),
-                    tag: if i < ITEMS.len() { i as i32 } else { choice_tag(SUBMENUS[i - ITEMS.len()].2) },
+                    modifiers: COMMAND | ITEMS[i].3,
+                    tag: i as i32,
                 }
             })
             .collect();
         unsafe { temino_menu_install(items.as_ptr(), items.len(), pick) };
-        for (.., choice) in SUBMENUS {
-            update_choices(choice);
-        }
-    }
-
-    pub fn update_choices(choice: Choice) {
-        let Some((names, selected)) = CHOICES.lock().unwrap()[choice as usize].clone() else { return };
-        let names: Vec<CString> = names.into_iter().map(|n| CString::new(n).unwrap_or_default()).collect();
-        let pointers: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
-        unsafe { temino_menu_choices(choice_tag(choice), pointers.as_ptr(), pointers.len(), selected) };
     }
 }
 
@@ -284,13 +230,9 @@ pub fn present(pixels: &[u8], width: u32, height: u32) {
         let mut slot = FRAME.lock().unwrap();
         let frame = slot.get_or_insert_with(|| Frame { pixels: Vec::new(), width: 0, height: 0 });
         frame.pixels.clear();
-        // Little-endian BGRA is 0xAARRGGBB. softbuffer wants the top byte
-        // clear; macOS keeps it, as premultiplied alpha the window shows.
-        let keep = if cfg!(target_os = "macos") { 0xff } else { 0 };
+        // Little-endian BGRA is 0xAARRGGBB; softbuffer wants the top byte clear.
         frame.pixels.extend(
-            pixels[..(width * height * 4) as usize]
-                .chunks_exact(4)
-                .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3] & keep])),
+            pixels[..(width * height * 4) as usize].chunks_exact(4).map(|p| u32::from_le_bytes([p[0], p[1], p[2], 0])),
         );
         frame.width = width;
         frame.height = height;
@@ -441,10 +383,9 @@ struct Handler {
     sender: Sender<Msg>,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
-    /// The window's NSView, which frames are shown in (with their alpha)
-    /// in place of softbuffer.
+    /// Frames go straight to the window's Metal layer, not through softbuffer.
     #[cfg(target_os = "macos")]
-    view: Option<*mut std::ffi::c_void>,
+    on_layer: bool,
     scale: f64,
     modifiers: ModifiersState,
     /// The pointer, in logical pixels.
@@ -490,11 +431,7 @@ impl Handler {
 
     fn draw(&mut self) {
         #[cfg(target_os = "macos")]
-        if let Some(view) = self.view {
-            let slot = FRAME.lock().unwrap();
-            if let Some(frame) = slot.as_ref().filter(|f| f.pixels.len() == (f.width * f.height) as usize) {
-                unsafe { temino_layer_present(view, frame.pixels.as_ptr(), frame.width, frame.height) };
-            }
+        if self.on_layer {
             return;
         }
         let Some(surface) = &mut self.surface else { return };
@@ -600,6 +537,7 @@ impl ApplicationHandler<Request> for Handler {
             }
         };
         window.set_cursor(CursorIcon::Text);
+        window.set_blur(BLUR.load(Ordering::Acquire));
         #[cfg(target_os = "macos")]
         menu::install();
         self.scale = window.scale_factor();
@@ -607,7 +545,8 @@ impl ApplicationHandler<Request> for Handler {
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) {
-                self.view = Some(handle.ns_view.as_ptr());
+                unsafe { temino_metal_attach(handle.ns_view.as_ptr()) };
+                self.on_layer = true;
                 self.window = Some(window);
                 self.send_size();
                 return;
@@ -648,10 +587,10 @@ impl ApplicationHandler<Request> for Handler {
                     });
                 }
             }
-            Request::Choices(_choice) =>
-            {
-                #[cfg(target_os = "macos")]
-                menu::update_choices(_choice)
+            Request::Blur(on) => {
+                if let Some(window) = &self.window {
+                    window.set_blur(on);
+                }
             }
             Request::Quit => event_loop.exit(),
         }
