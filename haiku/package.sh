@@ -38,8 +38,16 @@ cp README.md LICENSE assets/fonts/JetBrainsMono-OFL.txt "$stage/documentation/pa
 # x86 libraries, so require those (haiku_x86, lib:…_x86) as HaikuPorts does.
 secondary=()
 [ "$arch" = x86_gcc2 ] && secondary=(-e 's/^\thaiku$/\thaiku\n\thaiku_x86/' -e 's/^\t\(lib:[a-z_+]*\)$/\t\1_x86/')
+# Intel Haiku has no GPU Vulkan driver in its repos, so pull in the loader and
+# lavapipe (software) with the package. arm64 gets Vulkan from the Venus stack
+# outside the package system, so nothing is required there.
+vulkan=()
+case "$arch" in
+	x86_64) vulkan=(-e 's/^\tlib:libstdc++$/&\n\tlib:libvulkan\n\tmesa_lavapipe/') ;;
+	x86_gcc2) vulkan=(-e 's/^\tlib:libstdc++_x86$/&\n\tlib:libvulkan_x86\n\tmesa_x86_lavapipe/') ;;
+esac
 sed -e "s/@VERSION@/$version/g" -e "s/@REVISION@/$rev/g" -e "s/@ARCH@/$arch/g" "${secondary[@]}" \
-	haiku/PackageInfo.in > "$stage/.PackageInfo"
+	haiku/PackageInfo.in | sed "${vulkan[@]+"${vulkan[@]}"}" > "$stage/.PackageInfo"
 
 mkdir -p dist
 rm -f "$out"

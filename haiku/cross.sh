@@ -11,10 +11,15 @@
 # silicon).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+realign=()
 
 case "${1:-}" in
 	x86_64) base=x86_64-r1beta5; triple=x86_64-unknown-haiku; pkgarch=x86_64; tc=x86_64-unknown-haiku; sfx= ;;
-	x86) base=x86_gcc2h-r1beta5; triple=i686-unknown-haiku; pkgarch=x86_gcc2; tc=i586-pc-haiku; sfx=-x86 ;;
+	# 32-bit Haiku only guarantees a 4-byte-aligned stack, but LLVM and gcc
+	# assume 16 on i686, so SSE spills (movdqa) to the stack fault; realign
+	# wherever a function needs it (rustls' crypto crashed without this).
+	x86) base=x86_gcc2h-r1beta5; triple=i686-unknown-haiku; pkgarch=x86_gcc2; tc=i586-pc-haiku; sfx=-x86
+		realign=(-e "RUSTFLAGS=-C llvm-args=-stackrealign" -e "CFLAGS_i686_unknown_haiku=-mstackrealign" -e "CXXFLAGS_i686_unknown_haiku=-mstackrealign") ;;
 	*) echo "usage: haiku/cross.sh x86_64|x86" >&2; exit 2 ;;
 esac
 image=haiku-rust-cross:${1}
@@ -32,6 +37,7 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src -v haiku-cross-cargo:/opt/
 	-e CARGO_TARGET_DIR=/src/target/cross \
 	-e "CARGO_TARGET_${ENV}_LINKER=$tc-gcc$sfx" \
 	-e "CC_$env=$tc-gcc$sfx" -e "CXX_$env=$tc-g++$sfx" -e "AR_$env=$tc-ar$sfx" \
+	${realign[@]+"${realign[@]}"} \
 	"$image" cargo build --release --locked -Zbuild-std=std,panic_abort --target "$triple"
 bin=target/cross/$triple/release/temino
 
