@@ -7,8 +7,8 @@
 <key>CFBundleExecutable</key><string>temino</string>
 <key>CFBundleIconFile</key><string>Temino</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>0.2.4</string>
-<key>CFBundleShortVersionString</key><string>0.2.4</string>
+<key>CFBundleVersion</key><string>0.2.5</string>
+<key>CFBundleShortVersionString</key><string>0.2.5</string>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSCameraUsageDescription</key><string>A program running in Temino wants to use the camera.</string>
