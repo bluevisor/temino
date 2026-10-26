@@ -26,6 +26,7 @@ pub struct Values {
     pub shell: Option<usize>,
     pub installed: [bool; KINDS.len()],
     pub tabs_top: bool,
+    /// As a percentage of the default size.
     pub zoom: f32,
     pub updates: bool,
     /// The window can be see-through (macOS).
@@ -160,7 +161,7 @@ impl Ui<'_> {
             Row::Background => ("Background", BACKGROUNDS[values.background].0.to_owned()),
             Row::Opacity => ("Background opacity", "How much of the desktop shows through".to_owned()),
             Row::Blur => ("Blur behind the window", "Soften what shows through".to_owned()),
-            Row::Zoom => ("Size", format!("{:.0}% · Command+plus and Command+minus too", values.zoom * 100.0)),
+            Row::Zoom => ("Size", format!("{:.0}% · Command+plus and Command+minus too", values.zoom)),
             Row::Shell => ("Default shell", "For new tabs and panes; a missing one is installed".to_owned()),
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
@@ -312,7 +313,7 @@ mod tests {
             shell: Some(0),
             installed: [true, true, false],
             tabs_top: false,
-            zoom: 1.0,
+            zoom: 100.0,
             updates: true,
             see_through: true,
         };

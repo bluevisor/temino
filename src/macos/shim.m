@@ -368,6 +368,18 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 {
 	return nil;
 }
+
+// Frames come in device pixels; without this a Retina frame shows at twice
+// its size, cropped to the top left.
+- (void)viewDidChangeBackingProperties
+{
+	[super viewDidChangeBackingProperties];
+	CGFloat scale = self.window ? self.window.backingScaleFactor : 1;
+	[CATransaction begin];
+	[CATransaction setDisableActions:YES];
+	self.layer.contentsScale = scale;
+	[CATransaction commit];
+}
 @end
 
 
@@ -394,6 +406,7 @@ temino_metal_attach(void* view_handle)
 		CGColorSpaceRelease(srgb);
 		// While the window resizes, the last frame stays put at the top left.
 		layer.contentsGravity = kCAGravityTopLeft;
+		layer.contentsScale = view.window ? view.window.backingScaleFactor : 1;
 		atomic_store(&sLayer, (__bridge_retained void*)layer);
 	}
 }

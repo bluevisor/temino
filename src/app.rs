@@ -18,7 +18,11 @@ use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{Color, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
 use crate::Msg;
 
-const DEFAULT_FONT_SIZE: f32 = 14.0;
+/// The terminal font size at zoom 1, which every UI size is designed at.
+const BASE_FONT_SIZE: f32 = 14.0;
+/// The terminal font size at 100%: the window draws a little larger than
+/// its design size.
+const DEFAULT_FONT_SIZE: f32 = 15.4;
 const TAB_BAR_HEIGHT: f32 = 34.0;
 const TAB_MAX_WIDTH: f32 = 220.0;
 const SIDEBAR_WIDTH: f32 = 200.0;
@@ -347,7 +351,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
         }
     };
     println!("device: {} ({:.1} ms)", gpu.device_name, started.elapsed().as_secs_f64() * 1000.0);
-    let mut text = TextSystem::new(DEFAULT_FONT_SIZE);
+    let mut text = TextSystem::new(BASE_FONT_SIZE);
     let theme = Theme::dark();
     let mut scene = Scene::new();
     let mut slowest = 0.0f64;
@@ -428,7 +432,7 @@ fn load_opacity() -> usize {
 impl App {
     fn new(sender: Sender<Msg>, width: u32, height: u32) -> Result<App, String> {
         let gpu = Gpu::new()?;
-        let text = TextSystem::new(DEFAULT_FONT_SIZE);
+        let text = TextSystem::new(BASE_FONT_SIZE);
         crate::trace("app: fonts ready");
         let background = load_background();
         let opacity = load_opacity();
@@ -495,7 +499,7 @@ impl App {
             installed: [false; KINDS.len()],
         };
         app.apply_blur();
-        app.set_zoom(crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(1.0), false);
+        app.set_zoom(crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(DEFAULT_FONT_SIZE / BASE_FONT_SIZE), false);
         app.restore_tabs()?;
         crate::update::check(app.ctx.sender.clone(), false);
         crate::trace("app: shell started");
@@ -1048,17 +1052,26 @@ impl App {
         }
     }
 
-    /// Zooms the whole window, text and chrome alike, in steps of one point
-    /// of the terminal font.
+    /// Zooms the whole window, text and chrome alike, so the terminal font
+    /// is `size` points.
     fn change_font_size(&mut self, size: f32) {
-        let size = size.round().clamp(8.0, 32.0);
-        self.set_zoom(size / DEFAULT_FONT_SIZE, true);
+        self.set_zoom(size / BASE_FONT_SIZE, true);
+    }
+
+    /// Steps the terminal font a whole point up or down.
+    fn step_font_size(&mut self, step: f32) {
+        self.change_font_size((self.zoom * BASE_FONT_SIZE + step).round());
+    }
+
+    /// The zoom as Settings and the toast show it: 100% at the default size.
+    fn zoom_percent(&self) -> f32 {
+        self.zoom * BASE_FONT_SIZE / DEFAULT_FONT_SIZE * 100.0
     }
 
     /// Lays everything out at `zoom`: a smaller logical window drawn at a
     /// larger scale, so every size in the UI grows together.
     fn set_zoom(&mut self, zoom: f32, announce: bool) {
-        let zoom = zoom.clamp(8.0 / DEFAULT_FONT_SIZE, 32.0 / DEFAULT_FONT_SIZE);
+        let zoom = zoom.clamp(8.0 / BASE_FONT_SIZE, 32.0 / BASE_FONT_SIZE);
         let changed = zoom != self.zoom;
         self.zoom = zoom;
         self.width = self.window.0 / zoom;
@@ -1072,7 +1085,7 @@ impl App {
         self.relayout();
         if changed && announce {
             crate::save_setting("zoom", &format!("{zoom}"));
-            self.ctx.show_toast(&format!("Zoom {:.0}%", zoom * 100.0));
+            self.ctx.show_toast(&format!("Zoom {:.0}%", self.zoom_percent()));
         }
     }
 
@@ -1196,11 +1209,11 @@ impl App {
                     true
                 }
                 (_, Some('=' | '+')) => {
-                    self.change_font_size(self.zoom * DEFAULT_FONT_SIZE + 1.0);
+                    self.step_font_size(1.0);
                     true
                 }
                 (_, Some('-')) => {
-                    self.change_font_size(self.zoom * DEFAULT_FONT_SIZE - 1.0);
+                    self.step_font_size(-1.0);
                     true
                 }
                 (_, Some('0')) => {
@@ -1239,7 +1252,7 @@ impl App {
             shell: shells::Kind::of_path(&self.ctx.shell).and_then(|kind| KINDS.iter().position(|&k| k == kind)),
             installed: self.installed,
             tabs_top: self.strip == TabStrip::Top,
-            zoom: self.zoom,
+            zoom: self.zoom_percent(),
             updates: crate::setting("updates").as_deref() != Some("off"),
             see_through: cfg!(target_os = "macos"),
         }
@@ -1264,10 +1277,8 @@ impl App {
                 crate::save_setting("tabs", if top { "top" } else { "left" });
                 self.relayout();
             }
-            Action::Zoom(step) => self.change_font_size(match step {
-                0 => DEFAULT_FONT_SIZE,
-                _ => self.zoom * DEFAULT_FONT_SIZE + step as f32,
-            }),
+            Action::Zoom(0) => self.change_font_size(DEFAULT_FONT_SIZE),
+            Action::Zoom(step) => self.step_font_size(step as f32),
             Action::Updates(on) => crate::save_setting("updates", if on { "on" } else { "off" }),
             Action::CheckForUpdates => {
                 self.ctx.show_toast("Checking for updates…");

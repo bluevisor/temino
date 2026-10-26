@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, KeyEvent as WinitKey, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -87,6 +87,16 @@ pub fn app_new(_signature: &str) {
     let event_loop = builder.build().expect("creating the event loop");
     let _ = PROXY.set(Mutex::new(event_loop.create_proxy()));
     EVENT_LOOP.with(|slot| *slot.borrow_mut() = Some(event_loop));
+}
+
+/// The window's last position and size (logical x, y, width, height).
+fn saved_frame() -> Option<(f64, f64, f64, f64)> {
+    let frame = crate::setting("window")?;
+    let parts: Vec<f64> = frame.split(',').filter_map(|part| part.parse().ok()).collect();
+    match parts[..] {
+        [x, y, width, height] if width >= 200.0 && height >= 120.0 => Some((x, y, width, height)),
+        _ => None,
+    }
 }
 
 pub fn window_new(title: &str, width: u32, height: u32, sender: Sender<Msg>) {
@@ -400,6 +410,23 @@ impl Handler {
         let _ = self.sender.send(Msg::Ui(event));
     }
 
+    /// Remembers where the window is and how big, for the next launch.
+    fn save_frame(&self) {
+        let Some(window) = &self.window else { return };
+        if window.is_minimized() == Some(true) || window.fullscreen().is_some() {
+            return;
+        }
+        // winit on macOS places a new window by its content, not its frame.
+        let position = if cfg!(target_os = "macos") { window.inner_position() } else { window.outer_position() };
+        let Ok(position) = position else { return };
+        let position = position.to_logical::<f64>(self.scale);
+        let size = window.inner_size().to_logical::<f64>(self.scale);
+        let frame = format!("{:.0},{:.0},{:.0},{:.0}", position.x, position.y, size.width, size.height);
+        if crate::setting("window").as_deref() != Some(frame.as_str()) {
+            crate::save_setting("window", &frame);
+        }
+    }
+
     fn send_size(&self) {
         let Some(window) = &self.window else { return };
         let size = window.inner_size();
@@ -523,11 +550,14 @@ impl ApplicationHandler<Request> for Handler {
         if self.window.is_some() {
             return;
         }
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title(self.title.clone())
             .with_inner_size(LogicalSize::new(self.size.0, self.size.1))
             // Settings ▸ Background Opacity lets the desktop show through.
             .with_transparent(cfg!(target_os = "macos"));
+        if let Some((x, y, width, height)) = saved_frame() {
+            attributes = attributes.with_position(LogicalPosition::new(x, y)).with_inner_size(LogicalSize::new(width, height));
+        }
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -599,7 +629,11 @@ impl ApplicationHandler<Request> for Handler {
     fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => self.send(UiEvent::Close),
-            WindowEvent::Resized(_) => self.send_size(),
+            WindowEvent::Resized(_) => {
+                self.send_size();
+                self.save_frame();
+            }
+            WindowEvent::Moved(_) => self.save_frame(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale = scale_factor;
                 self.send_size();
