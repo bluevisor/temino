@@ -260,6 +260,8 @@ pub fn set_cursor(cursor: Cursor) {
     request(Request::Cursor(cursor));
 }
 
+pub fn set_text_caret(_x: i32, _y: i32, _height: i32) {}
+
 pub fn beep() {}
 
 fn with_clipboard<T>(f: impl FnOnce(&mut arboard::Clipboard) -> Option<T>) -> Option<T> {
@@ -556,7 +558,8 @@ impl ApplicationHandler<Request> for Handler {
             // Settings ▸ Background Opacity lets the desktop show through.
             .with_transparent(cfg!(target_os = "macos"));
         if let Some((x, y, width, height)) = saved_frame() {
-            attributes = attributes.with_position(LogicalPosition::new(x, y)).with_inner_size(LogicalSize::new(width, height));
+            attributes =
+                attributes.with_position(LogicalPosition::new(x, y)).with_inner_size(LogicalSize::new(width, height));
         }
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),

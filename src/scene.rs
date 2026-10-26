@@ -72,6 +72,9 @@ pub struct Scene {
     layer: usize,
     /// In logical pixels, window-relative.
     clips: Vec<[f32; 4]>,
+    /// Where the focused text cursor is (logical pixels, window-relative),
+    /// for an input method to put its candidates beside.
+    pub caret: Option<Rect>,
 }
 
 /// A rounded rectangle, optionally bordered or with a vertical gradient.
@@ -109,6 +112,7 @@ impl Scene {
             height: 0.0,
             scale: 1.0,
             origin: (0.0, 0.0),
+            caret: None,
             layer: 0,
             clips: Vec::new(),
         }
@@ -126,6 +130,11 @@ impl Scene {
         self.clear = clear;
         self.layer = LAYER_CONTENT;
         self.clips.clear();
+        self.caret = None;
+    }
+
+    pub fn mark_caret(&mut self, rect: Rect) {
+        self.caret = Some(self.place(rect));
     }
 
     /// The frame's size in physical pixels.

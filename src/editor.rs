@@ -212,14 +212,15 @@ impl Editor {
         self.text.split('\n').count()
     }
 
-    /// (line, column in chars) of a byte offset.
+    /// (line, column in cells) of a byte offset: CJK takes two cells.
     pub fn position(&self, at: usize) -> (usize, usize) {
         let line = self.text[..at].matches('\n').count();
         let start = self.line_start(at);
-        (line, self.text[start..at].chars().count())
+        (line, columns(&self.text[start..at]))
     }
 
-    /// Byte offset of (line, column in chars), clamped.
+    /// Byte offset of (line, column in cells), clamped; a column inside a
+    /// wide character lands before it.
     pub fn offset(&self, line: usize, column: usize) -> usize {
         let mut start = 0;
         for _ in 0..line {
@@ -229,7 +230,14 @@ impl Editor {
             }
         }
         let end = self.line_end(start);
-        self.text[start..end].char_indices().nth(column).map_or(end, |(i, _)| start + i)
+        let mut cells = 0;
+        for (i, c) in self.text[start..end].char_indices() {
+            cells += width(c);
+            if cells > column {
+                return start + i;
+            }
+        }
+        end
     }
 
     /// Moves between lines; returns false on the first/last line so the
@@ -350,5 +358,32 @@ impl History {
         let text: String = self.entries.iter().map(|e| e.replace('\\', "\\\\").replace('\n', "\\n") + "\n").collect();
         let _ = std::fs::create_dir_all(crate::settings_dir());
         let _ = std::fs::write(&self.path, text);
+    }
+}
+
+/// Cells a character takes on screen: 2 for CJK and other wide forms.
+pub fn width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0).max(if c == '\t' { 1 } else { 0 })
+}
+
+/// Cells a line of text takes.
+pub fn columns(text: &str) -> usize {
+    text.chars().map(width).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_characters_take_two_columns() {
+        let mut editor = Editor::new();
+        editor.insert("ls 中文a");
+        assert_eq!(editor.position(editor.text.len()), (0, 8));
+        // 中 covers columns 3 and 4: either lands before it.
+        assert_eq!(editor.offset(0, 3), 3);
+        assert_eq!(editor.offset(0, 4), 3);
+        assert_eq!(editor.offset(0, 5), "ls 中".len());
+        assert_eq!(editor.offset(0, 7), "ls 中文".len());
     }
 }

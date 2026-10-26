@@ -19,8 +19,12 @@ const MONO_FONTS: [&[u8]; 4] = [
 ];
 
 /// Where each system keeps the UI and fallback faces, searched in order.
+/// `~` is $HOME.
 const SYSTEM_FONTS: &[&str] = &[
     "/boot/system/data/fonts/ttfonts",
+    "~/config/non-packaged/data/fonts/ttfonts",
+    "~/config/non-packaged/data/fonts",
+    "/boot/system/non-packaged/data/fonts/ttfonts",
     "/usr/share/fonts/truetype/noto",
     "/usr/share/fonts/noto",
     "/usr/share/fonts/truetype/dejavu",
@@ -29,6 +33,37 @@ const SYSTEM_FONTS: &[&str] = &[
     "/System/Library/Fonts",
     "/Library/Fonts",
 ];
+
+/// Chinese, Japanese and Korean faces: (path, face in the collection). The
+/// monospace Noto CJK SC face first; it's large, so it loads the first time
+/// so it parses on a thread at startup (a quarter second on an M5) and joins
+/// the fallbacks when the first CJK character is drawn. `~` is $HOME.
+const CJK_FONTS: &[(&str, u32)] = &[
+    ("~/config/non-packaged/data/fonts/NotoSansCJK/NotoSansCJK-Regular.ttc", 7),
+    ("/boot/system/non-packaged/data/fonts/NotoSansCJK/NotoSansCJK-Regular.ttc", 7),
+    ("/boot/system/data/fonts/otfonts/NotoSansCJK-Regular.ttc", 7),
+    ("/boot/system/data/fonts/ttfonts/NotoSansCJK-Regular.ttc", 7),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 7),
+    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 7),
+    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 7),
+    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
+    ("/System/Library/Fonts/STHeiti Light.ttc", 0),
+];
+
+fn load_cjk_font() -> Option<Font> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    CJK_FONTS.iter().find_map(|(path, index)| {
+        let path = path.replacen('~', &home, 1);
+        let data = std::fs::read(path).ok()?;
+        Font::from_bytes(data, FontSettings { collection_index: *index, ..FontSettings::default() }).ok()
+    })
+}
+
+/// Whether `c` is from the CJK blocks (or fullwidth forms) the CJK font covers.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32, 0x2e80..=0x9fff | 0xac00..=0xd7af | 0xf900..=0xfaff | 0xfe30..=0xfe4f
+        | 0xff00..=0xffef | 0x20000..=0x3134f)
+}
 
 /// Index of a font in `TextSystem::fonts`.
 pub type FontId = u8;
@@ -146,6 +181,8 @@ pub struct TextSystem {
     fallbacks: Vec<FontId>,
     cache: HashMap<GlyphKey, Option<CachedGlyph>>,
     lookup: HashMap<(char, FontId), (FontId, u16)>,
+    /// The CJK font, still parsing until the first CJK character asks.
+    cjk_loading: Option<std::sync::mpsc::Receiver<Option<Font>>>,
     pub atlas: Atlas,
     /// In logical pixels, though each is a whole number of physical ones.
     pub cell: CellMetrics,
@@ -154,7 +191,9 @@ pub struct TextSystem {
 }
 
 fn load_system_font(name: &str) -> Option<Font> {
-    let data = SYSTEM_FONTS.iter().find_map(|dir| std::fs::read(format!("{dir}/{name}")).ok())?;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data =
+        SYSTEM_FONTS.iter().find_map(|dir| std::fs::read(format!("{}/{name}", dir.replacen('~', &home, 1))).ok())?;
     Font::from_bytes(data, FontSettings::default()).ok()
 }
 
@@ -182,6 +221,9 @@ impl TextSystem {
             "NotoMono-Regular.ttf",
             "DejaVuSans.ttf",
             "DejaVuSansMono.ttf",
+            // Monochrome: fontdue can't draw color emoji fonts.
+            "NotoEmoji.ttf",
+            "NotoEmoji-Regular.ttf",
             "Apple Symbols.ttf",
             "Arial Unicode.ttf",
         ] {
@@ -195,6 +237,13 @@ impl TextSystem {
             fallbacks,
             cache: HashMap::new(),
             lookup: HashMap::new(),
+            cjk_loading: {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = sender.send(load_cjk_font());
+                });
+                Some(receiver)
+            },
             atlas: Atlas::new(),
             cell: CellMetrics { width: 0.0, height: 0.0, baseline: 0.0, size, underline: 0.0, stroke: 1.0 },
             scale: 1.0,
@@ -242,6 +291,16 @@ impl TextSystem {
     fn resolve(&mut self, c: char, primary: FontId) -> (FontId, u16) {
         if let Some(found) = self.lookup.get(&(c, primary)) {
             return *found;
+        }
+        if is_cjk(c) {
+            if let Some(loading) = self.cjk_loading.take() {
+                if let Ok(Some(font)) = loading.recv() {
+                    // Ahead of the other fallbacks: Noto Sans has a few CJK
+                    // punctuation marks in another style.
+                    self.fallbacks.insert(0, self.fonts.len() as FontId);
+                    self.fonts.push(font);
+                }
+            }
         }
         let mut found = self.find(c, primary);
         if found.1 == 0 {
@@ -390,8 +449,12 @@ impl TextSystem {
     pub fn draw_mono(&mut self, scene: &mut Scene, text: &str, x: f32, y: f32, style: Style, color: Color) -> f32 {
         let mut pen = x;
         for c in text.chars() {
-            self.draw_cell(scene, c, pen, y, style, color, 1);
-            pen += self.cell.width;
+            // CJK takes two cells.
+            let span = crate::editor::width(c);
+            if span > 0 {
+                self.draw_cell(scene, c, pen, y, style, color, span);
+            }
+            pen += span as f32 * self.cell.width;
         }
         pen - x
     }
