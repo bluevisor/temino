@@ -66,6 +66,28 @@ impl KeyEvent {
     pub fn option(&self) -> bool {
         self.mods & mods::OPTION != 0
     }
+    /// Mac editing keys: Option+←/→ moves by word. On Haiku in UTM a Mac
+    /// keyboard's Option arrives as the Command (Alt) key and ⌘ as Option,
+    /// so the two swap there. Both together stay pane navigation.
+    pub fn word_mod(&self) -> bool {
+        if cfg!(target_os = "haiku") {
+            self.cmd() && !self.option()
+        } else if cfg!(target_os = "macos") {
+            self.option() && !self.cmd()
+        } else {
+            false
+        }
+    }
+    /// Mac editing keys: ⌘+←/→ jumps to the start or end of the line.
+    pub fn line_mod(&self) -> bool {
+        if cfg!(target_os = "haiku") {
+            self.option() && !self.cmd()
+        } else if cfg!(target_os = "macos") {
+            self.cmd() && !self.option()
+        } else {
+            false
+        }
+    }
     /// The unmodified character of the key, lowercased.
     pub fn base_char(&self) -> Option<char> {
         char::from_u32(self.raw_char).map(|c| c.to_ascii_lowercase())

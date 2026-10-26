@@ -2,7 +2,7 @@
 // and posts key presses to it, for driving Temino in tests. Steps:
 //   some text        types the text
 //   @enter @tab @up @down @left @right @esc @backspace @home @end
-//   @ctrl+c @alt+k   (modifiers: ctrl, alt, shift; combine as @ctrl+shift+x)
+//   @ctrl+c @alt+k   (modifiers: ctrl, alt, opt, shift; combine as @ctrl+shift+x)
 //   @sleep=500       waits that many milliseconds
 // Build on Haiku: g++ -o keysend keysend.cpp -lbe
 #include <Application.h>
@@ -117,6 +117,9 @@ main(int argc, char** argv)
 				step += 5;
 			} else if (strncmp(step, "alt+", 4) == 0) {
 				modifiers |= B_COMMAND_KEY | B_LEFT_COMMAND_KEY;
+				step += 4;
+			} else if (strncmp(step, "opt+", 4) == 0) {
+				modifiers |= B_OPTION_KEY | B_LEFT_OPTION_KEY;
 				step += 4;
 			} else if (strncmp(step, "shift+", 6) == 0) {
 				modifiers |= B_SHIFT_KEY | B_LEFT_SHIFT_KEY;

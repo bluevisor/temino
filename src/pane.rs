@@ -420,7 +420,8 @@ impl Pane {
         // Which menu was open before this key, so typing can refilter it.
         let open_menu = self.completion.as_ref().and_then(|c| c.candidates.first()).map(|f| f.kind == Kind::History);
         let suggestion = self.editor.suggestion(&ctx.history).map(str::to_owned);
-        let word = key.ctrl();
+        let word = key.ctrl() || key.word_mod();
+        let line = key.line_mod();
         match named {
             Some(Named::Enter) => {
                 if shift || key.option() {
@@ -430,14 +431,22 @@ impl Pane {
                 }
             }
             Some(Named::Backspace) => {
-                if word {
+                if line {
+                    self.editor.kill_to_start()
+                } else if word {
                     self.editor.delete_word_back()
                 } else {
                     self.editor.backspace()
                 }
             }
             Some(Named::Delete) => self.editor.delete(),
+            Some(Named::Left) if line => self.editor.home(shift),
             Some(Named::Left) => self.editor.left(word, shift),
+            // Like End: at the end of the line it takes the whole suggestion.
+            Some(Named::Right) if line => match suggestion {
+                Some(rest) if !shift => self.editor.insert(&rest),
+                _ => self.editor.end(shift),
+            },
             Some(Named::Right) => match suggestion {
                 Some(rest) if !shift => {
                     let take = if word { rest.split_inclusive(' ').next().unwrap_or(&rest).to_owned() } else { rest };
