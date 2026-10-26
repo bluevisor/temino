@@ -660,6 +660,10 @@ impl Session {
         for segment in self.scanner.scan(bytes) {
             match segment {
                 Segment::Data(data) => self.route(&data, theme),
+                // fish 4 marks a repaint's start again after the prompt's
+                // end when only the command line is redrawn: at the prompt,
+                // a start mark changes nothing.
+                Segment::PromptStart if self.phase == Phase::Ready => {}
                 Segment::PromptStart => {
                     self.finish_running(None, &mut notices);
                     self.phase = Phase::Prompt;
@@ -825,9 +829,12 @@ impl Session {
     }
 
     /// The next instant `tick` needs to run, if any.
+    /// Each timer only counts in its own phase, so one left over from a
+    /// phase the shell moved on from never wakes the loop.
     pub fn deadline(&self) -> Option<Instant> {
-        let continuation = self.continuation_since.map(|t| t + CONTINUATION_DELAY);
-        let idle = self.idle_since.map(|t| t + IDLE_OUTPUT_DELAY);
+        let continuation =
+            self.continuation_since.filter(|_| self.phase == Phase::Submitted).map(|t| t + CONTINUATION_DELAY);
+        let idle = self.idle_since.filter(|_| self.phase == Phase::Ready).map(|t| t + IDLE_OUTPUT_DELAY);
         match (continuation, idle) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -957,5 +964,36 @@ pub fn git_branch(path: &str) -> Option<String> {
         if !dir.pop() {
             return None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// fish 4.9 redrawing an unchanged prompt (here after SIGWINCH): its own
+    /// start mark comes last, after the prompt's end.
+    const FISH_REPAINT: &[u8] = b"\x1b[m\x1b[?2004h\r\r\x1b]133;A;click_events=1\x1b\\\x1b]133;B\x07\x1b]133;B\x1b\\\x1b[J\x1b]133;A;click_events=1\x1b\\";
+
+    #[test]
+    fn repaint_keeps_the_prompt() {
+        let theme = Theme::dark();
+        let mut session = Session::new(GridSize { columns: 80, lines: 24 });
+        session.feed(b"\x1b]133;A\x07\x1b]133;B\x07", &theme);
+        assert_eq!(session.phase, Phase::Ready);
+        session.feed(FISH_REPAINT, &theme);
+        assert_eq!(session.phase, Phase::Ready);
+        session.tick(Instant::now() + IDLE_OUTPUT_DELAY);
+        assert_eq!(session.deadline(), None);
+    }
+
+    #[test]
+    fn stale_timers_never_wake() {
+        let theme = Theme::dark();
+        let mut session = Session::new(GridSize { columns: 80, lines: 24 });
+        session.feed(b"\x1b]133;A\x07\x1b]133;B\x07", &theme);
+        session.feed(b"background job output\r\n", &theme);
+        session.phase = Phase::Prompt;
+        assert_eq!(session.deadline(), None);
     }
 }
