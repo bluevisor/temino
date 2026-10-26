@@ -12,12 +12,17 @@ use crate::keys::Named;
 use crate::pane::{Ctx, Pane};
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
+use crate::settings::{self, Action};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
-use crate::theme::{Color, Theme, BACKGROUNDS};
+use crate::theme::{Color, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
 use crate::Msg;
 
-const DEFAULT_FONT_SIZE: f32 = 14.0;
+/// The terminal font size at zoom 1, which every UI size is designed at.
+const BASE_FONT_SIZE: f32 = 14.0;
+/// The terminal font size at 100%: the window draws a little larger than
+/// its design size.
+const DEFAULT_FONT_SIZE: f32 = 15.4;
 const TAB_BAR_HEIGHT: f32 = 34.0;
 const TAB_MAX_WIDTH: f32 = 220.0;
 const SIDEBAR_WIDTH: f32 = 200.0;
@@ -45,6 +50,9 @@ const TAB_COLORS: [u32; 6] = [0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 
 
 /// Separates the panes of a tab in the saved tabs file.
 const LAYOUT_SEPARATOR: char = '\u{1f}';
+/// The Settings tab's one "pane": no shell, the settings page instead.
+/// Shell panes count up from 1.
+const SETTINGS: u64 = 0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Axis {
@@ -276,6 +284,13 @@ pub struct App {
     mouse: (f32, f32),
     /// The pane installing a shell from Settings ▸ Shell, and which.
     installing: Option<(u64, shells::Kind)>,
+    /// The Settings tab's page, and what it shows that the theme doesn't.
+    settings: settings::Page,
+    background: usize,
+    opacity: usize,
+    blur: bool,
+    /// Which of KINDS are installed, as of the Settings tab opening.
+    installed: [bool; KINDS.len()],
 }
 
 pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32) {
@@ -336,7 +351,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
         }
     };
     println!("device: {} ({:.1} ms)", gpu.device_name, started.elapsed().as_secs_f64() * 1000.0);
-    let mut text = TextSystem::new(DEFAULT_FONT_SIZE);
+    let mut text = TextSystem::new(BASE_FONT_SIZE);
     let theme = Theme::dark();
     let mut scene = Scene::new();
     let mut slowest = 0.0f64;
@@ -349,8 +364,8 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
         text.draw_text(&mut scene, "Temino self-test", 32.0, 52.0, UI_BOLD, 20.0, theme.text);
         text.draw_mono(&mut scene, "ls -la ~/config ─┼─ ✓", 32.0, 70.0, Style::default(), theme.success);
         scene.fill(Rect::new(32.0, 110.0, 120.0, 18.0), theme.accent);
-        match gpu.render(&scene, &mut text.atlas) {
-            Ok(pixels) => {
+        match gpu.render(&scene, &mut text.atlas, true) {
+            Ok(Some(pixels)) => {
                 let ms = frame.elapsed().as_secs_f64() * 1000.0;
                 slowest = if round > 0 { slowest.max(ms) } else { slowest };
                 if round < 3 || round % 100 == 0 {
@@ -362,6 +377,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
                     println!("wrote {path}");
                 }
             }
+            Ok(None) => unreachable!("a readback always returns the frame"),
             Err(error) => {
                 eprintln!("selftest: {error}");
                 return 1;
@@ -403,13 +419,25 @@ fn load_background() -> usize {
     crate::setting("background").and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name)).unwrap_or(0)
 }
 
+/// `opacity=<percent>` in the settings file, as an index into OPACITIES
+/// (fully opaque when unset, unknown, or off macOS, whose windows are the
+/// only ones that show through).
+fn load_opacity() -> usize {
+    crate::setting("opacity")
+        .filter(|_| cfg!(target_os = "macos"))
+        .and_then(|value| OPACITIES.iter().position(|o| o.to_string() == value))
+        .unwrap_or(0)
+}
+
 impl App {
     fn new(sender: Sender<Msg>, width: u32, height: u32) -> Result<App, String> {
         let gpu = Gpu::new()?;
-        let text = TextSystem::new(DEFAULT_FONT_SIZE);
+        let text = TextSystem::new(BASE_FONT_SIZE);
         crate::trace("app: fonts ready");
         let background = load_background();
-        let theme = Theme::dark().with_background(BACKGROUNDS[background].1);
+        let opacity = load_opacity();
+        let theme =
+            Theme::dark().with_background(BACKGROUNDS[background].1).with_opacity(OPACITIES[opacity] as f32 / 100.0);
         platform::set_background(theme.background.to_rgb8());
         platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), background);
         let shell = shells::default_shell();
@@ -434,8 +462,8 @@ impl App {
             panes: Vec::new(),
             tabs: Vec::new(),
             active: 0,
-            strip: match std::env::var("TEMINO_TABS").as_deref() {
-                Ok("top") => TabStrip::Top,
+            strip: match std::env::var("TEMINO_TABS").ok().or_else(|| crate::setting("tabs")).as_deref() {
+                Some("top") => TabStrip::Top,
                 _ => TabStrip::Left,
             },
             tab_list: None,
@@ -464,8 +492,14 @@ impl App {
             hover_tab: None,
             mouse: (0.0, 0.0),
             installing: None,
+            settings: settings::Page::default(),
+            background,
+            opacity,
+            blur: crate::setting("blur").as_deref() == Some("on"),
+            installed: [false; KINDS.len()],
         };
-        app.set_zoom(crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(1.0), false);
+        app.apply_blur();
+        app.set_zoom(crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(DEFAULT_FONT_SIZE / BASE_FONT_SIZE), false);
         app.restore_tabs()?;
         crate::update::check(app.ctx.sender.clone(), false);
         crate::trace("app: shell started");
@@ -517,7 +551,8 @@ impl App {
         for line in saved.lines() {
             // active?, color, panes, name — separated by tabs.
             let mut fields = line.splitn(4, '\t');
-            let (Some(current), Some(color), Some(layout), name) = (fields.next(), fields.next(), fields.next(), fields.next())
+            let (Some(current), Some(color), Some(layout), name) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
             else {
                 continue;
             };
@@ -580,6 +615,8 @@ impl App {
             .tabs
             .iter()
             .enumerate()
+            // The Settings tab isn't reopened.
+            .filter(|(_, tab)| tab.focus != SETTINGS)
             .map(|(index, tab)| {
                 let mut layout = Vec::new();
                 self.save_node(&tab.root, tab.focus, &mut layout);
@@ -611,7 +648,7 @@ impl App {
     }
 
     fn split(&mut self, axis: Axis) {
-        let Some(focus) = self.focused_id() else { return };
+        let Some(focus) = self.focused_id().filter(|&id| id != SETTINGS) else { return };
         match self.make_pane() {
             Ok(id) => {
                 let tab = &mut self.tabs[self.active];
@@ -861,8 +898,11 @@ impl App {
 
     fn update_title(&mut self) {
         let Some(id) = self.focused_id() else { return };
-        let Some(pane) = self.panes.iter().find(|p| p.id == id) else { return };
-        let title = format!("{} — Temino", pane.title());
+        let title = match self.panes.iter().find(|p| p.id == id) {
+            Some(pane) => format!("{} — Temino", pane.title()),
+            None if id == SETTINGS => "Settings — Temino".to_owned(),
+            None => return,
+        };
         if title != self.title {
             platform::set_title(&title);
             self.title = title;
@@ -914,7 +954,9 @@ impl App {
             UiEvent::Shell(index) => self.set_shell(index),
             UiEvent::Wheel { dy, x, y, .. } => {
                 let (x, y) = (x / self.zoom, y / self.zoom);
-                if let Some((id, rect)) = self.pane_at(x, y) {
+                if let Some((SETTINGS, _)) = self.pane_at(x, y) {
+                    self.settings.wheel(dy);
+                } else if let Some((id, rect)) = self.pane_at(x, y) {
                     let Self { panes, ctx, .. } = self;
                     if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
                         pane.wheel(ctx, dy, x - rect.x, y - rect.y);
@@ -931,11 +973,26 @@ impl App {
 
     fn set_background(&mut self, index: usize) {
         let Some(&(name, rgb)) = BACKGROUNDS.get(index) else { return };
-        self.ctx.theme = Theme::dark().with_background(rgb);
+        self.ctx.theme = Theme::dark().with_background(rgb).with_opacity(self.ctx.theme.opacity);
         platform::set_background(self.ctx.theme.background.to_rgb8());
         platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), index);
+        self.background = index;
         crate::save_setting("background", name);
         self.dirty = true;
+    }
+
+    fn set_opacity(&mut self, index: usize) {
+        let Some(&percent) = OPACITIES.get(index) else { return };
+        self.ctx.theme.opacity = percent as f32 / 100.0;
+        self.opacity = index;
+        crate::save_setting("opacity", &percent.to_string());
+        self.apply_blur();
+        self.dirty = true;
+    }
+
+    /// The window blurs what's behind it only while it is see-through.
+    fn apply_blur(&self) {
+        platform::set_blur(self.blur && self.ctx.theme.opacity < 1.0);
     }
 
     /// Settings ▸ Shell: new panes start this shell; a missing one is
@@ -995,17 +1052,28 @@ impl App {
         }
     }
 
-    /// Zooms the whole window, text and chrome alike, in steps of one point
-    /// of the terminal font.
+    /// Zooms the whole window, text and chrome alike, so the terminal font
+    /// is `size` points.
     fn change_font_size(&mut self, size: f32) {
-        let size = size.round().clamp(8.0, 32.0);
-        self.set_zoom(size / DEFAULT_FONT_SIZE, true);
+        self.set_zoom(size / BASE_FONT_SIZE, true);
+    }
+
+    /// Steps the zoom 10% of the default size up or down, onto that grid,
+    /// so a step each way comes back to where it started.
+    fn step_font_size(&mut self, step: f32) {
+        let tenths = (self.zoom_percent() / 10.0 + step).round();
+        self.change_font_size(DEFAULT_FONT_SIZE * tenths / 10.0);
+    }
+
+    /// The zoom as Settings and the toast show it: 100% at the default size.
+    fn zoom_percent(&self) -> f32 {
+        self.zoom * BASE_FONT_SIZE / DEFAULT_FONT_SIZE * 100.0
     }
 
     /// Lays everything out at `zoom`: a smaller logical window drawn at a
     /// larger scale, so every size in the UI grows together.
     fn set_zoom(&mut self, zoom: f32, announce: bool) {
-        let zoom = zoom.clamp(8.0 / DEFAULT_FONT_SIZE, 32.0 / DEFAULT_FONT_SIZE);
+        let zoom = zoom.clamp(8.0 / BASE_FONT_SIZE, 32.0 / BASE_FONT_SIZE);
         let changed = zoom != self.zoom;
         self.zoom = zoom;
         self.width = self.window.0 / zoom;
@@ -1019,7 +1087,7 @@ impl App {
         self.relayout();
         if changed && announce {
             crate::save_setting("zoom", &format!("{zoom}"));
-            self.ctx.show_toast(&format!("Zoom {:.0}%", zoom * 100.0));
+            self.ctx.show_toast(&format!("Zoom {:.0}%", self.zoom_percent()));
         }
     }
 
@@ -1111,6 +1179,10 @@ impl App {
                     self.quit();
                     true
                 }
+                (_, Some(',')) => {
+                    self.open_settings();
+                    true
+                }
                 (_, Some('u')) => {
                     self.ctx.show_toast("Checking for updates…");
                     crate::update::check(self.ctx.sender.clone(), true);
@@ -1139,11 +1211,11 @@ impl App {
                     true
                 }
                 (_, Some('=' | '+')) => {
-                    self.change_font_size(self.zoom * DEFAULT_FONT_SIZE + 1.0);
+                    self.step_font_size(1.0);
                     true
                 }
                 (_, Some('-')) => {
-                    self.change_font_size(self.zoom * DEFAULT_FONT_SIZE - 1.0);
+                    self.step_font_size(-1.0);
                     true
                 }
                 (_, Some('0')) => {
@@ -1160,6 +1232,60 @@ impl App {
         let Self { panes, ctx, .. } = self;
         if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
             pane.key(ctx, key);
+        }
+    }
+
+    /// Command+,: the Settings tab, opened after the others or switched to.
+    fn open_settings(&mut self) {
+        self.installed = KINDS.map(|kind| shells::find(kind).is_some());
+        if let Some(index) = self.tabs.iter().position(|tab| tab.focus == SETTINGS) {
+            self.switch_tab(index);
+            return;
+        }
+        self.tabs.push(Tab { root: Node::Leaf(SETTINGS), focus: SETTINGS, zoomed: false, name: None, color: None });
+        self.switch_tab(self.tabs.len() - 1);
+    }
+
+    fn settings_values(&self) -> settings::Values {
+        settings::Values {
+            background: self.background,
+            opacity: self.opacity,
+            blur: self.blur,
+            shell: shells::Kind::of_path(&self.ctx.shell).and_then(|kind| KINDS.iter().position(|&k| k == kind)),
+            installed: self.installed,
+            tabs_top: self.strip == TabStrip::Top,
+            zoom: self.zoom_percent(),
+            updates: crate::setting("updates").as_deref() != Some("off"),
+            see_through: cfg!(target_os = "macos"),
+        }
+    }
+
+    fn settings_action(&mut self, action: Action) {
+        self.dirty = true;
+        match action {
+            Action::Background(index) => self.set_background(index),
+            Action::Opacity(index) => self.set_opacity(index),
+            Action::Blur(on) => {
+                self.blur = on;
+                crate::save_setting("blur", if on { "on" } else { "off" });
+                self.apply_blur();
+            }
+            Action::Shell(index) => {
+                self.set_shell(index);
+                self.installed = KINDS.map(|kind| shells::find(kind).is_some());
+            }
+            Action::TabsTop(top) => {
+                self.strip = if top { TabStrip::Top } else { TabStrip::Left };
+                crate::save_setting("tabs", if top { "top" } else { "left" });
+                self.relayout();
+            }
+            Action::Zoom(0) => self.change_font_size(DEFAULT_FONT_SIZE),
+            Action::Zoom(step) => self.step_font_size(step as f32),
+            Action::Updates(on) => crate::save_setting("updates", if on { "on" } else { "off" }),
+            Action::CheckForUpdates => {
+                self.ctx.show_toast("Checking for updates…");
+                crate::update::check(self.ctx.sender.clone(), true);
+            }
         }
     }
 
@@ -1336,6 +1462,12 @@ impl App {
             return;
         }
         let Some((id, rect)) = self.pane_at(x, y) else { return };
+        if id == SETTINGS {
+            if let Some(action) = self.settings.action_at(x, y) {
+                self.settings_action(action);
+            }
+            return;
+        }
         if self.focused_id() != Some(id) {
             self.set_focus(id);
         }
@@ -1405,6 +1537,12 @@ impl App {
             return;
         }
         let Some((id, rect)) = self.pane_at(x, y) else { return };
+        if id == SETTINGS {
+            // Hover highlights follow the pointer.
+            self.set_cursor(Cursor::Arrow);
+            self.dirty = true;
+            return;
+        }
         let Self { panes, ctx, .. } = self;
         let cursor = panes.iter_mut().find(|p| p.id == id).map(|pane| pane.mouse_moved(ctx, x - rect.x, y - rect.y, 0));
         if let Some(cursor) = cursor {
@@ -1432,11 +1570,18 @@ impl App {
         crate::trace("render: begin");
         self.dirty = false;
         let (width, height) = (self.width, self.height);
-        self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.background);
+        self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.window());
         let focus = self.focused_id();
         let visible = self.visible_panes();
         let several = visible.len() > 1;
         let mut animation: Option<Instant> = None;
+        for &(id, rect) in &visible {
+            if id == SETTINGS {
+                let values = self.settings_values();
+                let Self { settings, scene, ctx, mouse, .. } = self;
+                settings.draw(scene, &mut ctx.text, &ctx.theme, rect, &values, *mouse);
+            }
+        }
         for (id, _) in &visible {
             let focused = Some(*id) == focus && self.focused;
             let Self { panes, ctx, scene, .. } = self;
@@ -1462,14 +1607,20 @@ impl App {
         self.draw_tab_menu();
         self.draw_toast();
         crate::trace("render: scene built");
-        match self.gpu.render(&self.scene, &mut self.ctx.text.atlas) {
-            Ok(pixels) => {
+        let capture = std::env::var_os("TEMINO_CAPTURE");
+        let on_screen = self.gpu.on_screen();
+        match self.gpu.render(&self.scene, &mut self.ctx.text.atlas, capture.is_some()) {
+            Ok(Some(pixels)) => {
                 let (pw, ph) = self.scene.pixel_size();
-                if let Some(path) = std::env::var_os("TEMINO_CAPTURE") {
-                    write_ppm(&path, pixels, pw, ph);
+                if let Some(path) = &capture {
+                    write_ppm(path, pixels, pw, ph);
                 }
-                platform::present(pixels, pw, ph)
+                if !on_screen {
+                    platform::present(pixels, pw, ph)
+                }
             }
+            // Already in the window (or skipped: no drawable came free).
+            Ok(None) => {}
             Err(error) => {
                 crate::fatal(&format!("rendering failed: {error}"));
                 self.quit();
@@ -1480,6 +1631,9 @@ impl App {
     /// A tab's name, or its focused pane's title.
     fn tab_title(&self, index: usize) -> String {
         let tab = &self.tabs[index];
+        if tab.focus == SETTINGS {
+            return "Settings".to_owned();
+        }
         tab.name
             .clone()
             .unwrap_or_else(|| self.panes.iter().find(|p| p.id == tab.focus).map(Pane::title).unwrap_or_default())
@@ -1582,7 +1736,7 @@ impl App {
     fn draw_tab_strip(&mut self, tabs: &[TabView]) {
         let width = self.width;
         let theme = &self.ctx.theme;
-        self.scene.fill(Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), theme.surface.mix(theme.background, 0.5));
+        self.scene.fill(Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), theme.panel(SURFACE_LIFT / 2.0));
         self.scene.fill(Rect::new(0.0, TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
         let plus = 34.0;
         let tab_width = ((width - 12.0 - plus) / tabs.len() as f32).min(TAB_MAX_WIDTH);
@@ -1613,7 +1767,7 @@ impl App {
     fn draw_tab_sidebar(&mut self, tabs: &[TabView]) {
         let area = self.tab_area();
         let theme = &self.ctx.theme;
-        self.scene.fill(area, theme.surface.mix(theme.background, 0.5));
+        self.scene.fill(area, theme.panel(SURFACE_LIFT / 2.0));
         self.scene.fill(Rect::new(area.right() - 1.0, 0.0, 1.0, area.h), theme.divider);
         self.scene.push_clip(Rect::new(0.0, 0.0, area.w - 1.0, area.h));
         let dragged = match self.pointer {

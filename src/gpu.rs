@@ -415,8 +415,14 @@ impl Gpu {
         Ok(())
     }
 
-    /// Renders `scene` and returns the frame as tightly packed BGRA rows.
-    pub fn render(&mut self, scene: &Scene, atlas: &mut Atlas) -> Result<&[u8]> {
+    /// Frames always come back as pixels for the window to show.
+    pub fn on_screen(&self) -> bool {
+        false
+    }
+
+    /// Renders `scene` and returns the frame as tightly packed BGRA rows
+    /// (always: the platform shows them, so `readback` changes nothing).
+    pub fn render(&mut self, scene: &Scene, atlas: &mut Atlas, _readback: bool) -> Result<Option<&[u8]>> {
         let (width, height) = scene.pixel_size();
         self.ensure_target(width, height)?;
 
@@ -581,7 +587,7 @@ impl Gpu {
             crate::trace("gpu: frame done");
 
             let length = width as usize * height as usize * 4;
-            Ok(std::slice::from_raw_parts(target.readback.mapped, length))
+            Ok(Some(std::slice::from_raw_parts(target.readback.mapped, length)))
         }
     }
 }

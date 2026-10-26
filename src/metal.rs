@@ -1,6 +1,7 @@
-//! The Metal renderer, for macOS: the same offscreen-frame interface as the
-//! Vulkan one in gpu.rs, drawn through src/macos/shim.m with the shaders in
-//! shaders/shaders.metal.
+//! The Metal renderer, for macOS: the same interface as the Vulkan one in
+//! gpu.rs, drawn through src/macos/shim.m with the shaders in
+//! shaders/shaders.metal. Once the window has its layer, frames go straight
+//! there instead of coming back as pixels.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::mem::size_of;
@@ -37,9 +38,12 @@ extern "C" {
         glyph_count: usize,
         ranges: *const u32,
         layer_count: usize,
+        readback: bool,
+        pixels: *mut *const u8,
         error: *mut c_char,
         error_length: usize,
-    ) -> *const u8;
+    ) -> bool;
+    fn temino_metal_on_screen() -> bool;
 }
 
 fn message(buffer: &[u8]) -> String {
@@ -77,8 +81,15 @@ impl Gpu {
         Ok(Gpu { handle, rects: Vec::new(), glyphs: Vec::new(), device_name })
     }
 
-    /// Renders `scene` and returns the frame as tightly packed BGRA rows.
-    pub fn render(&mut self, scene: &Scene, atlas: &mut Atlas) -> Result<&[u8]> {
+    /// Whether `render` shows frames itself, in the window's layer.
+    pub fn on_screen(&self) -> bool {
+        unsafe { temino_metal_on_screen() }
+    }
+
+    /// Renders `scene` into the window. The frame comes back as tightly
+    /// packed BGRA rows when `readback` asks, or when there is no window to
+    /// show it in yet.
+    pub fn render(&mut self, scene: &Scene, atlas: &mut Atlas, readback: bool) -> Result<Option<&[u8]>> {
         let (width, height) = scene.pixel_size();
         self.rects.clear();
         self.glyphs.clear();
@@ -90,9 +101,12 @@ impl Gpu {
             self.glyphs.extend_from_slice(&layer.glyphs);
         }
         let (lo, hi) = atlas.dirty.take().map_or((-1, -1), |(lo, hi)| (lo as i64, hi as i64));
-        let clear = scene.clear.to_array();
+        // The pipelines blend premultiplied colors; clear with one too.
+        let [r, g, b, a] = scene.clear.to_array();
+        let clear = [r * a, g * a, b * a, a];
         let mut error = [0u8; 1024];
-        let pixels = unsafe {
+        let mut pixels = std::ptr::null();
+        let ok = unsafe {
             temino_metal_render(
                 self.handle,
                 width,
@@ -110,14 +124,17 @@ impl Gpu {
                 self.glyphs.len(),
                 ranges.as_ptr(),
                 scene.layers.len(),
+                readback,
+                &mut pixels,
                 error.as_mut_ptr().cast(),
                 error.len(),
             )
         };
-        if pixels.is_null() {
+        if !ok {
             return Err(message(&error));
         }
-        Ok(unsafe { std::slice::from_raw_parts(pixels, width as usize * height as usize * 4) })
+        Ok((!pixels.is_null())
+            .then(|| unsafe { std::slice::from_raw_parts(pixels, width as usize * height as usize * 4) }))
     }
 }
 

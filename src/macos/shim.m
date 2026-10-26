@@ -1,10 +1,14 @@
 // macOS: the Metal renderer and the menu bar, behind a small C interface
-// for src/metal.rs and src/platform/desktop.rs. Like the Vulkan path, each
-// frame renders offscreen and comes back as BGRA rows for the window.
+// for src/metal.rs and src/platform/desktop.rs. Frames render straight into
+// the window's CAMetalLayer; before there is one (and for --selftest, or
+// TEMINO_CAPTURE) they also come back as BGRA rows.
 
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
+#import <QuartzCore/QuartzCore.h>
 
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -28,6 +32,11 @@
 
 @implementation TeminoMetal
 @end
+
+
+// The window's layer, attached on the main thread and drawn into from the
+// core thread (retained; there is one window).
+static _Atomic(void*) sLayer;
 
 
 static void
@@ -117,20 +126,22 @@ fit_buffer(id<MTLDevice> device, id<MTLBuffer> buffer, const void* data, size_t 
 
 
 // Renders the layers (each `ranges` entry is first rect, rect count, first
-// glyph, glyph count) and returns the frame as tightly packed BGRA rows,
-// valid until the next call.
-const uint8_t*
+// glyph, glyph count) into the window's layer, and shows it there. With no
+// layer yet, or `readback` set, `*pixels` gets the frame as tightly packed
+// BGRA rows, valid until the next call; otherwise NULL. False on failure.
+bool
 temino_metal_render(void* handle, uint32_t width, uint32_t height,
 	const float* clear, const uint8_t* atlas_pixels, uint32_t atlas_size,
 	int64_t dirty_lo, int64_t dirty_hi,
 	const void* rects, size_t rect_size, size_t rect_count,
 	const void* glyphs, size_t glyph_size, size_t glyph_count,
-	const uint32_t* ranges, size_t layer_count,
-	char* error, size_t error_length)
+	const uint32_t* ranges, size_t layer_count, bool readback,
+	const uint8_t** pixels, char* error, size_t error_length)
 {
 	@autoreleasepool {
 		TeminoMetal* gpu = (__bridge TeminoMetal*)handle;
 		id<MTLDevice> device = gpu->device;
+		*pixels = NULL;
 
 		if (dirty_lo >= 0 && dirty_hi > dirty_lo) {
 			MTLRegion region = MTLRegionMake2D(0, (NSUInteger)dirty_lo, atlas_size,
@@ -140,26 +151,48 @@ temino_metal_render(void* handle, uint32_t width, uint32_t height,
 			gpu->atlasReady = YES;
 		}
 
-		if (gpu->target == nil || gpu->target.width != width || gpu->target.height != height) {
-			MTLTextureDescriptor* desc = [MTLTextureDescriptor
-				texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-				width:width height:height mipmapped:NO];
-			desc.usage = MTLTextureUsageRenderTarget;
-			desc.storageMode = MTLStorageModePrivate;
-			gpu->target = [device newTextureWithDescriptor:desc];
-			gpu->readback = [device newBufferWithLength:(NSUInteger)width * height * 4
-				options:MTLResourceStorageModeShared];
-			if (gpu->target == nil || gpu->readback == nil) {
-				set_error(error, error_length, @"allocating the frame");
-				return NULL;
+		CAMetalLayer* layer = (__bridge CAMetalLayer*)atomic_load(&sLayer);
+		id<CAMetalDrawable> drawable = nil;
+		id<MTLTexture> target;
+		if (layer != nil) {
+			// Off the main thread, layer changes need a transaction of their own.
+			CGSize size = CGSizeMake(width, height);
+			if (layer.device != device || !CGSizeEqualToSize(layer.drawableSize, size)) {
+				[CATransaction begin];
+				[CATransaction setDisableActions:YES];
+				layer.device = device;
+				layer.drawableSize = size;
+				[CATransaction commit];
 			}
+			drawable = [layer nextDrawable];
+			if (drawable == nil)
+				return true; // none free in time: this frame is skipped
+			target = drawable.texture;
+		} else {
+			if (gpu->target == nil || gpu->target.width != width || gpu->target.height != height) {
+				MTLTextureDescriptor* desc = [MTLTextureDescriptor
+					texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+					width:width height:height mipmapped:NO];
+				desc.usage = MTLTextureUsageRenderTarget;
+				desc.storageMode = MTLStorageModePrivate;
+				gpu->target = [device newTextureWithDescriptor:desc];
+			}
+			target = gpu->target;
+			readback = true;
+		}
+		NSUInteger frame_bytes = (NSUInteger)width * height * 4;
+		if (readback && (gpu->readback == nil || gpu->readback.length != frame_bytes))
+			gpu->readback = [device newBufferWithLength:frame_bytes options:MTLResourceStorageModeShared];
+		if (target == nil || (readback && gpu->readback == nil)) {
+			set_error(error, error_length, @"allocating the frame");
+			return false;
 		}
 		gpu->rects = fit_buffer(device, gpu->rects, rects, rect_size * rect_count);
 		gpu->glyphs = fit_buffer(device, gpu->glyphs, glyphs, glyph_size * glyph_count);
 
 		id<MTLCommandBuffer> command = [gpu->queue commandBuffer];
 		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-		pass.colorAttachments[0].texture = gpu->target;
+		pass.colorAttachments[0].texture = target;
 		pass.colorAttachments[0].loadAction = MTLLoadActionClear;
 		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
 		pass.colorAttachments[0].clearColor = MTLClearColorMake(clear[0], clear[1], clear[2], clear[3]);
@@ -185,29 +218,34 @@ temino_metal_render(void* handle, uint32_t width, uint32_t height,
 		}
 		[encoder endEncoding];
 
-		id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-		[blit copyFromTexture:gpu->target sourceSlice:0 sourceLevel:0
-			sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
-			toBuffer:gpu->readback destinationOffset:0
-			destinationBytesPerRow:(NSUInteger)width * 4
-			destinationBytesPerImage:(NSUInteger)width * height * 4];
-		[blit endEncoding];
+		if (readback) {
+			id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+			[blit copyFromTexture:target sourceSlice:0 sourceLevel:0
+				sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+				toBuffer:gpu->readback destinationOffset:0
+				destinationBytesPerRow:(NSUInteger)width * 4
+				destinationBytesPerImage:frame_bytes];
+			[blit endEncoding];
+		}
+		if (drawable != nil)
+			[command presentDrawable:drawable];
 		[command commit];
+		// The instance buffers are refilled next frame: let this one finish.
 		[command waitUntilCompleted];
 		if (command.status == MTLCommandBufferStatusError) {
 			set_error(error, error_length, [NSString stringWithFormat:@"rendering: %@", command.error]);
-			return NULL;
+			return false;
 		}
-		return (const uint8_t*)gpu->readback.contents;
+		if (readback)
+			*pixels = (const uint8_t*)gpu->readback.contents;
+		return true;
 	}
 }
 
 
 // MARK: Menu bar
 
-// Rust lists the items; picking one calls back with its tag. An item
-// tagged kChoiceTag or a multiple of it holds a submenu of choices, whose
-// entries are tagged from there up.
+// Rust lists the items; picking one calls back with its tag.
 typedef struct {
 	const char* menu;   // the top-level menu it goes in
 	const char* label;  // NULL for a separator
@@ -218,9 +256,7 @@ typedef struct {
 
 typedef void (*TeminoMenuCallback)(int32_t tag);
 
-static const int32_t kChoiceTag = 1000;
 static TeminoMenuCallback sMenuCallback;
-static NSMutableDictionary<NSNumber*, NSMenu*>* sChoiceMenus;
 
 
 @interface TeminoMenuTarget : NSObject
@@ -268,7 +304,6 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 	@autoreleasepool {
 		sMenuCallback = callback;
 		sMenuTarget = [TeminoMenuTarget new];
-		sChoiceMenus = [NSMutableDictionary new];
 		// Temino has its own tabs; AppKit's would add a second set of items.
 		NSWindow.allowsAutomaticWindowTabbing = NO;
 		NSString* name = @"Temino";
@@ -296,13 +331,6 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 				[menu addItem:[NSMenuItem separatorItem]];
 				continue;
 			}
-			if (items[i].tag >= kChoiceTag) {
-				// The submenu the choices go in.
-				NSMenuItem* holder = [menu addItemWithTitle:@(items[i].label) action:nil keyEquivalent:@""];
-				holder.submenu = [[NSMenu alloc] initWithTitle:@(items[i].label)];
-				sChoiceMenus[@(items[i].tag)] = holder.submenu;
-				continue;
-			}
 			NSMenuItem* item = add_item(menu, @(items[i].label), @selector(pick:),
 				@(items[i].key), items[i].modifiers);
 			item.target = sMenuTarget;
@@ -323,22 +351,70 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 }
 
 
-// Rust names the choices of the submenu tagged `tag` and which is picked
-// (the app refills the menu after each pick).
+// MARK: Presenting
+
+// Holds the window's CAMetalLayer above winit's view, letting every event
+// through to it.
+@interface TeminoMetalView : NSView
+@end
+
+@implementation TeminoMetalView
+- (CALayer*)makeBackingLayer
+{
+	return [CAMetalLayer layer];
+}
+
+- (NSView*)hitTest:(NSPoint)point
+{
+	return nil;
+}
+
+// Frames come in device pixels; without this a Retina frame shows at twice
+// its size, cropped to the top left.
+- (void)viewDidChangeBackingProperties
+{
+	[super viewDidChangeBackingProperties];
+	CGFloat scale = self.window ? self.window.backingScaleFactor : 1;
+	[CATransaction begin];
+	[CATransaction setDisableActions:YES];
+	self.layer.contentsScale = scale;
+	[CATransaction commit];
+}
+@end
+
+
+// Gives the window `view` a layer that frames render straight into. They
+// keep their premultiplied alpha, so a see-through background shows the
+// desktop (blurred, if Settings says so).
 void
-temino_menu_choices(int32_t tag, const char* const* names, size_t count, size_t selected)
+temino_metal_attach(void* view_handle)
 {
 	@autoreleasepool {
-		NSMenu* menu = sChoiceMenus[@(tag)];
-		if (menu == nil)
-			return;
-		[menu removeAllItems];
-		for (size_t i = 0; i < count; i++) {
-			NSMenuItem* item = [menu addItemWithTitle:@(names[i])
-				action:@selector(pick:) keyEquivalent:@""];
-			item.target = sMenuTarget;
-			item.tag = tag + (NSInteger)i;
-			item.state = i == selected ? NSControlStateValueOn : NSControlStateValueOff;
-		}
+		NSView* view = (__bridge NSView*)view_handle;
+		TeminoMetalView* holder = [[TeminoMetalView alloc] initWithFrame:view.bounds];
+		holder.wantsLayer = YES;
+		holder.layerContentsRedrawPolicy = NSViewLayerContentsRedrawNever;
+		holder.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+		[view addSubview:holder];
+		CAMetalLayer* layer = (CAMetalLayer*)holder.layer;
+		layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+		layer.opaque = NO;
+		// Captures copy frames back out of the drawable.
+		layer.framebufferOnly = NO;
+		CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+		layer.colorspace = srgb;
+		CGColorSpaceRelease(srgb);
+		// While the window resizes, the last frame stays put at the top left.
+		layer.contentsGravity = kCAGravityTopLeft;
+		layer.contentsScale = view.window ? view.window.backingScaleFactor : 1;
+		atomic_store(&sLayer, (__bridge_retained void*)layer);
 	}
+}
+
+
+// Whether frames go straight to the window.
+bool
+temino_metal_on_screen(void)
+{
+	return atomic_load(&sLayer) != NULL;
 }

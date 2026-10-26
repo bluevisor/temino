@@ -186,6 +186,9 @@ pub fn set_background_menu(names: &[&str], selected: usize) {
     unsafe { temino_set_background_menu(pointers.as_ptr(), pointers.len() as i32, selected as i32) }
 }
 
+/// Haiku windows are opaque, so there is nothing to blur.
+pub fn set_blur(_on: bool) {}
+
 /// Fills Settings ▸ Shell with these names, `selected` marked.
 pub fn set_shell_menu(names: &[String], selected: usize) {
     let names: Vec<CString> = names.iter().map(|n| CString::new(n.as_str()).unwrap_or_default()).collect();

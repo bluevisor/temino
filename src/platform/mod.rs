@@ -128,9 +128,12 @@ pub enum UiEvent {
     },
     Focus(bool),
     Close,
-    /// Settings ▸ Background picked this entry of `theme::BACKGROUNDS`.
+    /// Settings ▸ Background picked this entry of `theme::BACKGROUNDS`
+    /// (Haiku's menu; elsewhere the Settings tab sets it).
+    #[allow(dead_code)]
     Background(usize),
-    /// Settings ▸ Shell picked this entry of `shells::KINDS`.
+    /// Settings ▸ Shell picked this entry of `shells::KINDS` (Haiku's menu).
+    #[allow(dead_code)]
     Shell(usize),
 }
 

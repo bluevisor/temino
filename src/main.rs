@@ -17,6 +17,7 @@ mod pane;
 mod platform;
 mod scene;
 mod session;
+mod settings;
 mod shells;
 mod text;
 mod theme;

@@ -17,7 +17,7 @@ use crate::platform::{self, buttons, Cursor, KeyEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::session::{BlockKind, Credits, GridSize, Notice, Phase, Session};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
-use crate::theme::{Color, Theme};
+use crate::theme::{Color, Theme, SURFACE_LIFT};
 use crate::ui::{self, GridView, Span};
 use crate::Msg;
 
@@ -76,10 +76,12 @@ enum SelectMode {
     Line,
 }
 
-/// A mouse selection inside one block's output, in (line, column).
+/// A mouse selection inside one block's output (or its command, in
+/// wrapped rows), in (line, column).
 #[derive(Clone, Copy)]
 struct Selection {
     block: u64,
+    command: bool,
     anchor: (usize, usize),
     head: (usize, usize),
     mode: SelectMode,
@@ -91,6 +93,8 @@ struct BlockLayout {
     output_x: f32,
     output_y: f32,
     lines: usize,
+    command_y: f32,
+    command_rows: usize,
 }
 
 #[derive(Default)]
@@ -319,8 +323,12 @@ impl Pane {
 
     pub fn key(&mut self, ctx: &mut Ctx, key: KeyEvent) {
         let named = keys::named(&key);
+        // At the prompt, ⌘←/→ and ⌘⌫ are line editing (see editor_key).
+        let line_edit = key.line_mod()
+            && self.session.editor_active()
+            && matches!(named, Some(Named::Left | Named::Right | Named::Backspace));
         // Command shortcuts work in every mode.
-        if key.cmd() && !key.ctrl() {
+        if key.cmd() && !key.ctrl() && !line_edit {
             let handled = match (named, key.base_char()) {
                 (Some(Named::Up), _) => {
                     self.select_neighbor(-1);
@@ -655,8 +663,25 @@ impl Pane {
     fn selection_text(&self) -> Option<String> {
         let selection = self.selection?;
         let block = self.session.blocks.iter().find(|b| b.id == selection.block)?;
-        let (start, end) = self.selection_span(block.id).unwrap_or_else(|| normalize(selection));
-        Some(block.text_between(start, end)).filter(|text| !text.is_empty())
+        let text = if selection.command {
+            let rows = command_rows(&block.command, self.session.size.columns.max(1));
+            let ((l0, c0), (l1, c1)) = self.command_span(block.id)?;
+            let mut text = String::new();
+            for (index, (row, ends_line)) in rows.iter().enumerate().take(l1 + 1).skip(l0) {
+                let chars: Vec<char> = row.chars().collect();
+                let from = if index == l0 { c0.min(chars.len()) } else { 0 };
+                let to = if index == l1 { (c1 + 1).min(chars.len()) } else { chars.len() };
+                text.extend(&chars[from..to.max(from)]);
+                if *ends_line && index < l1 {
+                    text.push('\n');
+                }
+            }
+            text
+        } else {
+            let (start, end) = self.selection_span(block.id).unwrap_or_else(|| normalize(selection));
+            block.text_between(start, end)
+        };
+        Some(text).filter(|text| !text.is_empty())
     }
 
     fn copy(&mut self, ctx: &mut Ctx, command_only: bool) {
@@ -784,7 +809,7 @@ impl Pane {
             }
             if let Some((column, line)) = self.alt_cell(ctx, x, y) {
                 let id = block.id;
-                self.start_selection(id, line, column, clicks);
+                self.start_selection(id, false, line, column, clicks);
             }
             return;
         }
@@ -806,18 +831,27 @@ impl Pane {
             self.selected = None;
             return;
         }
-        let hit =
-            self.layout.blocks.iter().find(|b| b.rect.contains(x, y)).map(|b| (b.id, b.output_x, b.output_y, b.lines));
-        let Some((id, ox, oy, lines)) = hit else {
+        let hit = self
+            .layout
+            .blocks
+            .iter()
+            .find(|b| b.rect.contains(x, y))
+            .map(|b| (b.id, b.output_x, b.output_y, b.lines, b.command_y, b.command_rows));
+        let Some((id, ox, oy, lines, cy, rows)) = hit else {
             self.selected = None;
             self.selection = None;
             return;
         };
         let cell = ctx.text.cell;
+        let columns = self.session.size.columns;
+        let column = (((x - ox) / cell.width).max(0.0) as usize).min(columns - 1);
         if button == 0 && lines > 0 && y >= oy && y < oy + lines as f32 * cell.height {
             let line = ((y - oy) / cell.height) as usize;
-            let column = ((x - ox) / cell.width).max(0.0) as usize;
-            self.start_selection(id, line.min(lines - 1), column.min(self.session.size.columns - 1), clicks);
+            self.start_selection(id, false, line.min(lines - 1), column, clicks);
+            self.selected = Some(id);
+        } else if button == 0 && rows > 0 && y >= cy && y < cy + rows as f32 * cell.height {
+            let row = ((y - cy) / cell.height) as usize;
+            self.start_selection(id, true, row.min(rows - 1), column, clicks);
             self.selected = Some(id);
         } else {
             self.selection = None;
@@ -825,13 +859,13 @@ impl Pane {
         }
     }
 
-    fn start_selection(&mut self, block: u64, line: usize, column: usize, clicks: i32) {
+    fn start_selection(&mut self, block: u64, command: bool, line: usize, column: usize, clicks: i32) {
         let mode = match clicks {
             2 => SelectMode::Word,
             n if n >= 3 => SelectMode::Line,
             _ => SelectMode::Char,
         };
-        self.selection = Some(Selection { block, anchor: (line, column), head: (line, column), mode });
+        self.selection = Some(Selection { block, command, anchor: (line, column), head: (line, column), mode });
         self.dragging = true;
     }
 
@@ -841,7 +875,7 @@ impl Pane {
         // Pointer shape: an arrow over chrome, the I-beam over text.
         let over_text = self.layout.alt.is_some()
             || self.layout.input.contains(x, y)
-            || self.layout.blocks.iter().any(|b| b.rect.contains(x, y) && y >= b.output_y);
+            || self.layout.blocks.iter().any(|b| b.rect.contains(x, y) && y >= b.command_y);
         let cursor = if over_text { Cursor::IBeam } else { Cursor::Arrow };
 
         if let Some((index, _, _)) = self.layout.alt {
@@ -864,10 +898,15 @@ impl Pane {
             (line.min(self.session.size.lines - 1), column)
         } else {
             let Some(layout) = self.layout.blocks.iter().find(|b| b.id == selection.block) else { return cursor };
-            if layout.lines == 0 {
+            let (top, lines) = if selection.command {
+                (layout.command_y, layout.command_rows)
+            } else {
+                (layout.output_y, layout.lines)
+            };
+            if lines == 0 {
                 return cursor;
             }
-            let line = ((y - layout.output_y) / cell.height).floor().clamp(0.0, (layout.lines - 1) as f32) as usize;
+            let line = ((y - top) / cell.height).floor().clamp(0.0, (lines - 1) as f32) as usize;
             let column = ((x - layout.output_x) / cell.width).max(0.0) as usize;
             (line, column)
         };
@@ -947,7 +986,7 @@ impl Pane {
     }
 
     fn selection_span(&self, id: u64) -> Option<Span> {
-        let selection = self.selection.filter(|s| s.block == id)?;
+        let selection = self.selection.filter(|s| s.block == id && !s.command)?;
         let block = self.session.blocks.iter().find(|b| b.id == id)?;
         let (mut start, mut end) = normalize(selection);
         let columns = self.session.size.columns;
@@ -967,6 +1006,36 @@ impl Pane {
                     start.1 -= 1;
                 }
                 while end.1 + 1 < columns && is_word(end.0, end.1 + 1) {
+                    end.1 += 1;
+                }
+            }
+        }
+        Some((start, end))
+    }
+
+    /// The selection within a block's command, in its wrapped rows.
+    fn command_span(&self, id: u64) -> Option<Span> {
+        let selection = self.selection.filter(|s| s.block == id && s.command)?;
+        let block = self.session.blocks.iter().find(|b| b.id == id)?;
+        let (mut start, mut end) = normalize(selection);
+        let columns = self.session.size.columns.max(1);
+        match selection.mode {
+            SelectMode::Char => {}
+            SelectMode::Line => {
+                start.1 = 0;
+                end.1 = columns - 1;
+            }
+            SelectMode::Word => {
+                let rows = command_rows(&block.command, columns);
+                let row = |line: usize| rows.get(line).map(|(s, _)| s.chars().collect::<Vec<_>>()).unwrap_or_default();
+                let is_word = |chars: &[char], column: usize| {
+                    chars.get(column).is_some_and(|&c| !c.is_whitespace() && !"()[]{}<>'\"`|;,".contains(c))
+                };
+                let (first, last) = (row(start.0), row(end.0));
+                while start.1 > 0 && is_word(&first, start.1 - 1) {
+                    start.1 -= 1;
+                }
+                while end.1 + 1 < columns && is_word(&last, end.1 + 1) {
                     end.1 += 1;
                 }
             }
@@ -1168,6 +1237,7 @@ impl Pane {
         let blink = ctx.blink_on();
         let id = self.session.blocks[index].id;
         let selection = self.selection_span(id);
+        let command_selection = self.command_span(id);
         let selected = self.selected == Some(id);
         let user_columns = self.session.size.columns.max(1);
         let Ctx { text, theme, .. } = ctx;
@@ -1209,15 +1279,25 @@ impl Pane {
         }
 
         // The command, wrapped to the grid width.
-        let mut line_y = y + BLOCK_PAD_TOP + META_HEIGHT;
+        let command_y = y + BLOCK_PAD_TOP + META_HEIGHT;
+        let mut line_y = command_y;
+        let mut command_rows_drawn = 0;
         if block.kind == BlockKind::Command {
-            for line in block.command.split('\n') {
-                let chars: Vec<char> = line.chars().collect();
-                for chunk in chars.chunks(user_columns).chain(chars.is_empty().then_some(&[][..])) {
-                    let s: String = chunk.iter().collect();
-                    text.draw_mono(scene, &s, PAD_X, line_y, Style::BOLD, theme.text);
-                    line_y += cell.height;
+            for (index, (row, _)) in command_rows(&block.command, user_columns).iter().enumerate() {
+                if let Some(((l0, c0), (l1, c1))) =
+                    command_selection.filter(|((l0, _), (l1, _))| (*l0..=*l1).contains(&index))
+                {
+                    let len = row.chars().count();
+                    let from = if index == l0 { c0.min(len) } else { 0 };
+                    let to = if index == l1 { (c1 + 1).min(len) } else { len };
+                    if to > from {
+                        let x = PAD_X + from as f32 * cell.width;
+                        scene.fill(Rect::new(x, line_y, (to - from) as f32 * cell.width, cell.height), theme.selection);
+                    }
                 }
+                text.draw_mono(scene, row, PAD_X, line_y, Style::BOLD, theme.text);
+                line_y += cell.height;
+                command_rows_drawn += 1;
             }
         }
 
@@ -1242,7 +1322,15 @@ impl Pane {
             }
         }
         scene.fill(Rect::new(0.0, y + block_height - 1.0, width, 1.0), theme.divider);
-        self.layout.blocks.push(BlockLayout { id, rect, output_x: PAD_X, output_y, lines: output });
+        self.layout.blocks.push(BlockLayout {
+            id,
+            rect,
+            output_x: PAD_X,
+            output_y,
+            lines: output,
+            command_y,
+            command_rows: command_rows_drawn,
+        });
     }
 
     fn draw_input(&mut self, scene: &mut Scene, ctx: &mut Ctx, focused: bool, y: f32, height: f32) {
@@ -1254,7 +1342,7 @@ impl Pane {
         let Pane { session, editor, layout, completion, .. } = self;
         let panel = Rect::new(0.0, y, width, height);
         layout.input = panel;
-        scene.fill(panel, theme.surface);
+        scene.fill(panel, theme.panel(SURFACE_LIFT));
         scene.fill(Rect::new(0.0, y, width, 1.0), theme.divider);
 
         // Context chips.
@@ -1471,6 +1559,19 @@ fn draw_menu(
     scene.set_layer(LAYER_CONTENT);
 }
 
+/// A command's rows as drawn, wrapped to the grid width; the flag marks
+/// the last row of each of its lines.
+fn command_rows(command: &str, columns: usize) -> Vec<(String, bool)> {
+    let mut rows = Vec::new();
+    for line in command.split('\n') {
+        let chars: Vec<char> = line.chars().collect();
+        let chunks: Vec<&[char]> = chars.chunks(columns).chain(chars.is_empty().then_some(&[][..])).collect();
+        let last = chunks.len() - 1;
+        rows.extend(chunks.into_iter().enumerate().map(|(i, chunk)| (chunk.iter().collect(), i == last)));
+    }
+    rows
+}
+
 fn normalize(selection: Selection) -> ((usize, usize), (usize, usize)) {
     if selection.anchor <= selection.head {
         (selection.anchor, selection.head)
@@ -1484,5 +1585,17 @@ pub fn grid_size(rect: Rect, text: &TextSystem) -> GridSize {
     GridSize {
         columns: (((rect.w - 2.0 * PAD_X) / cell.width).floor() as usize).max(10),
         lines: (((rect.h - 2.0 * ALT_PAD_Y) / cell.height).floor() as usize).max(3),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_rows;
+
+    #[test]
+    fn command_rows_wrap_and_mark_line_ends() {
+        let rows = command_rows("echo hello\n\nls", 4);
+        let expected = [("echo", false), (" hel", false), ("lo", true), ("", true), ("ls", true)];
+        assert_eq!(rows, expected.map(|(s, end)| (s.to_owned(), end)));
     }
 }
