@@ -18,7 +18,7 @@ const DAY: u64 = 24 * 60 * 60;
 fn asset_suffix() -> Option<&'static str> {
     let arm = cfg!(target_arch = "aarch64");
     if cfg!(target_os = "macos") {
-        Some(if arm { "-macos-arm64.zip" } else { "-macos-x86_64.zip" })
+        Some(if arm { "-macos-arm64.dmg" } else { "-macos-x86_64.dmg" })
     } else if cfg!(target_os = "haiku") {
         // 32-bit Haiku gets the x86_gcc2 package (built for its x86 secondary arch).
         Some(if arm {
@@ -132,9 +132,10 @@ fn current_exe() -> Result<PathBuf, String> {
     std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| e.to_string())
 }
 
-/// Swaps Temino.app for the one in the zip; the running app keeps its files.
+/// Swaps Temino.app for the one in the disk image; the running app keeps
+/// its files.
 #[cfg(target_os = "macos")]
-fn install(dir: &Path, zip: &Path) -> Result<(), String> {
+fn install(dir: &Path, dmg: &Path) -> Result<(), String> {
     let exe = current_exe()?;
     let bundle = exe
         .ancestors()
@@ -142,14 +143,17 @@ fn install(dir: &Path, zip: &Path) -> Result<(), String> {
         .filter(|b| b.extension().is_some_and(|e| e == "app"))
         .ok_or("Temino isn't running from Temino.app")?;
     let parent = bundle.parent().ok_or("no folder above Temino.app")?;
-    let unpacked = dir.join("unpacked");
-    run_command(Command::new("ditto").args(["-x", "-k"]).arg(zip).arg(&unpacked))?;
+    let mount = dir.join("mount");
+    let attach = ["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"];
+    run_command(Command::new("hdiutil").args(attach).arg(&mount).arg(dmg))?;
     let staged = parent.join(".Temino-new.app");
     let old = parent.join(".Temino-old.app");
     let _ = std::fs::remove_dir_all(&staged);
     let _ = std::fs::remove_dir_all(&old);
     // Next to the old bundle, so the swap is two renames on one volume.
-    run_command(Command::new("ditto").arg(unpacked.join("Temino.app")).arg(&staged))?;
+    let copied = run_command(Command::new("ditto").arg(mount.join("Temino.app")).arg(&staged));
+    let _ = run_command(Command::new("hdiutil").args(["detach", "-force"]).arg(&mount));
+    copied?;
     std::fs::rename(bundle, &old).map_err(|e| format!("can't replace {}: {e}", bundle.display()))?;
     if let Err(e) = std::fs::rename(&staged, bundle) {
         let _ = std::fs::rename(&old, bundle);
