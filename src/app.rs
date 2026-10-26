@@ -1058,9 +1058,11 @@ impl App {
         self.set_zoom(size / BASE_FONT_SIZE, true);
     }
 
-    /// Steps the terminal font a whole point up or down.
+    /// Steps the zoom 10% of the default size up or down, onto that grid,
+    /// so a step each way comes back to where it started.
     fn step_font_size(&mut self, step: f32) {
-        self.change_font_size((self.zoom * BASE_FONT_SIZE + step).round());
+        let tenths = (self.zoom_percent() / 10.0 + step).round();
+        self.change_font_size(DEFAULT_FONT_SIZE * tenths / 10.0);
     }
 
     /// The zoom as Settings and the toast show it: 100% at the default size.
