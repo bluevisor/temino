@@ -282,6 +282,10 @@ pub struct App {
     renaming: Option<Rename>,
     hover_tab: Option<usize>,
     mouse: (f32, f32),
+    /// What an input method is composing, drawn at the cursor.
+    preedit: String,
+    /// The caret last reported to the platform, in window pixels.
+    caret_sent: Option<[i32; 3]>,
     /// The pane installing a shell from Settings ▸ Shell, and which.
     installing: Option<(u64, shells::Kind)>,
     /// The Settings tab's page, and what it shows that the theme doesn't.
@@ -362,7 +366,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
         scene.shadow(card, Color::hex(0x000000).alpha(0.6), 10.0, 8.0);
         scene.quad(Quad::new(card, theme.surface).radius(10.0).border(1.0, theme.divider));
         text.draw_text(&mut scene, "Temino self-test", 32.0, 52.0, UI_BOLD, 20.0, theme.text);
-        text.draw_mono(&mut scene, "ls -la ~/config ─┼─ ✓", 32.0, 70.0, Style::default(), theme.success);
+        text.draw_mono(&mut scene, "ls -la ~/config ─┼─ ✓ 中文 🌞🐱", 32.0, 70.0, Style::default(), theme.success);
         scene.fill(Rect::new(32.0, 110.0, 120.0, 18.0), theme.accent);
         match gpu.render(&scene, &mut text.atlas, true) {
             Ok(Some(pixels)) => {
@@ -491,6 +495,8 @@ impl App {
             renaming: None,
             hover_tab: None,
             mouse: (0.0, 0.0),
+            preedit: String::new(),
+            caret_sent: None,
             installing: None,
             settings: settings::Page::default(),
             background,
@@ -499,7 +505,10 @@ impl App {
             installed: [false; KINDS.len()],
         };
         app.apply_blur();
-        app.set_zoom(crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(DEFAULT_FONT_SIZE / BASE_FONT_SIZE), false);
+        app.set_zoom(
+            crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(DEFAULT_FONT_SIZE / BASE_FONT_SIZE),
+            false,
+        );
         app.restore_tabs()?;
         crate::update::check(app.ctx.sender.clone(), false);
         crate::trace("app: shell started");
@@ -950,6 +959,16 @@ impl App {
                 }
             }
             UiEvent::Close => self.quit(),
+            UiEvent::Text(text) => {
+                self.preedit.clear();
+                self.ctx.blink_epoch = Instant::now();
+                if let Some(id) = self.focused_id() {
+                    if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+                        pane.text_input(&text);
+                    }
+                }
+            }
+            UiEvent::Preedit(text) => self.preedit = text,
             UiEvent::Background(index) => self.set_background(index),
             UiEvent::Shell(index) => self.set_shell(index),
             UiEvent::Wheel { dy, x, y, .. } => {
@@ -1566,6 +1585,40 @@ impl App {
 
     // ---- drawing ------------------------------------------------------
 
+    /// The input method's composition, over the text at the cursor, underlined.
+    fn draw_preedit(&mut self) {
+        let Some(caret) = self.scene.caret else { return };
+        if self.preedit.is_empty() {
+            return;
+        }
+        let Self { scene, ctx, preedit, .. } = self;
+        let cell = ctx.text.cell;
+        let width = crate::editor::columns(preedit) as f32 * cell.width;
+        scene.set_origin(0.0, 0.0);
+        scene.set_layer(LAYER_OVERLAY);
+        scene.fill(Rect::new(caret.x, caret.y, width, cell.height), ctx.theme.background);
+        let mut x = caret.x;
+        for c in preedit.chars() {
+            let span = crate::editor::width(c);
+            ctx.text.draw_cell(scene, c, x, caret.y, crate::text::Style::default(), ctx.theme.text, span.max(1));
+            x += span as f32 * cell.width;
+        }
+        scene.fill(Rect::new(caret.x, caret.y + cell.height - 2.0, width, 1.0), ctx.theme.text);
+        scene.set_layer(LAYER_CONTENT);
+    }
+
+    /// Tells the platform where the cursor is, so an input method's
+    /// candidate window opens beside it.
+    fn report_caret(&mut self) {
+        let Some(caret) = self.scene.caret else { return };
+        let zoom = self.zoom;
+        let at = [(caret.x * zoom) as i32, (caret.y * zoom) as i32, (caret.h * zoom) as i32];
+        if self.caret_sent != Some(at) {
+            self.caret_sent = Some(at);
+            platform::set_text_caret(at[0], at[1], at[2]);
+        }
+    }
+
     fn render(&mut self) {
         crate::trace("render: begin");
         self.dirty = false;
@@ -1606,6 +1659,8 @@ impl App {
         self.draw_tab_bar();
         self.draw_tab_menu();
         self.draw_toast();
+        self.draw_preedit();
+        self.report_caret();
         crate::trace("render: scene built");
         let capture = std::env::var_os("TEMINO_CAPTURE");
         let on_screen = self.gpu.on_screen();

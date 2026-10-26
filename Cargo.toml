@@ -1,6 +1,6 @@
 [package]
 name = "temino"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "A modern GPU-accelerated block terminal for Haiku, Linux and macOS"
 license = "MIT"
@@ -9,6 +9,7 @@ repository = "https://github.com/bluevisor/temino"
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
 fontdue = "0.9.5"
+unicode-width = "0.2"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 ash = { version = "0.38", default-features = false, features = ["loaded", "debug"] }

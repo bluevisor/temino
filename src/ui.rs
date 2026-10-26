@@ -118,6 +118,12 @@ pub fn draw_grid(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, view: 
     if view.cursor && term.mode().contains(TermMode::SHOW_CURSOR) {
         let point = grid.cursor.point;
         let index = (history as i32 + point.line.0) as usize;
+        if view.focused && index >= view.first && index < view.last {
+            // Marked whether or not the cursor is in its blink-off phase.
+            let x = view.x + point.column.0 as f32 * cell.width;
+            let y = view.y + (index - view.first) as f32 * cell.height;
+            scene.mark_caret(Rect::new(x, y, cell.width, cell.height));
+        }
         if index >= view.first && index < view.last && (view.blink_on || !view.focused) {
             let x = view.x + point.column.0 as f32 * cell.width;
             let y = view.y + (index - view.first) as f32 * cell.height;

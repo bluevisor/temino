@@ -710,6 +710,19 @@ impl Pane {
         }
     }
 
+    /// Text an input method committed: typed, not pasted.
+    pub fn text_input(&mut self, text: &str) {
+        if let Some(block) = self.session.active() {
+            let _ = block;
+            self.session.write(text.as_bytes());
+            self.selection = None;
+            self.pin_to_bottom();
+        } else if self.session.editor_active() {
+            self.editor.insert(text);
+            self.selected = None;
+        }
+    }
+
     fn paste(&mut self, text: Option<String>) {
         let Some(text) = text else { return };
         let text = text.replace("\r\n", "\n");
@@ -1072,7 +1085,7 @@ impl Pane {
         let columns = self.session.size.columns.max(1);
         let block = &mut self.session.blocks[index];
         let command_lines = if block.kind == BlockKind::Command {
-            block.command.split('\n').map(|line| line.chars().count().div_ceil(columns).max(1)).sum()
+            block.command.split('\n').map(|line| crate::editor::columns(line).div_ceil(columns).max(1)).sum()
         } else {
             0
         };
@@ -1185,7 +1198,7 @@ impl Pane {
         let tagline = format!("A modern GPU-accelerated terminal for {}", platform::OS_NAME);
         let width = text.draw_text(scene, &tagline, x, y + 22.0, UI, 13.0, theme.text_dim);
         let api = if cfg!(target_os = "macos") { "Metal" } else { "Vulkan" };
-        let device = format!("  ·  {api} on {device_name}");
+        let device = format!("  ·  {api} on {device_name}  ·  v{}", env!("CARGO_PKG_VERSION"));
         text.draw_text(scene, &device, x + width, y + 22.0, UI, 13.0, theme.text_faint);
         let y = y + 36.0;
         let cmd = |key: &str| format!("{}+{key}", platform::COMMAND_NAME);
@@ -1413,7 +1426,7 @@ impl Pane {
                         let to = if line == l1 {
                             c1
                         } else {
-                            editor.text.split('\n').nth(line).map_or(0, |l| l.chars().count()) + 1
+                            editor.text.split('\n').nth(line).map_or(0, crate::editor::columns) + 1
                         };
                         let ly = editor_y + (line - first_line) as f32 * cell.height;
                         let rect = Rect::new(
@@ -1440,12 +1453,13 @@ impl Pane {
                         column = 0;
                         continue;
                     }
-                    if line >= first_line && line < first_line + MAX_EDITOR_LINES {
+                    let span = crate::editor::width(c);
+                    if line >= first_line && line < first_line + MAX_EDITOR_LINES && span > 0 {
                         let cx = text_x + column as f32 * cell.width;
                         let cy = editor_y + (line - first_line) as f32 * cell.height;
-                        text.draw_cell(scene, c, cx, cy, Style::default(), colors[offset], 1);
+                        text.draw_cell(scene, c, cx, cy, Style::default(), colors[offset], span);
                     }
-                    column += 1;
+                    column += span;
                 }
                 if let Some(rest) = editor.suggestion(history) {
                     let (sl, sc) = editor.position(editor.text.len());
@@ -1461,14 +1475,15 @@ impl Pane {
                         );
                     }
                 }
-                if blink {
-                    let (cl, cc) = editor.position(editor.cursor);
-                    if cl >= first_line {
-                        let cy = editor_y + (cl - first_line) as f32 * cell.height;
-                        scene.fill(
-                            Rect::new(text_x + cc as f32 * cell.width - 1.0, cy + 1.0, 2.0, cell.height - 2.0),
-                            theme.cursor,
-                        );
+                let (cl, cc) = editor.position(editor.cursor);
+                if cl >= first_line {
+                    let cy = editor_y + (cl - first_line) as f32 * cell.height;
+                    let caret = Rect::new(text_x + cc as f32 * cell.width - 1.0, cy + 1.0, 2.0, cell.height - 2.0);
+                    if focused {
+                        scene.mark_caret(Rect::new(caret.x + 1.0, cy, cell.width, cell.height));
+                    }
+                    if blink {
+                        scene.fill(caret, theme.cursor);
                     }
                 }
                 if let Some(completion) = completion {

@@ -25,6 +25,8 @@ struct RawEvent {
     raw_char: i32,
     nbytes: i32,
     bytes: [u8; 16],
+    /// Input method text (kinds 12, 13), valid during the callback.
+    text: *const c_char,
 }
 
 type Callback = extern "C" fn(*const RawEvent, *mut c_void);
@@ -40,6 +42,7 @@ extern "C" {
     fn temino_present(pixels: *const u8, width: i32, height: i32, stride: i32);
     fn temino_set_title(title: *const c_char);
     fn temino_set_cursor(kind: i32);
+    fn temino_set_text_caret(x: i32, y: i32, height: i32);
     fn temino_beep();
     fn temino_clipboard_set(text: *const c_char, length: i32) -> i32;
     fn temino_clipboard_get(length: *mut i32) -> *mut c_char;
@@ -150,6 +153,20 @@ extern "C" fn on_event(raw: *const RawEvent, context: *mut c_void) {
         8 => UiEvent::Close,
         10 => UiEvent::Background(raw.key.max(0) as usize),
         11 => UiEvent::Shell(raw.key.max(0) as usize),
+        12 | 13 => {
+            let text = if raw.text.is_null() {
+                String::new()
+            } else {
+                // SAFETY: the shim passes a NUL-terminated string that lives
+                // until the callback returns.
+                unsafe { std::ffi::CStr::from_ptr(raw.text) }.to_string_lossy().into_owned()
+            };
+            if raw.kind == 12 {
+                UiEvent::Text(text)
+            } else {
+                UiEvent::Preedit(text)
+            }
+        }
         _ => return,
     };
     let _ = sender.send(Msg::Ui(event));
@@ -210,6 +227,11 @@ pub fn set_title(title: &str) {
 
 pub fn set_cursor(cursor: Cursor) {
     unsafe { temino_set_cursor(cursor as i32) }
+}
+
+/// Where the text cursor is, in window pixels, for input methods.
+pub fn set_text_caret(x: i32, y: i32, height: i32) {
+    unsafe { temino_set_text_caret(x, y, height) }
 }
 
 pub fn beep() {

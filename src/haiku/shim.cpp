@@ -16,6 +16,7 @@
 #include <Bitmap.h>
 #include <Clipboard.h>
 #include <Cursor.h>
+#include <Input.h>
 #include <Locker.h>
 #include <MenuBar.h>
 #include <MenuItem.h>
@@ -39,6 +40,7 @@
 #include <pwd.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 
 
@@ -59,6 +61,7 @@ struct TeminoEvent {
 	int32_t raw_char;
 	int32_t nbytes;
 	uint8_t bytes[16];
+	const char* text;	// input method text (kEventText, kEventPreedit)
 };
 
 typedef void (*TeminoEventCallback)(const TeminoEvent* event, void* context);
@@ -78,6 +81,8 @@ enum {
 	kEventQuit = 9,
 	kEventBackground = 10,
 	kEventShell = 11,
+	kEventText = 12,		// an input method committed text
+	kEventPreedit = 13,		// what it's composing; empty when done
 };
 
 enum {
@@ -106,6 +111,10 @@ static BMenu* sBackgroundMenu;
 static BMenu* sShellMenu;
 static class TeminoView* sView;
 static std::atomic<bool> sQuitting(false);
+// The text cursor in view coordinates, from Rust, for input methods.
+static std::atomic<int32> sCaretX(0);
+static std::atomic<int32> sCaretY(0);
+static std::atomic<int32> sCaretHeight(16);
 
 
 static void
@@ -132,7 +141,8 @@ public:
 	TeminoView(BRect frame)
 		:
 		BView(frame, "temino", B_FOLLOW_ALL,
-			B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE),
+			B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE
+				| B_INPUT_METHOD_AWARE),
 		fIBeam(B_CURSOR_ID_I_BEAM),
 		fArrow(B_CURSOR_ID_SYSTEM_DEFAULT),
 		fResizeColumn(B_CURSOR_ID_RESIZE_EAST_WEST),
@@ -165,6 +175,7 @@ public:
 
 	void MouseDown(BPoint where) override
 	{
+		StopInputMethod();
 		SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
 		TeminoEvent event = {};
 		event.kind = kEventMouseDown;
@@ -216,6 +227,9 @@ public:
 				SetViewCursor(cursors[kind >= 0 && kind < 4 ? kind : 0]);
 				break;
 			}
+			case B_INPUT_METHOD_EVENT:
+				_InputMethod(message);
+				break;
 			case B_MOUSE_WHEEL_CHANGED:
 			{
 				TeminoEvent event = {};
@@ -236,7 +250,79 @@ public:
 		}
 	}
 
+	// Ends a composition the user walked away from (a click, losing
+	// focus): the input method drops it, and so do we.
+	void StopInputMethod()
+	{
+		if (!fMethod.IsValid())
+			return;
+		BMessage stop(B_INPUT_METHOD_EVENT);
+		stop.AddInt32("be:opcode", B_INPUT_METHOD_STOPPED);
+		fMethod.SendMessage(&stop);
+		fMethod = BMessenger();
+		_EmitText(kEventPreedit, "");
+	}
+
 private:
+	void _EmitText(int32 kind, const char* text)
+	{
+		TeminoEvent event = {};
+		event.kind = kind;
+		event.text = text;
+		emit(event);
+	}
+
+	// The input method protocol: composition shows at the cursor (Rust draws
+	// it), committed text is typed, and the candidate window asks where the
+	// cursor is.
+	void _InputMethod(BMessage* message)
+	{
+		switch (message->GetInt32("be:opcode", -1)) {
+			case B_INPUT_METHOD_STARTED:
+				message->FindMessenger("be:reply_to", &fMethod);
+				break;
+			case B_INPUT_METHOD_CHANGED:
+			{
+				const char* text = message->GetString("be:string", "");
+				if (message->GetBool("be:confirmed", false)) {
+					_EmitText(kEventPreedit, "");
+					if (text[0] != '\0')
+						_EmitText(kEventText, text);
+					fPreedit = "";
+				} else {
+					fPreedit = text;
+					_EmitText(kEventPreedit, text);
+				}
+				break;
+			}
+			case B_INPUT_METHOD_LOCATION_REQUEST:
+			{
+				if (!fMethod.IsValid())
+					break;
+				BPoint where(sCaretX.load(), sCaretY.load());
+				ConvertToScreen(&where);
+				float height = sCaretHeight.load();
+				BMessage reply(B_INPUT_METHOD_EVENT);
+				reply.AddInt32("be:opcode", B_INPUT_METHOD_LOCATION_REQUEST);
+				int32 characters = std::max((int32)1, fPreedit.CountChars());
+				for (int32 i = 0; i < characters; i++) {
+					reply.AddPoint("be:location_reply", where);
+					reply.AddFloat("be:height_reply", height);
+				}
+				fMethod.SendMessage(&reply);
+				break;
+			}
+			case B_INPUT_METHOD_STOPPED:
+				fMethod = BMessenger();
+				fPreedit = "";
+				_EmitText(kEventPreedit, "");
+				break;
+		}
+	}
+
+	BMessenger fMethod;
+	BString fPreedit;
+
 	// Called with sFrameLock held and the window locked.
 	void _DrawFrame()
 	{
@@ -374,6 +460,8 @@ public:
 
 	void WindowActivated(bool active) override
 	{
+		if (!active && sView != NULL)
+			sView->StopInputMethod();
 		TeminoEvent event = {};
 		event.kind = kEventFocus;
 		event.buttons = active ? 1 : 0;
@@ -614,6 +702,15 @@ temino_set_title(const char* title)
 	BMessage message(kMsgTitle);
 	message.AddString("title", title);
 	sWindow->PostMessage(&message);
+}
+
+
+void
+temino_set_text_caret(int32_t x, int32_t y, int32_t height)
+{
+	sCaretX.store(x);
+	sCaretY.store(y);
+	sCaretHeight.store(height);
 }
 
 
