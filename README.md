@@ -145,7 +145,12 @@ cp dist/temino-*.hpkg ~/config/packages/          # adds Temino to Deskbar
 ```
 
 From a Mac, `haiku/deploy.sh` copies the tree to the VM (`HOST`, default
-`haiku-dbg`), builds it there and starts it. `haiku/keysend.cpp` posts key
+`haiku-dbg`), builds it there and starts it. For Intel Haiku, `haiku/cross.sh x86_64`
+and `haiku/cross.sh x86` cross-compile in Docker (Haiku's R1/beta5 cross-compiler
+image plus Rust nightly with `-Zbuild-std`, since the Haiku targets are tier 3) and
+package on the VM: `dist/temino-<version>-1-x86_64.hpkg`, and
+`dist/temino-<version>-1-x86_gcc2.hpkg` for 32-bit Haiku (built for its gcc 13 `x86`
+secondary architecture). `haiku/keysend.cpp` posts key
 presses to a window for scripted tests. After editing a shader, run
 `shaders/build.sh` (needs `glslc`).
 

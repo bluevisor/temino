@@ -3,7 +3,7 @@
 #   haiku/package.sh                     -> dist/temino-<version>-<rev>-<arch>.hpkg
 #   TEMINO_PKG_REV=2 haiku/package.sh     bump the package revision
 #   TEMINO_BIN=temino TEMINO_ARCH=x86_64 haiku/package.sh
-#                                        package a cross-built binary
+#                                        package a cross-built binary (haiku/cross.sh)
 # Install by copying the .hpkg into ~/config/packages (activates at once).
 # Temino needs a Vulkan driver: libvulkan.so.1 on the library path (on the
 # UTM VM, the Venus stack in ~/config/non-packaged/lib).
@@ -34,7 +34,11 @@ ln -s ../../../../apps/Temino "$stage/data/deskbar/menu/Applications/Temino"
 
 cp README.md LICENSE assets/fonts/JetBrainsMono-OFL.txt "$stage/documentation/packages/temino/"
 
-sed -e "s/@VERSION@/$version/g" -e "s/@REVISION@/$rev/g" -e "s/@ARCH@/$arch/g" \
+# 32-bit Haiku (x86_gcc2h) runs a modern-gcc binary against its secondary
+# x86 libraries, so require those (haiku_x86, lib:…_x86) as HaikuPorts does.
+secondary=()
+[ "$arch" = x86_gcc2 ] && secondary=(-e 's/^\thaiku$/\thaiku\n\thaiku_x86/' -e 's/^\t\(lib:[a-z_+]*\)$/\t\1_x86/')
+sed -e "s/@VERSION@/$version/g" -e "s/@REVISION@/$rev/g" -e "s/@ARCH@/$arch/g" "${secondary[@]}" \
 	haiku/PackageInfo.in > "$stage/.PackageInfo"
 
 mkdir -p dist

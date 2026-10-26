@@ -20,7 +20,14 @@ fn asset_suffix() -> Option<&'static str> {
     if cfg!(target_os = "macos") {
         Some(if arm { "-macos-arm64.zip" } else { "-macos-x86_64.zip" })
     } else if cfg!(target_os = "haiku") {
-        Some(if arm { "-arm64.hpkg" } else { "-x86_64.hpkg" })
+        // 32-bit Haiku gets the x86_gcc2 package (built for its x86 secondary arch).
+        Some(if arm {
+            "-arm64.hpkg"
+        } else if cfg!(target_arch = "x86") {
+            "-x86_gcc2.hpkg"
+        } else {
+            "-x86_64.hpkg"
+        })
     } else if cfg!(target_os = "linux") {
         Some(if arm { "-linux-aarch64.tar.gz" } else { "-linux-x86_64.tar.gz" })
     } else {
