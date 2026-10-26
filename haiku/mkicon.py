@@ -1,7 +1,8 @@
 """Writes Temino's Haiku vector icon (HVIF) and the resource file around it.
 
-usage: python3 -I haiku/mkicon.py [--preview out.ppm]
-       (rewrites haiku/Temino.rdef and haiku/temino.hvif)
+usage: python3 -I haiku/mkicon.py [--preview out.ppm] [--png docs/icon.png]
+       (rewrites haiku/Temino.rdef and haiku/temino.hvif; --png renders the
+       transparent 1024 px icon the macOS bundle is built from)
 
 The icon (John's design, 2026-10-25): a chunky silver terminal screen seen
 slightly from the left, with a blue side and a yellow tab on top, and a
@@ -11,7 +12,9 @@ HVIF grid. Rounded corners are sampled curves; every shape is a polygon.
 """
 import math
 import os
+import struct
 import sys
+import zlib
 
 SOURCE = 1254.0
 
@@ -176,6 +179,58 @@ def preview(path, size=256, samples=4):
                 f.write(bytes([int(tr / n), int(tg / n), int(tb / n)]))
 
 
+def png(path, size=1024, samples=2):
+    """Rasterizes the shapes (even-odd, supersampled) to a transparent PNG."""
+    scale = size * samples / SOURCE
+    big = size * samples
+    # Premultiplied RGBA, painted shape by shape with "over".
+    buffer = [[(0.0, 0.0, 0.0, 0.0)] * big for _ in range(big)]
+    for style, points in shapes:
+        r, g, b, a = colors[style]
+        alpha = a / 255.0
+        src = (r * alpha, g * alpha, b * alpha, alpha)
+        keep = 1.0 - alpha
+        pts = [(x * scale, y * scale) for x, y in points]
+        for sy in range(big):
+            fy = sy + 0.5
+            xs = []
+            for i in range(len(pts)):
+                x1, y1 = pts[i - 1]
+                x2, y2 = pts[i]
+                if (y1 <= fy < y2) or (y2 <= fy < y1):
+                    xs.append(x1 + (fy - y1) * (x2 - x1) / (y2 - y1))
+            xs.sort()
+            row = buffer[sy]
+            for j in range(0, len(xs) - 1, 2):
+                for sx in range(max(0, int(xs[j] + 0.5)), min(big, int(xs[j + 1] + 0.5))):
+                    d = row[sx]
+                    row[sx] = (src[0] + d[0] * keep, src[1] + d[1] * keep,
+                               src[2] + d[2] * keep, src[3] + d[3] * keep)
+    raw = bytearray()
+    n = samples * samples
+    for y in range(size):
+        raw.append(0)
+        for x in range(size):
+            tr = tg = tb = ta = 0.0
+            for dy in range(samples):
+                row = buffer[y * samples + dy]
+                for dx in range(samples):
+                    pr, pg, pb, pa = row[x * samples + dx]
+                    tr += pr; tg += pg; tb += pb; ta += pa
+            if ta:
+                raw += bytes([round(tr / ta), round(tg / ta), round(tb / ta), round(ta / n * 255)])
+            else:
+                raw += bytes(4)
+
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)))
+        f.write(chunk(b"IDAT", zlib.compress(bytes(raw), 9)))
+        f.write(chunk(b"IEND", b""))
+
+
 data = hvif()
 here = os.path.dirname(os.path.abspath(__file__))
 hexdata = data.hex()
@@ -204,4 +259,6 @@ open(os.path.join(here, "Temino.rdef"), "w").write(rdef)
 open(os.path.join(here, "temino.hvif"), "wb").write(data)
 if "--preview" in sys.argv:
     preview(sys.argv[sys.argv.index("--preview") + 1])
+if "--png" in sys.argv:
+    png(sys.argv[sys.argv.index("--png") + 1])
 print(len(data), "bytes")
