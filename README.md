@@ -150,7 +150,11 @@ and `haiku/cross.sh x86` cross-compile in Docker (Haiku's R1/beta5 cross-compile
 image plus Rust nightly with `-Zbuild-std`, since the Haiku targets are tier 3) and
 package on the VM: `dist/temino-<version>-1-x86_64.hpkg`, and
 `dist/temino-<version>-1-x86_gcc2.hpkg` for 32-bit Haiku (built for its gcc 13 `x86`
-secondary architecture). `haiku/keysend.cpp` posts key
+secondary architecture). The Intel packages depend on the Vulkan loader and Mesa's
+lavapipe software driver (`vulkan` + `mesa_lavapipe`, or `vulkan_x86` +
+`mesa_x86_lavapipe` on 32-bit), since Haiku's repositories have no GPU Vulkan driver;
+install them with `pkgman install temino-*.hpkg` so the dependencies come along.
+Both were tested on R1/beta6 in QEMU. `haiku/keysend.cpp` posts key
 presses to a window for scripted tests. After editing a shader, run
 `shaders/build.sh` (needs `glslc`).
 
