@@ -858,8 +858,16 @@ impl App {
         match message {
             Msg::Pty(id, bytes) => {
                 let Self { panes, ctx, .. } = self;
+                let mut moved = false;
                 if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
+                    let before = pane.session.cwd.clone();
                     pane.feed(ctx, &bytes);
+                    moved = pane.session.cwd != before;
+                }
+                // Each `cd` is written down at once, so a crash, force quit
+                // or logout still reopens the panes where they were.
+                if moved {
+                    self.save_tabs();
                 }
                 self.check_install(id);
                 self.dirty = true;
