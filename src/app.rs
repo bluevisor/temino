@@ -2163,7 +2163,8 @@ impl App {
             .map(|index| {
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
-                let lines = if extended { self.pane_lines(&leaves, now) } else { Vec::new() };
+                // Only the current tab grows its lines; the rest stay one row.
+                let lines = if extended && index == self.active { self.pane_lines(&leaves, now) } else { Vec::new() };
                 TabView {
                     lines,
                     agent: agents[index],
