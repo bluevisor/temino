@@ -2,7 +2,10 @@
 //! of split panes; routes window events and pty output to panes, and draws
 //! frames on demand.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::agent::{self, AgentState};
@@ -12,6 +15,7 @@ use crate::editor::History;
 use crate::gpu::Gpu;
 use crate::keys::Named;
 use crate::pane::{AgentInfo, Ctx, MarkNote, Pane};
+use crate::picture::Picture;
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::settings::{self, Action, Field};
@@ -3813,12 +3817,57 @@ fn agent_summary(info: &AgentInfo) -> String {
     }
 }
 
+/// An agent's logo, where Temino has one. One-color logos come in `ink`, so
+/// they show on light and dark themes alike.
+fn agent_logo(program: &'static str, ink: Color) -> Option<Arc<Picture>> {
+    let (png, mono): (&[u8], bool) = match program {
+        "codex" => (include_bytes!("../assets/agents/openai.png"), true),
+        "cursor-agent" | "agent" => (include_bytes!("../assets/agents/cursor.png"), true),
+        "gemini" => (include_bytes!("../assets/agents/gemini.png"), false),
+        _ => return None,
+    };
+    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let tint = mono.then(|| [byte(ink.r), byte(ink.g), byte(ink.b)]);
+    // By agent and tint: decoded once per theme.
+    type Logos = HashMap<(&'static str, Option<[u8; 3]>), Option<Arc<Picture>>>;
+    thread_local! {
+        static LOGOS: RefCell<Logos> = RefCell::new(HashMap::new());
+    }
+    LOGOS.with(|logos| {
+        logos
+            .borrow_mut()
+            .entry((program, tint))
+            .or_insert_with(|| {
+                let mut image = image::load_from_memory(png).ok()?.into_rgba8();
+                if let Some(rgb) = tint {
+                    for px in image.pixels_mut() {
+                        px.0[..3].copy_from_slice(&rgb);
+                    }
+                }
+                let (w, h) = image.dimensions();
+                Picture::new(w as usize, h as usize, image.into_raw())
+            })
+            .clone()
+    })
+}
+
 /// An agent's mark, 14 points square, its left edge at `x` and centered on
 /// `cy`; returns its right edge. Claude Code's is its spark, drawn as rays
-/// of dots; the others are their initial on a badge in their color.
-fn draw_agent_icon(scene: &mut Scene, text: &mut TextSystem, program: &str, brand: Color, x: f32, cy: f32) -> f32 {
+/// of dots; Codex, Cursor and Gemini show their logos; the others are
+/// their initial on a badge in their color.
+fn draw_agent_icon(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    program: &'static str,
+    brand: Color,
+    ink: Color,
+    x: f32,
+    cy: f32,
+) -> f32 {
     let size = 14.0;
-    if program.starts_with("claude") {
+    if let Some(logo) = agent_logo(program, ink) {
+        text.draw_picture(scene, &logo, Rect::new(x, cy - size / 2.0, size, size));
+    } else if program.starts_with("claude") {
         let (cx, r) = (x + size / 2.0, size / 2.0);
         for ray in 0..8 {
             let angle = ray as f32 * std::f32::consts::FRAC_PI_4 + 0.2;
@@ -3866,7 +3915,7 @@ fn draw_agent_header(
     let mut x = bar.x + 10.0;
     if let Some(program) = info.program {
         let (name, brand) = agent::agent_brand(program);
-        x = draw_agent_icon(scene, text, program, Color::hex(brand), x, cy) + 6.0;
+        x = draw_agent_icon(scene, text, program, Color::hex(brand), theme.text, x, cy) + 6.0;
         text.draw_text(scene, name, x, baseline, UI_BOLD, font, theme.text);
         x += text.measure(name, UI_BOLD, font) + 12.0;
         scene.fill(Rect::new(x, cy - 7.0, 1.0, 14.0), theme.divider);
