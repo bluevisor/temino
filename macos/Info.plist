@@ -13,4 +13,5 @@
 <key>NSHighResolutionCapable</key><true/>
 <key>NSCameraUsageDescription</key><string>A program running in Temino wants to use the camera.</string>
 <key>NSMicrophoneUsageDescription</key><string>A program running in Temino wants to use the microphone.</string>
+<key>NSAppleEventsUsageDescription</key><string>A program running in Temino wants to control another app.</string>
 </dict></plist>
