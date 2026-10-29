@@ -157,9 +157,9 @@ impl Page {
         }
         y = ui.section(x, y, width, "Keys", &keys, values);
         y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Headers], values);
-        y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::CheckForUpdates], values);
         let fields = Field::ALL.map(Row::Field);
         y = ui.section(x, y, width, "AI", &fields, values);
+        y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::CheckForUpdates], values);
         let version = format!("Temino {}", env!("CARGO_PKG_VERSION"));
         ui.text.draw_text(ui.scene, &version, x, y + 4.0, UI, 11.5, theme.text_faint);
         y += 24.0;
@@ -509,10 +509,9 @@ mod tests {
             Action::TabsTop(false),
             Action::TabsTop(true),
             Action::Headers(false),
-            Action::Updates(false),
-            Action::CheckForUpdates,
         ]);
         expected.extend(Field::ALL.map(Action::Edit));
+        expected.extend([Action::Updates(false), Action::CheckForUpdates]);
         assert_eq!(actions, expected);
         // A click lands on what's under it, and nothing overlaps.
         for (rect, action) in &page.hits {

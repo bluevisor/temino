@@ -498,6 +498,27 @@ static CGFloat sTitlebarHeight = 0;
 // Holds the viewers over the frames (see Viewers below).
 static NSView* sViewerHost;
 
+// Blurs the desktop behind a see-through background. winit's blur (the
+// window server's) covers the window's whole rectangle, so its corners
+// showed square; this view's blur is masked to the rounded corners.
+static NSVisualEffectView* sBlur;
+
+static NSImage*
+rounded_mask(CGFloat radius)
+{
+	if (radius <= 0)
+		return nil;
+	NSSize size = NSMakeSize(radius * 2 + 1, radius * 2 + 1);
+	NSImage* mask = [NSImage imageWithSize:size flipped:NO drawingHandler:^BOOL(NSRect rect) {
+		[NSColor.blackColor setFill];
+		[[NSBezierPath bezierPathWithRoundedRect:rect xRadius:radius yRadius:radius] fill];
+		return YES;
+	}];
+	mask.capInsets = NSEdgeInsetsMake(radius, radius, radius, radius);
+	mask.resizingMode = NSImageResizingModeStretch;
+	return mask;
+}
+
 // A see-through window isn't clipped to its rounded corners, so the frames
 // would fill them out square. The layer is rounded to match the window,
 // whose radius grew in macOS 26 and has no public getter.
@@ -525,6 +546,8 @@ round_corners(NSWindow* window)
 	frame.layer.cornerCurve = kCACornerCurveContinuous;
 	frame.layer.masksToBounds = radius > 0;
 	[window invalidateShadow];
+	if (sBlur != nil)
+		sBlur.maskImage = rounded_mask(radius);
 	if (sViewerHost != nil) {
 		sViewerHost.layer.cornerRadius = radius;
 		sViewerHost.layer.cornerCurve = kCACornerCurveContinuous;
@@ -559,6 +582,30 @@ place_traffic_lights(NSWindow* window)
 	placing = false;
 }
 
+
+void
+temino_blur(void* view_handle, bool on)
+{
+	@autoreleasepool {
+		NSView* view = (__bridge NSView*)view_handle;
+		if (!on) {
+			[sBlur removeFromSuperview];
+			sBlur = nil;
+			return;
+		}
+		if (sBlur != nil)
+			return;
+		sBlur = [[NSVisualEffectView alloc] initWithFrame:view.bounds];
+		sBlur.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+		sBlur.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+		sBlur.material = NSVisualEffectMaterialUnderWindowBackground;
+		sBlur.state = NSVisualEffectStateActive;
+		// Under the frames, which draw the background over it.
+		[view addSubview:sBlur positioned:NSWindowBelow relativeTo:nil];
+		if (view.window != nil)
+			round_corners(view.window);
+	}
+}
 
 void
 temino_titlebar(void* view_handle, double height)

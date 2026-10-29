@@ -36,6 +36,8 @@ extern "C" {
     fn temino_metal_attach(view: *mut std::ffi::c_void);
     /// Makes the title bar `height` points tall, traffic lights centered.
     fn temino_titlebar(view: *mut std::ffi::c_void, height: f64);
+    /// Blurs what shows through the background, within the rounded corners.
+    fn temino_blur(view: *mut std::ffi::c_void, on: bool);
     fn temino_hotkey(keycode: u32, modifiers: u32);
     fn temino_toggle_window();
     fn temino_emoji(
@@ -760,6 +762,7 @@ impl ApplicationHandler<Request> for Handler {
             }
         };
         window.set_cursor(CursorIcon::Text);
+        #[cfg(not(target_os = "macos"))]
         window.set_blur(BLUR.load(Ordering::Acquire));
         #[cfg(target_os = "macos")]
         menu::install();
@@ -771,6 +774,7 @@ impl ApplicationHandler<Request> for Handler {
                 unsafe {
                     temino_metal_attach(handle.ns_view.as_ptr());
                     temino_titlebar(handle.ns_view.as_ptr(), TITLEBAR as f64);
+                    temino_blur(handle.ns_view.as_ptr(), BLUR.load(Ordering::Acquire));
                     temino_viewer_init(handle.ns_view.as_ptr(), viewer_event);
                 }
                 self.on_layer = true;
@@ -817,7 +821,15 @@ impl ApplicationHandler<Request> for Handler {
             }
             Request::Blur(on) => {
                 if let Some(window) = &self.window {
+                    #[cfg(not(target_os = "macos"))]
                     window.set_blur(on);
+                    #[cfg(target_os = "macos")]
+                    {
+                        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                        if let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) {
+                            unsafe { temino_blur(handle.ns_view.as_ptr(), on) };
+                        }
+                    }
                 }
             }
             #[cfg(target_os = "macos")]
