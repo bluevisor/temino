@@ -1,238 +1,312 @@
-"""Writes Temino's Haiku vector icon (HVIF) and the resource file around it.
+"""Converts Temino's icon (docs/icon.svg) to a Haiku vector icon (HVIF).
 
-usage: python3 -I haiku/mkicon.py [--preview out.ppm] [--png docs/icon.png]
-       (rewrites haiku/Temino.rdef and haiku/temino.hvif; --png renders the
+usage: uv run --with skia-python --with svgelements python -I haiku/mkicon.py
+           [--preview out.png] [--png docs/icon.png]
+       (rewrites haiku/Temino.rdef and haiku/temino.hvif; --preview renders
+       the HVIF shapes back on gray, --png renders the SVG itself as the
        transparent 1024 px icon the macOS bundle is built from)
 
-The icon (John's design, 2026-10-25): a chunky silver terminal screen seen
-slightly from the left, with a blue side and a yellow tab on top, and a
-cream ">_" prompt on the dark screen. It was traced from a 1254 px drawing,
-so shapes are written in that drawing's pixels and scaled onto the 64x64
-HVIF grid. Rounded corners are sampled curves; every shape is a polygon.
+The icon (John's design, 2026-10-29) is a chunky silver terminal screen seen
+from the right, a blue side and a yellow tab, with a cream ">_" prompt. HVIF
+has fills and linear/radial gradients but no filters, masks or clipping, so:
+blurred and masked elements (soft glows, invisible at icon sizes) are left
+out, clip paths are applied by intersecting geometry, and strokes become
+filled outlines. Every shape ends up as cubic curves on the 64x64 HVIF grid.
 """
 import math
 import os
+import re
 import struct
 import sys
-import zlib
+import xml.etree.ElementTree as ET
 
-SOURCE = 1254.0
+import skia
+import svgelements
+
+SVG = "{http://www.w3.org/2000/svg}"
+SCALE = 64.0 / 1254.0
+INHERITED = ("fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+             "stroke-miterlimit", "fill-opacity", "stroke-opacity", "fill-rule")
+
+here = os.path.dirname(os.path.abspath(__file__))
+root = ET.parse(os.path.join(here, "..", "docs", "icon.svg")).getroot()
+ids = {el.get("id"): el for el in root.iter() if el.get("id")}
 
 
-def rounded(points, radius, steps=5):
-    """Rounds every corner of a polygon (radius in source pixels)."""
+def parse_color(text):
+    text = text.strip()
+    if text.startswith("#"):
+        h = text[1:]
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    c = svgelements.Color(text)
+    return (c.red, c.green, c.blue)
+
+
+def ref(text):
+    m = re.match(r"url\(#(.+)\)", text or "")
+    return ids[m.group(1)] if m else None
+
+
+def outline(el):
+    """The element's geometry as a skia path (no transforms in this SVG)."""
+    tag = el.tag[len(SVG):]
+    if tag == "rect":
+        x, y, w, h = (float(el.get(k)) for k in ("x", "y", "width", "height"))
+        return skia.Path().addRect(skia.Rect.MakeXYWH(x, y, w, h))
+    if tag == "ellipse":
+        cx, cy, rx, ry = (float(el.get(k)) for k in ("cx", "cy", "rx", "ry"))
+        return skia.Path().addOval(skia.Rect.MakeLTRB(cx - rx, cy - ry, cx + rx, cy + ry))
+    path = skia.Path()
+    for seg in svgelements.Path(el.get("d")):
+        if isinstance(seg, svgelements.Move):
+            path.moveTo(seg.end.x, seg.end.y)
+        elif isinstance(seg, svgelements.Close):
+            path.close()
+        elif isinstance(seg, svgelements.Line):
+            path.lineTo(seg.end.x, seg.end.y)
+        elif isinstance(seg, svgelements.QuadraticBezier):
+            path.quadTo(seg.control.x, seg.control.y, seg.end.x, seg.end.y)
+        elif isinstance(seg, svgelements.CubicBezier):
+            path.cubicTo(seg.control1.x, seg.control1.y, seg.control2.x, seg.control2.y,
+                         seg.end.x, seg.end.y)
+        elif isinstance(seg, svgelements.Arc):
+            for c in seg.as_cubic_curves():
+                path.cubicTo(c.control1.x, c.control1.y, c.control2.x, c.control2.y,
+                             c.end.x, c.end.y)
+    return path
+
+
+def stroked(path, attrs):
+    paint = skia.Paint(Style=skia.Paint.kStroke_Style,
+                       StrokeWidth=float(attrs.get("stroke-width", "1")))
+    paint.setStrokeCap({"round": skia.Paint.kRound_Cap, "square": skia.Paint.kSquare_Cap}
+                       .get(attrs.get("stroke-linecap"), skia.Paint.kButt_Cap))
+    paint.setStrokeJoin({"round": skia.Paint.kRound_Join, "bevel": skia.Paint.kBevel_Join}
+                        .get(attrs.get("stroke-linejoin"), skia.Paint.kMiter_Join))
+    paint.setStrokeMiter(float(attrs.get("stroke-miterlimit", "4")))
+    out = skia.Path()
+    paint.getFillPath(path, out)
+    return out
+
+
+def paint_style(paint, alpha):
+    """An HVIF style for a fill: ("solid", rgba) or ("gradient", ...)."""
+    grad = ref(paint)
+    if grad is None:
+        return ("solid", parse_color(paint) + (round(255 * alpha),))
+    get = grad.get
+    assert get("gradientUnits") == "userSpaceOnUse" and not get("gradientTransform")
     out = []
-    n = len(points)
-    for i in range(n):
-        ax, ay = points[i - 1]
-        px, py = points[i]
-        bx, by = points[(i + 1) % n]
-        r = radius[i] if isinstance(radius, (list, tuple)) else radius
-        la = math.hypot(ax - px, ay - py)
-        lb = math.hypot(bx - px, by - py)
-        r = min(r, la / 2, lb / 2)
-        if r <= 0:
-            out.append((px, py))
+    for stop in grad.iter(SVG + "stop"):
+        style = dict(kv.split(":") for kv in (stop.get("style") or "").split(";") if ":" in kv)
+        off = stop.get("offset", "0")
+        off = float(off[:-1]) / 100 if off.endswith("%") else float(off)
+        color = parse_color(style.get("stop-color", stop.get("stop-color", "#000")))
+        a = float(style.get("stop-opacity", stop.get("stop-opacity", "1")))
+        out.append((round(255 * min(max(off, 0), 1)), color + (round(255 * a * alpha),)))
+    if grad.tag == SVG + "linearGradient":
+        x1, y1, x2, y2 = (float(get(k)) * SCALE for k in ("x1", "y1", "x2", "y2"))
+        # HVIF's linear gradient runs along x from -64 to 64.
+        dx, dy = (x2 - x1) / 128, (y2 - y1) / 128
+        matrix = (dx, dy, -dy, dx, (x1 + x2) / 2, (y1 + y2) / 2)
+        return ("gradient", 0, matrix, tuple(out))
+    cx, cy, r = (float(get(k)) * SCALE for k in ("cx", "cy", "r"))
+    # HVIF's circular gradient has radius 64 around the origin.
+    return ("gradient", 1, (r / 64, 0, 0, r / 64, cx, cy), tuple(out))
+
+
+def walk(el, attrs, alpha, clip, out):
+    attrs = dict(attrs)
+    for k in INHERITED:
+        if el.get(k) is not None:
+            attrs[k] = el.get(k)
+    alpha *= float(el.get("opacity", "1"))
+    if el.get("filter") or el.get("mask"):
+        return
+    if el.get("clip-path"):
+        c = skia.Path()
+        for child in ref(el.get("clip-path")):
+            c = skia.Op(c, outline(child), skia.PathOp.kUnion_PathOp)
+        clip = c if clip is None else skia.Op(clip, c, skia.PathOp.kIntersect_PathOp)
+    tag = el.tag[len(SVG):]
+    if tag in ("g", "svg"):
+        for child in el:
+            walk(child, attrs, alpha, clip, out)
+        return
+    if tag not in ("path", "rect", "ellipse"):
+        return
+    path = outline(el)
+    if attrs.get("fill-rule") == "evenodd":
+        path.setFillType(skia.PathFillType.kEvenOdd)
+    layers = []
+    if attrs.get("fill", "#000") != "none":
+        layers.append((path, attrs.get("fill", "#000"), float(attrs.get("fill-opacity", "1"))))
+    if attrs.get("stroke", "none") != "none":
+        layers.append((stroked(path, attrs), attrs["stroke"],
+                       float(attrs.get("stroke-opacity", "1"))))
+    for geometry, paint, opacity in layers:
+        if clip is not None:
+            geometry = skia.Op(geometry, clip, skia.PathOp.kIntersect_PathOp)
+        # Non-overlapping contours fill the same under even-odd and non-zero.
+        geometry = skia.Simplify(geometry)
+        if geometry.isEmpty():
             continue
-        p1 = (px + (ax - px) * r / la, py + (ay - py) * r / la)
-        p2 = (px + (bx - px) * r / lb, py + (by - py) * r / lb)
-        for s in range(steps + 1):
-            t = s / steps
-            # Quadratic Bezier with the corner as control point.
-            x = (1 - t) ** 2 * p1[0] + 2 * (1 - t) * t * px + t * t * p2[0]
-            y = (1 - t) ** 2 * p1[1] + 2 * (1 - t) * t * py + t * t * p2[1]
-            out.append((x, y))
-    return out
+        out.append((paint_style(paint, alpha * opacity), geometry))
 
 
-def inset(points, amount):
-    """Moves each vertex toward the polygon's centroid (cheap inset)."""
-    cx = sum(p[0] for p in points) / len(points)
-    cy = sum(p[1] for p in points) / len(points)
+def contours(path):
+    """Splits a path into closed contours of HVIF vertices (point, in, out)."""
+    result, verts = [], []
+    path = skia.Path(path)
+    path.transform(skia.Matrix.Scale(SCALE, SCALE))
+    it = skia.Path.Iter(path, False)
+
+    def cubic(c1, c2, end):
+        verts[-1][2] = c1
+        verts.append([end, c2, end])
+
+    def quad(a, b, c):
+        cubic((a[0] + 2 / 3 * (b[0] - a[0]), a[1] + 2 / 3 * (b[1] - a[1])),
+              (c[0] + 2 / 3 * (b[0] - c[0]), c[1] + 2 / 3 * (b[1] - c[1])), c)
+
+    while True:
+        verb, pts = it.next()
+        p = [(q.x(), q.y()) for q in pts]
+        if verb == skia.Path.Verb.kDone_Verb:
+            break
+        if verb == skia.Path.Verb.kMove_Verb:
+            verts = [[p[0], p[0], p[0]]]
+            result.append(verts)
+        elif verb == skia.Path.Verb.kLine_Verb:
+            verts.append([p[1], p[1], p[1]])
+        elif verb == skia.Path.Verb.kQuad_Verb:
+            quad(*p)
+        elif verb == skia.Path.Verb.kConic_Verb:
+            q = [(v.x(), v.y()) for v in
+                 skia.Path.ConvertConicToQuads(*pts, it.conicWeight(), 2)]
+            for i in range(0, len(q) - 2, 2):
+                quad(q[i], q[i + 1], q[i + 2])
+        elif verb == skia.Path.Verb.kCubic_Verb:
+            cubic(p[1], p[2], p[3])
     out = []
-    for x, y in points:
-        d = math.hypot(x - cx, y - cy)
-        out.append((x + (cx - x) * amount / d, y + (cy - y) * amount / d))
+    for verts in result:
+        # The closing vertex repeats the first: fold its "in" into the first.
+        if len(verts) > 1 and math.dist(verts[-1][0], verts[0][0]) < 1e-6:
+            verts[0][1] = verts.pop()[1]
+        if len(verts) >= 2:
+            out.append(verts)
     return out
-
-
-def offset(points, dx, dy):
-    return [(x + dx, y + dy) for x, y in points]
-
-
-colors = {
-    "shadow": (0x00, 0x00, 0x00, 0x48),
-    "blue_dark": (0x0f, 0x3d, 0xb8, 0xff),
-    "blue": (0x1e, 0x5c, 0xe6, 0xff),
-    "blue_light": (0x4a, 0x86, 0xff, 0xff),
-    "tab_front": (0xe0, 0x9c, 0x00, 0xff),
-    "tab": (0xff, 0xc8, 0x1e, 0xff),
-    "tab_light": (0xff, 0xe2, 0x6a, 0xff),
-    "depth": (0x5f, 0x64, 0x6d, 0xff),
-    "frame_dark": (0x8e, 0x93, 0x9c, 0xff),
-    "frame": (0xc4, 0xc8, 0xce, 0xff),
-    "frame_light": (0xec, 0xee, 0xf1, 0xff),
-    "bezel": (0x15, 0x18, 0x1d, 0xff),
-    "screen": (0x28, 0x2c, 0x33, 0xff),
-    "prompt": (0xf8, 0xf3, 0xe4, 0xff),
-}
-
-# The frame's outer outline, then the screen inside it.
-FRAME = [(272, 420), (1092, 238), (1104, 888), (282, 1104)]
-SCREEN = [(356, 527), (1040, 352), (1042, 858), (362, 1028)]
-
-shapes = [
-    ("shadow", rounded(offset(FRAME, 18, 34), 70)),
-    # Blue side slab, darker toward the back.
-    ("blue_dark", rounded([(150, 382), (282, 430), (290, 1104), (160, 1030)], [30, 10, 40, 40])),
-    ("blue", rounded([(178, 392), (282, 430), (290, 1104), (190, 1050)], [20, 10, 40, 30])),
-    ("blue_light", [(250, 418), (280, 430), (286, 1060), (256, 1045)]),
-    # Yellow tab: front face, top face, highlight.
-    ("tab_front", rounded([(166, 362), (575, 300), (578, 352), (272, 440), (176, 398)], [20, 12, 20, 10, 30])),
-    ("tab", rounded([(166, 362), (198, 290), (300, 220), (470, 180), (560, 186), (576, 214),
-                     (576, 316), (282, 398), (180, 370)], [10, 50, 80, 60, 40, 30, 12, 20, 20])),
-    ("tab_light", rounded([(214, 300), (300, 240), (468, 200), (540, 202), (520, 226),
-                           (300, 268), (226, 318)], 18)),
-    # Silver frame: depth behind, then face, top highlight, lower shade.
-    ("depth", rounded(offset(FRAME, 14, 20), 70)),
-    ("frame_dark", rounded(FRAME, 70)),
-    ("frame", rounded(inset(FRAME, 14), 60)),
-    ("frame_light", rounded([(300, 432), (1078, 258), (1082, 300), (306, 478)], 30)),
-    ("frame_dark", rounded([(310, 1056), (1080, 852), (1082, 872), (300, 1086)], 16)),
-    # Screen with a dark bezel line.
-    ("bezel", rounded(SCREEN, 40)),
-    ("screen", rounded(inset(SCREEN, 10), 32)),
-    # The ">_" prompt.
-    ("prompt", rounded([(526, 608), (576, 596), (694, 704), (582, 838), (530, 850), (642, 716)], 10)),
-    ("prompt", rounded([(698, 772), (822, 740), (824, 786), (700, 820)], 6)),
-]
-
-
-def to_grid(points):
-    return [(x * 64.0 / SOURCE, y * 64.0 / SOURCE) for x, y in points]
 
 
 def coord(v):
     n = round((v + 128.0) * 102.0)
+    assert 0 <= n < 0x8000, v
     return bytes([0x80 | (n >> 8), n & 0xff])
 
 
-def hvif():
-    names = list(colors)
-    out = bytearray(b"ncif")
-    out.append(len(names))
-    for name in names:
-        out += bytes([0x01, *colors[name]])          # solid color style
-    out.append(len(shapes))
-    for _, points in shapes:
-        points = to_grid(points)
-        assert len(points) < 256
-        out += bytes([0x0a, len(points)])           # closed path, no curves
-        for x, y in points:
-            out += coord(x) + coord(y)
-    out.append(len(shapes))
-    for i, (style, _) in enumerate(shapes):
-        out += bytes([0x0a, names.index(style), 1, i, 0x00])
+def float24(v):
+    if v == 0:
+        return bytes(3)
+    bits = struct.unpack(">I", struct.pack(">f", v))[0]
+    exponent = ((bits >> 23) & 0xff) - 127 + 32
+    assert 0 < exponent < 64, v
+    value = (bits >> 31) << 23 | exponent << 17 | (bits & 0x7fffff) >> 6
+    return value.to_bytes(3, "big")
+
+
+def style_bytes(style):
+    if style[0] == "solid":
+        return bytes([0x01, *style[1]])                 # solid color
+    _, kind, matrix, stops = style
+    out = bytearray([0x02, kind, 0x02, len(stops)])     # gradient, has transform
+    for v in matrix:
+        out += float24(v)
+    for offset, rgba in stops:
+        out += bytes([offset, *rgba])
     return bytes(out)
 
 
-def preview(path, size=256, samples=4):
-    """Rasterizes the shapes (even-odd, supersampled) to a PPM on gray."""
-    scale = size * samples / SOURCE
-    big = size * samples
-    pixels = [[(0x6f, 0x8f, 0xb8)] * size for _ in range(size)]
-    acc = [[[0.0, 0.0, 0.0] for _ in range(size)] for _ in range(size)]
-    base = (0x6f, 0x8f, 0xb8)
-    for y in range(size):
-        for x in range(size):
-            acc[y][x] = [base[0] * samples * samples, base[1] * samples * samples, base[2] * samples * samples]
-    # Paint shape by shape into a supersampled color buffer, row by row.
-    buffer = [[base] * big for _ in range(big)]
-    for style, points in shapes:
-        r, g, b, a = colors[style]
-        alpha = a / 255.0
-        pts = [(x * scale, y * scale) for x, y in points]
-        for sy in range(big):
-            fy = sy + 0.5
-            xs = []
-            for i in range(len(pts)):
-                x1, y1 = pts[i - 1]
-                x2, y2 = pts[i]
-                if (y1 <= fy < y2) or (y2 <= fy < y1):
-                    xs.append(x1 + (fy - y1) * (x2 - x1) / (y2 - y1))
-            xs.sort()
-            row = buffer[sy]
-            for j in range(0, len(xs) - 1, 2):
-                for sx in range(max(0, int(xs[j] + 0.5)), min(big, int(xs[j + 1] + 0.5))):
-                    pr, pg, pb = row[sx]
-                    row[sx] = (pr + (r - pr) * alpha, pg + (g - pg) * alpha, pb + (b - pb) * alpha)
-    with open(path, "wb") as f:
-        f.write(b"P6 %d %d 255\n" % (size, size))
-        for y in range(size):
-            for x in range(size):
-                tr = tg = tb = 0.0
-                for dy in range(samples):
-                    for dx in range(samples):
-                        pr, pg, pb = buffer[y * samples + dy][x * samples + dx]
-                        tr += pr; tg += pg; tb += pb
-                n = samples * samples
-                f.write(bytes([int(tr / n), int(tg / n), int(tb / n)]))
+def hvif(items):
+    styles, paths, shapes = [], [], []
+    for style, geometry in items:
+        if style not in styles:
+            styles.append(style)
+        first = len(paths)
+        for verts in contours(geometry):
+            assert len(verts) < 256
+            paths.append(verts)
+        shapes.append((styles.index(style), list(range(first, len(paths)))))
+    assert len(styles) < 256 and len(paths) < 256 and len(shapes) < 256
+    out = bytearray(b"ncif")
+    out.append(len(styles))
+    for style in styles:
+        out += style_bytes(style)
+    out.append(len(paths))
+    for verts in paths:
+        out += bytes([0x02, len(verts)])                # closed, with curves
+        for point in verts:
+            for x, y in point:
+                out += coord(x) + coord(y)
+    out.append(len(shapes))
+    for style, members in shapes:
+        out += bytes([0x0a, style, len(members), *members, 0x00])
+    print(f"{len(styles)} styles, {len(paths)} paths, {len(shapes)} shapes")
+    return bytes(out)
 
 
-def png(path, size=1024, samples=2):
-    """Rasterizes the shapes (even-odd, supersampled) to a transparent PNG."""
-    scale = size * samples / SOURCE
-    big = size * samples
-    # Premultiplied RGBA, painted shape by shape with "over".
-    buffer = [[(0.0, 0.0, 0.0, 0.0)] * big for _ in range(big)]
-    for style, points in shapes:
-        r, g, b, a = colors[style]
-        alpha = a / 255.0
-        src = (r * alpha, g * alpha, b * alpha, alpha)
-        keep = 1.0 - alpha
-        pts = [(x * scale, y * scale) for x, y in points]
-        for sy in range(big):
-            fy = sy + 0.5
-            xs = []
-            for i in range(len(pts)):
-                x1, y1 = pts[i - 1]
-                x2, y2 = pts[i]
-                if (y1 <= fy < y2) or (y2 <= fy < y1):
-                    xs.append(x1 + (fy - y1) * (x2 - x1) / (y2 - y1))
-            xs.sort()
-            row = buffer[sy]
-            for j in range(0, len(xs) - 1, 2):
-                for sx in range(max(0, int(xs[j] + 0.5)), min(big, int(xs[j + 1] + 0.5))):
-                    d = row[sx]
-                    row[sx] = (src[0] + d[0] * keep, src[1] + d[1] * keep,
-                               src[2] + d[2] * keep, src[3] + d[3] * keep)
-    raw = bytearray()
-    n = samples * samples
-    for y in range(size):
-        raw.append(0)
-        for x in range(size):
-            tr = tg = tb = ta = 0.0
-            for dy in range(samples):
-                row = buffer[y * samples + dy]
-                for dx in range(samples):
-                    pr, pg, pb, pa = row[x * samples + dx]
-                    tr += pr; tg += pg; tb += pb; ta += pa
-            if ta:
-                raw += bytes([round(tr / ta), round(tg / ta), round(tb / ta), round(ta / n * 255)])
+def preview(items, path, size=512):
+    """Draws the converted shapes the way HVIF will, as a check."""
+    surface = skia.Surface(size, size)
+    canvas = surface.getCanvas()
+    canvas.clear(skia.Color(0x6f, 0x8f, 0xb8))
+    s = size / 64.0
+    for style, geometry in items:
+        paint = skia.Paint(AntiAlias=True)
+        if style[0] == "solid":
+            r, g, b, a = style[1]
+            paint.setColor(skia.Color(r, g, b, a))
+        else:
+            _, kind, (a, b, c, d, tx, ty), stops = style
+            colors = [skia.Color(r, g, bl, al) for _, (r, g, bl, al) in stops]
+            positions = [o / 255 for o, _ in stops]
+            m = skia.Matrix.MakeAll(a, c, tx, b, d, ty, 0, 0, 1)
+            if kind == 0:
+                shader = skia.GradientShader.MakeLinear([(-64, 0), (64, 0)], colors, positions,
+                                                        skia.TileMode.kClamp, 0, m)
             else:
-                raw += bytes(4)
+                shader = skia.GradientShader.MakeRadial((0, 0), 64, colors, positions,
+                                                        skia.TileMode.kClamp, 0, m)
+            paint.setShader(shader)
+        p = skia.Path()
+        for verts in contours(geometry):
+            p.moveTo(*verts[0][0])
+            for i in range(1, len(verts) + 1):
+                a, b = verts[i - 1], verts[i % len(verts)]
+                p.cubicTo(*a[2], *b[1], *b[0])
+            p.close()
+        canvas.save()
+        canvas.scale(s, s)
+        canvas.drawPath(p, paint)
+        canvas.restore()
+    surface.makeImageSnapshot().save(path, skia.kPNG)
 
-    def chunk(kind, body):
-        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
-    with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n")
-        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)))
-        f.write(chunk(b"IDAT", zlib.compress(bytes(raw), 9)))
-        f.write(chunk(b"IEND", b""))
+
+def png(path, size=1024):
+    with open(os.path.join(here, "..", "docs", "icon.svg"), "rb") as f:
+        dom = skia.SVGDOM.MakeFromStream(skia.MemoryStream(f.read()))
+    surface = skia.Surface(size, size)
+    canvas = surface.getCanvas()
+    canvas.clear(skia.ColorTRANSPARENT)
+    canvas.scale(size / 1254.0, size / 1254.0)
+    dom.render(canvas)
+    surface.makeImageSnapshot().save(path, skia.kPNG)
 
 
-data = hvif()
-here = os.path.dirname(os.path.abspath(__file__))
+items = []
+walk(root, {}, 1.0, None, items)
+data = hvif(items)
 hexdata = data.hex()
 lines = "\n".join(f'\t$"{hexdata[i:i + 64]}"' for i in range(0, len(hexdata), 64))
 rdef = f'''// Generated by haiku/mkicon.py; edit that, not this.
@@ -258,7 +332,7 @@ resource vector_icon array {{
 open(os.path.join(here, "Temino.rdef"), "w").write(rdef)
 open(os.path.join(here, "temino.hvif"), "wb").write(data)
 if "--preview" in sys.argv:
-    preview(sys.argv[sys.argv.index("--preview") + 1])
+    preview(items, sys.argv[sys.argv.index("--preview") + 1])
 if "--png" in sys.argv:
     png(sys.argv[sys.argv.index("--png") + 1])
 print(len(data), "bytes")
