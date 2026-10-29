@@ -309,6 +309,8 @@ pub struct App {
     panes: Vec<Pane>,
     tabs: Vec<Tab>,
     active: usize,
+    /// The pane focused before this one, for Command+` with nothing waiting.
+    last_focus: Option<u64>,
     strip: TabStrip,
     /// The sidebar's width when not compact, and whether it is compact;
     /// or extended, its rows grown to say what each pane is doing.
@@ -558,6 +560,7 @@ impl App {
             panes: Vec::new(),
             tabs: Vec::new(),
             active: 0,
+            last_focus: None,
             strip: match std::env::var("TEMINO_TABS").ok().or_else(|| crate::setting("tabs")).as_deref() {
                 Some("top") => TabStrip::Top,
                 _ => TabStrip::Left,
@@ -850,6 +853,9 @@ impl App {
         if before == after {
             return;
         }
+        if before.is_some() {
+            self.last_focus = before;
+        }
         let now = Instant::now();
         self.ctx.blink_epoch = now;
         let window = self.focused;
@@ -874,6 +880,41 @@ impl App {
         let at = leaves.iter().position(|&id| id == tab.focus).unwrap_or(0) as i32;
         let next = leaves[(at + delta).rem_euclid(leaves.len() as i32) as usize];
         self.set_focus(next);
+    }
+
+    /// Command+`: the pane whose agent has waited on you longest, else the
+    /// one longest done with a turn you haven't seen; with Shift, the
+    /// newest. With nothing to see, back to the pane you were in before.
+    fn jump_to_needs(&mut self, newest: bool) {
+        let focus = self.focused_id();
+        let mut needs: Vec<(AgentState, Instant, u64)> = self
+            .panes
+            .iter()
+            .filter(|pane| Some(pane.id) != focus)
+            .filter_map(|pane| pane.needs_since.map(|(state, at)| (state, at, pane.id)))
+            .collect();
+        needs.sort_by(|a, b| b.0.cmp(&a.0).then(if newest { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) }));
+        let back = self.last_focus.filter(|id| Some(*id) != focus && self.panes.iter().any(|pane| pane.id == *id));
+        match needs.first().map(|need| need.2).or(back) {
+            Some(id) => self.reveal_pane(id),
+            None => self.ctx.show_toast("Nothing needs you"),
+        }
+    }
+
+    /// Focuses pane `id`, in whichever tab it's in.
+    fn reveal_pane(&mut self, id: u64) {
+        let Some(index) = self.tabs.iter().position(|tab| {
+            let mut leaves = Vec::new();
+            tab.root.leaves(&mut leaves);
+            leaves.contains(&id)
+        }) else {
+            return;
+        };
+        let before = self.focused_id();
+        self.active = index;
+        self.tabs[index].focus = id;
+        self.relayout();
+        self.focus_moved(before);
     }
 
     /// Moves focus to the nearest pane in a direction (Command+Option+arrow).
@@ -1470,6 +1511,10 @@ impl App {
                 }
                 (_, Some(']')) => {
                     self.cycle_focus(1);
+                    true
+                }
+                (_, Some('`' | '~')) => {
+                    self.jump_to_needs(key.shift());
                     true
                 }
                 (_, Some(c @ '1'..='9')) => {
@@ -2178,6 +2223,13 @@ impl App {
                         let state = pane.agent(now);
                         moved |= state.is_some() != pane.agent_now.is_some();
                         pane.agent_now = state;
+                        pane.needs_since = match state {
+                            Some(need @ (AgentState::Waiting | AgentState::Done)) => match pane.needs_since {
+                                Some((was, at)) if was == need => Some((was, at)),
+                                _ => Some((need, now)),
+                            },
+                            _ => None,
+                        };
                         let program = pane.header_program();
                         moved |= program.is_some() != pane.program_now.is_some();
                         pane.program_now = program;

@@ -66,6 +66,7 @@ macOS, Ctrl+Shift (or Super) on Linux.
 | Cmd+D / Cmd+E | split the pane right / down |
 | Cmd+W, Cmd+Q | close the pane (its tab with its last pane), quit |
 | Cmd+[ / Cmd+], Cmd+Option+arrows | previous / next pane, the pane in that direction |
+| Cmd+\` / Cmd+Shift+\` | the agent waiting on you longest / most recently; with none, the pane you were in before |
 | Cmd+Enter | zoom the pane to the whole tab, and back |
 | Cmd+1…8, Cmd+9 | a tab, the last tab |
 | Cmd+B | hide / show the tab list |
