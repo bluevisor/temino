@@ -34,6 +34,8 @@ use crate::Msg;
 extern "C" {
     /// Gives the view the Metal layer that src/metal.rs renders into.
     fn temino_metal_attach(view: *mut std::ffi::c_void);
+    /// Makes the title bar `height` points tall, traffic lights centered.
+    fn temino_titlebar(view: *mut std::ffi::c_void, height: f64);
     fn temino_emoji(
         text: *const std::ffi::c_char,
         size: f32,
@@ -279,6 +281,10 @@ pub fn present(pixels: &[u8], width: u32, height: u32) {
     }
 }
 
+/// The title bar Temino draws over the top of the window, in points: as
+/// tall as Chrome's tab strip. Elsewhere the window manager draws one.
+pub const TITLEBAR: f32 = if cfg!(target_os = "macos") { 40.0 } else { 0.0 };
+
 pub fn set_title(title: &str) {
     request(Request::Title(title.replace('\0', "")));
 }
@@ -424,6 +430,15 @@ pub fn wait(pid: i32) -> i32 {
 
 pub fn hangup(pid: i32) {
     unsafe { libc::kill(pid, libc::SIGHUP) };
+}
+
+/// The process group in front on the terminal `master`: the running job.
+pub fn foreground_group(master: i32) -> i32 {
+    unsafe { libc::tcgetpgrp(master) }
+}
+
+pub fn process_group(pid: i32) -> i32 {
+    unsafe { libc::getpgid(pid) }
 }
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -596,6 +611,14 @@ impl ApplicationHandler<Request> for Handler {
             .with_inner_size(LogicalSize::new(self.size.0, self.size.1))
             // Settings ▸ Background Opacity lets the desktop show through.
             .with_transparent(cfg!(target_os = "macos"));
+        // The window's content runs up under the title bar, which Temino
+        // draws itself at TITLEBAR points.
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attributes =
+                attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true);
+        }
         if let Some((x, y, width, height)) = saved_frame() {
             attributes =
                 attributes.with_position(LogicalPosition::new(x, y)).with_inner_size(LogicalSize::new(width, height));
@@ -617,7 +640,10 @@ impl ApplicationHandler<Request> for Handler {
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) {
-                unsafe { temino_metal_attach(handle.ns_view.as_ptr()) };
+                unsafe {
+                    temino_metal_attach(handle.ns_view.as_ptr());
+                    temino_titlebar(handle.ns_view.as_ptr(), TITLEBAR as f64);
+                }
                 self.on_layer = true;
                 self.window = Some(window);
                 self.send_size();

@@ -14,7 +14,9 @@ mod gpu;
 #[path = "metal.rs"]
 mod gpu;
 mod graphemes;
+mod json;
 mod keys;
+mod llm;
 mod pane;
 mod platform;
 mod scene;

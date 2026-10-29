@@ -485,6 +485,61 @@ temino_metal_attach(void* view_handle)
 }
 
 
+// MARK: Title bar
+
+// The title bar is as tall as a browser's tab strip: the window's content
+// runs up under a transparent bar that Temino draws itself, and the
+// traffic lights are centered in it. AppKit lays them back out at the
+// standard height whenever the window resizes, so they're placed again.
+static CGFloat sTitlebarHeight = 0;
+
+static void
+place_traffic_lights(NSWindow* window)
+{
+	NSButton* close = [window standardWindowButton:NSWindowCloseButton];
+	NSView* bar = close.superview;
+	NSView* container = bar.superview;
+	if (container == nil || sTitlebarHeight <= 0
+		|| (window.styleMask & NSWindowStyleMaskFullScreen) != 0)
+		return;
+	NSRect frame = container.frame;
+	frame.size.height = sTitlebarHeight;
+	frame.origin.y = NSHeight(window.frame) - sTitlebarHeight;
+	container.frame = frame;
+	bar.frame = container.bounds;
+	NSWindowButton kinds[] = {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton};
+	for (int i = 0; i < 3; i++) {
+		NSButton* button = [window standardWindowButton:kinds[i]];
+		NSRect place = button.frame;
+		place.origin.x = 14 + i * 20;
+		place.origin.y = round((sTitlebarHeight - NSHeight(place)) / 2);
+		[button setFrameOrigin:place.origin];
+	}
+}
+
+
+void
+temino_titlebar(void* view_handle, double height)
+{
+	@autoreleasepool {
+		NSWindow* window = ((__bridge NSView*)view_handle).window;
+		if (window == nil)
+			return;
+		sTitlebarHeight = height;
+		place_traffic_lights(window);
+		NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
+		NSArray* names = @[NSWindowDidResizeNotification, NSWindowDidEndLiveResizeNotification,
+			NSWindowDidExitFullScreenNotification, NSWindowDidBecomeKeyNotification,
+			NSWindowDidResignKeyNotification];
+		for (NSNotificationName name in names) {
+			[center addObserverForName:name object:window queue:nil usingBlock:^(NSNotification* note) {
+				place_traffic_lights(note.object);
+			}];
+		}
+	}
+}
+
+
 // Whether frames go straight to the window.
 bool
 temino_metal_on_screen(void)

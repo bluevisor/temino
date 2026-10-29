@@ -720,6 +720,12 @@ impl Session {
         }
     }
 
+    /// The process group running in front: the command's, while one runs.
+    pub fn foreground_group(&self) -> Option<i32> {
+        let group = crate::platform::foreground_group(self.shell.as_ref()?.master);
+        (group > 0).then_some(group)
+    }
+
     pub fn input_at(&self) -> Option<Instant> {
         self.input_at.get()
     }

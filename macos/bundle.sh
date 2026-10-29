@@ -7,6 +7,15 @@
 set -e
 cd "$(dirname "$0")/.."
 version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' macos/Info.plist)
+# Signed ad hoc, macOS ties Screen Recording, Accessibility and the like to
+# that one build's hash: every new build asks again though Settings shows
+# Temino allowed. A certificate keeps the grants across builds:
+# $TEMINO_SIGN, else this Mac's first Developer ID or Apple Development
+# identity, else ad hoc.
+sign=${TEMINO_SIGN:-$(security find-identity -v -p codesigning 2>/dev/null |
+	grep -oE '"(Developer ID Application|Apple Development): [^"]*"' | head -1 | tr -d '"')}
+sign=${sign:--}
+echo "signing as: $sign"
 icons=$(mktemp -d)/Temino.iconset
 mkdir -p "$icons"
 for size in 16 32 64 128 256 512; do
@@ -24,7 +33,7 @@ for arch in arm64 x86_64; do
 	cp target/$target/release/temino "$app/Contents/MacOS/temino"
 	cp macos/Info.plist "$app/Contents/Info.plist"
 	iconutil -c icns "$icons" -o "$app/Contents/Resources/Temino.icns"
-	codesign --force -s - "$app"
+	codesign --force -s "$sign" "$app"
 	mkdir -p target/release
 	dmg=target/release/Temino-$version-macos-$arch.dmg
 	stage=$(mktemp -d)/Temino

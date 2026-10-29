@@ -540,6 +540,28 @@ impl TextSystem {
         pen - x
     }
 
+    /// `line` cut to fit `width`, with an ellipsis where it was cut.
+    pub fn elide(&mut self, line: &str, font: FontId, size: f32, width: f32) -> String {
+        if self.measure(line, font, size) <= width {
+            return line.to_owned();
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let (mut low, mut high) = (0, chars.len());
+        while low < high {
+            let mid = (low + high).div_ceil(2);
+            let candidate: String = chars[..mid].iter().collect::<String>() + "…";
+            if self.measure(&candidate, font, size) <= width {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        if low == 0 {
+            return String::new();
+        }
+        chars[..low].iter().collect::<String>().trim_end().to_owned() + "…"
+    }
+
     pub fn measure(&mut self, text: &str, font: FontId, size: f32) -> f32 {
         let mut width = 0.0;
         for c in text.chars() {

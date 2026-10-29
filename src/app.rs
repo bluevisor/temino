@@ -10,13 +10,14 @@ use crate::complete::Commands;
 use crate::editor::History;
 use crate::gpu::Gpu;
 use crate::keys::Named;
-use crate::pane::{Ctx, Pane};
+use crate::pane::{AgentInfo, Ctx, Pane};
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::settings::{self, Action};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{Color, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
+use crate::ui;
 use crate::update::{self, Release};
 use crate::Msg;
 
@@ -40,6 +41,10 @@ const SIDEBAR_FONT: f32 = 13.5;
 /// An agent waiting on you, and one that finished a turn you haven't seen.
 const AGENT_WAITING: u32 = 0xf0a35e;
 const AGENT_DONE: u32 = 0x8ccf7e;
+/// The bar over a pane with a coding agent in it.
+const AGENT_HEADER: f32 = 26.0;
+/// The extended sidebar's line per pane, under each tab's title.
+const SIDEBAR_LINE: f32 = 18.0;
 
 /// Where the tabs are listed: down the left side (the default) or across
 /// the top (`TEMINO_TABS=top`).
@@ -267,6 +272,17 @@ struct TabView {
     editing: Option<(String, bool)>,
     /// The most urgent state of the agents in the tab's panes.
     agent: Option<AgentState>,
+    /// In the extended sidebar: a line on what each of its panes is doing.
+    lines: Vec<PaneLine>,
+}
+
+/// One pane's line in the extended sidebar.
+struct PaneLine {
+    id: u64,
+    agent: Option<AgentState>,
+    /// Something runs in it.
+    busy: bool,
+    text: String,
 }
 
 enum Pointer {
@@ -294,9 +310,11 @@ pub struct App {
     tabs: Vec<Tab>,
     active: usize,
     strip: TabStrip,
-    /// The sidebar's width when not compact, and whether it is compact.
+    /// The sidebar's width when not compact, and whether it is compact;
+    /// or extended, its rows grown to say what each pane is doing.
     sidebar_width: f32,
     compact: bool,
+    extended: bool,
     /// Command+B's choice to show or hide the tab list; until then it shows
     /// once there is a second tab. Hidden, tabs still switch by key.
     tab_list: Option<bool>,
@@ -322,6 +340,9 @@ pub struct App {
     close_hits: Vec<(Rect, usize)>,
     new_tab_hit: Rect,
     collapse_hit: Rect,
+    extend_hit: Rect,
+    /// The extended sidebar's pane lines and the agent headers, by pane.
+    pane_hits: Vec<(Rect, usize, u64)>,
     more_hits: Vec<(Rect, usize)>,
     menu_hits: Vec<(Rect, MenuAction)>,
     menu_rect: Rect,
@@ -349,6 +370,9 @@ pub struct App {
     update_card: Rect,
     /// Quitting to start the installed update.
     relaunch: bool,
+    /// `TEMINO_RECAP_TEST=<seconds>`: show the focused pane's recap this
+    /// long after launch, as Command+I would, for screenshots.
+    recap_test: Option<Instant>,
 }
 
 pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32) {
@@ -538,6 +562,7 @@ impl App {
                 .unwrap_or(SIDEBAR_WIDTH)
                 .clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             compact: crate::setting("sidebar").as_deref() == Some("compact"),
+            extended: crate::setting("sidebar").as_deref() == Some("extended"),
             tab_list: None,
             next_id: 1,
             window: (width as f32, height as f32),
@@ -556,6 +581,8 @@ impl App {
             close_hits: Vec::new(),
             new_tab_hit: Rect::default(),
             collapse_hit: Rect::default(),
+            extend_hit: Rect::default(),
+            pane_hits: Vec::new(),
             more_hits: Vec::new(),
             menu_hits: Vec::new(),
             menu_rect: Rect::default(),
@@ -575,6 +602,10 @@ impl App {
             update: None,
             update_hits: Vec::new(),
             update_card: Rect::default(),
+            recap_test: std::env::var("TEMINO_RECAP_TEST")
+                .ok()
+                .and_then(|seconds| seconds.parse::<f32>().ok())
+                .map(|seconds| Instant::now() + Duration::from_secs_f32(seconds)),
             relaunch: false,
         };
         app.apply_blur();
@@ -812,13 +843,19 @@ impl App {
         if before == after {
             return;
         }
-        self.ctx.blink_epoch = Instant::now();
+        let now = Instant::now();
+        self.ctx.blink_epoch = now;
         let window = self.focused;
-        if let Some(pane) = before.and_then(|id| self.panes.iter().find(|p| p.id == id)) {
+        let idle = recap_idle();
+        if let Some(pane) = before.and_then(|id| self.panes.iter_mut().find(|p| p.id == id)) {
             pane.focus_changed(false);
+            pane.focus_lost(now);
         }
-        if let Some(pane) = after.and_then(|id| self.panes.iter().find(|p| p.id == id)) {
+        if let Some(pane) = after.and_then(|id| self.panes.iter_mut().find(|p| p.id == id)) {
             pane.focus_changed(window);
+            if window {
+                pane.focus_gained(now, Some(idle));
+            }
         }
     }
 
@@ -866,15 +903,21 @@ impl App {
         self.tab_list.unwrap_or(self.tabs.len() > 1)
     }
 
-    /// The tab list's area; empty while it is hidden.
+    /// How much of the window's top the title bar takes, in zoomed pixels.
+    fn top(&self) -> f32 {
+        platform::TITLEBAR / self.zoom
+    }
+
+    /// The tab list's area, under the title bar; empty while it is hidden.
     fn tab_area(&self) -> Rect {
         if !self.tab_list_visible() {
             return Rect::default();
         }
+        let (top, height) = (self.top(), (self.height - self.top()).max(1.0));
         match self.strip {
-            TabStrip::Left if self.compact => Rect::new(0.0, 0.0, SIDEBAR_COMPACT, self.height),
-            TabStrip::Left => Rect::new(0.0, 0.0, self.sidebar_width.min(self.width / 2.0), self.height),
-            TabStrip::Top => Rect::new(0.0, 0.0, self.width, TAB_BAR_HEIGHT),
+            TabStrip::Left if self.compact => Rect::new(0.0, top, SIDEBAR_COMPACT, height),
+            TabStrip::Left => Rect::new(0.0, top, self.sidebar_width.min(self.width / 2.0), height),
+            TabStrip::Top => Rect::new(0.0, top, self.width, TAB_BAR_HEIGHT),
         }
     }
 
@@ -884,7 +927,7 @@ impl App {
         if self.strip != TabStrip::Left || area.w == 0.0 {
             return Rect::default();
         }
-        Rect::new(area.right() - GRAB, 0.0, 2.0 * GRAB, area.h)
+        Rect::new(area.right() - GRAB, area.y, 2.0 * GRAB, area.h)
     }
 
     fn set_compact(&mut self, compact: bool) {
@@ -893,17 +936,37 @@ impl App {
         self.save_sidebar();
     }
 
+    fn set_extended(&mut self, extended: bool) {
+        self.extended = extended;
+        if extended && self.compact {
+            self.compact = false;
+            self.relayout();
+        }
+        if extended && !self.tab_list_visible() {
+            self.tab_list = Some(true);
+            self.relayout();
+        }
+        self.dirty = true;
+        self.save_sidebar();
+    }
+
     fn save_sidebar(&self) {
-        crate::save_setting("sidebar", if self.compact { "compact" } else { "full" });
+        let mode = match (self.compact, self.extended) {
+            (true, _) => "compact",
+            (false, true) => "extended",
+            (false, false) => "full",
+        };
+        crate::save_setting("sidebar", mode);
         crate::save_setting("sidebar_width", &format!("{}", self.sidebar_width.round()));
     }
 
     fn content_rect(&self) -> Rect {
-        let (width, height) = (self.width, self.height);
+        let (width, top) = (self.width, self.top());
+        let height = (self.height - top).max(1.0);
         let area = self.tab_area();
         match self.strip {
-            TabStrip::Left => Rect::new(area.w, 0.0, (width - area.w).max(1.0), height),
-            TabStrip::Top => Rect::new(0.0, area.h, width, (height - area.h).max(1.0)),
+            TabStrip::Left => Rect::new(area.w, top, (width - area.w).max(1.0), height),
+            TabStrip::Top => Rect::new(0.0, top + area.h, width, (height - area.h).max(1.0)),
         }
     }
 
@@ -916,6 +979,14 @@ impl App {
             panes.push((tab.focus, rect));
         } else {
             tab.root.layout(rect, &mut Vec::new(), &mut panes, &mut dividers);
+        }
+        // A pane with an agent in it gives its top to the agent's header.
+        for (id, rect) in &mut panes {
+            let agent = self.panes.iter().any(|pane| pane.id == *id && pane.agent_now.is_some());
+            if agent && rect.h > 3.0 * AGENT_HEADER {
+                rect.y += AGENT_HEADER;
+                rect.h -= AGENT_HEADER;
+            }
         }
         (panes, dividers)
     }
@@ -1017,11 +1088,21 @@ impl App {
         if self.animation_at.is_some_and(|at| now >= at) {
             self.dirty = true;
         }
+        if self.recap_test.is_some_and(|at| now >= at) {
+            self.recap_test = None;
+            if let Some(id) = self.focused_id() {
+                if let Some(pane) = self.pane(id) {
+                    pane.focus_gained(now, None);
+                }
+            }
+            self.dirty = true;
+        }
     }
 
     fn next_wakeup(&self) -> Option<Instant> {
         let mut times: Vec<Option<Instant>> = self.panes.iter().map(Pane::next_wakeup).collect();
         times.push(self.animation_at);
+        times.push(self.recap_test);
         times.push(self.ctx.toast.as_ref().map(|(_, at)| *at));
         times.into_iter().flatten().min()
     }
@@ -1071,13 +1152,21 @@ impl App {
                 self.set_zoom(self.zoom, false);
             }
             UiEvent::Focus(focused) => {
+                let now = Instant::now();
                 self.focused = focused;
-                self.ctx.blink_epoch = Instant::now();
+                self.ctx.blink_epoch = now;
                 if let Some(id) = self.focused_id() {
-                    if let Some(pane) = self.panes.iter().find(|p| p.id == id) {
+                    if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
                         pane.focus_changed(focused);
+                        // Back from another app counts as coming back to the pane.
+                        if focused {
+                            pane.focus_gained(now, Some(recap_idle()));
+                        } else {
+                            pane.focus_lost(now);
+                        }
                     }
                 }
+                self.dirty = true;
             }
             UiEvent::Close => self.quit(),
             UiEvent::Text(text) => {
@@ -1301,6 +1390,19 @@ impl App {
                     if let Err(error) = self.new_tab() {
                         self.ctx.show_toast(&error);
                     }
+                    true
+                }
+                (_, Some('i')) => {
+                    // "Where was I?" on demand.
+                    if let Some(id) = self.focused_id() {
+                        if let Some(pane) = self.pane(id) {
+                            pane.focus_gained(Instant::now(), None);
+                        }
+                    }
+                    true
+                }
+                (_, Some('b')) if key.shift() => {
+                    self.set_extended(!self.extended);
                     true
                 }
                 (_, Some('b')) => {
@@ -1637,9 +1739,27 @@ impl App {
             self.pointer = Pointer::Sidebar;
             return;
         }
+        if let Some(&(_, tab, id)) = self.pane_hits.iter().find(|(r, _, _)| r.contains(x, y)) {
+            // A pane's line in the extended sidebar, or its agent header:
+            // go to that pane.
+            if tab != self.active {
+                self.switch_tab(tab);
+            }
+            if self.focused_id() != Some(id) {
+                self.set_focus(id);
+            }
+            if self.tab_area().contains(x, y) {
+                self.pointer = Pointer::Tab { index: tab, x, y, dragging: false };
+            }
+            return;
+        }
         if self.tab_area().contains(x, y) {
             if self.collapse_hit.contains(x, y) {
                 self.set_compact(!self.compact);
+                return;
+            }
+            if self.extend_hit.contains(x, y) {
+                self.set_extended(!self.extended);
                 return;
             }
             // Control+click is the secondary click on macOS.
@@ -1862,6 +1982,7 @@ impl App {
         let (width, height) = (self.width, self.height);
         self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.window());
         self.ctx.composing = !self.preedit.is_empty();
+        let agents = self.refresh_agents();
         let focus = self.focused_id();
         let visible = self.visible_panes();
         let several = visible.len() > 1;
@@ -1889,12 +2010,16 @@ impl App {
             }
         }
         self.animation_at = animation;
+        self.wake_for_agents(&agents);
+        self.pane_hits.clear();
+        self.draw_agent_headers(&visible);
         for divider in &self.dividers {
             self.scene.set_layer(LAYER_OVERLAY);
             self.scene.fill(divider.line, self.ctx.theme.divider.mix(self.ctx.theme.text_faint, 0.35));
             self.scene.set_layer(LAYER_CONTENT);
         }
-        self.draw_tab_bar();
+        self.draw_tab_bar(&agents);
+        self.draw_titlebar();
         self.draw_update();
         self.draw_tab_menu();
         self.draw_toast();
@@ -1934,17 +2059,13 @@ impl App {
             .unwrap_or_else(|| self.panes.iter().find(|p| p.id == tab.focus).map(Pane::title).unwrap_or_default())
     }
 
-    fn draw_tab_bar(&mut self) {
-        self.tab_hits.clear();
-        self.close_hits.clear();
-        self.more_hits.clear();
-        self.new_tab_hit = Rect::default();
-        self.collapse_hit = Rect::default();
-        if !self.tab_list_visible() {
-            return;
-        }
+    /// Reads what every pane's agent is doing, once a frame; a pane whose
+    /// agent came or went makes room for its header, or gives it back.
+    /// Returns the most urgent state in each tab.
+    fn refresh_agents(&mut self) -> Vec<Option<AgentState>> {
         let now = Instant::now();
-        let agents: Vec<Option<AgentState>> = (0..self.tabs.len())
+        let mut moved = false;
+        let agents = (0..self.tabs.len())
             .map(|index| {
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
@@ -1955,12 +2076,24 @@ impl App {
                         if seen {
                             pane.agent_unseen = false;
                         }
-                        pane.agent(now)
+                        let state = pane.agent(now);
+                        moved |= state.is_some() != pane.agent_now.is_some();
+                        pane.agent_now = state;
+                        state
                     })
                     .max()
             })
             .collect();
-        // A working agent's ring turns; any agent is read again soon.
+        if moved {
+            self.relayout();
+        }
+        agents
+    }
+
+    /// A working agent's ring turns; any agent is read again soon, and its
+    /// header's clock ticks.
+    fn wake_for_agents(&mut self, agents: &[Option<AgentState>]) {
+        let now = Instant::now();
         let wake = match agents.iter().flatten().max() {
             Some(AgentState::Running | AgentState::Waiting) => Some(now + Duration::from_millis(50)),
             Some(_) => Some(now + Duration::from_millis(400)),
@@ -1969,11 +2102,70 @@ impl App {
         if let Some(at) = wake {
             self.animation_at = Some(self.animation_at.map_or(at, |a| a.min(at)));
         }
+    }
+
+    /// The bar over each pane with an agent: what it's doing and for how
+    /// long, what you last asked it, its subagents and its session.
+    fn draw_agent_headers(&mut self, visible: &[(u64, Rect)]) {
+        let now = Instant::now();
+        let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
+        let focus = self.focused_id();
+        for &(id, rect) in visible {
+            let Some(pane) = self.panes.iter().find(|pane| pane.id == id) else { continue };
+            let Some(info) = pane.agent_info(now) else { continue };
+            if rect.h <= 2.0 * AGENT_HEADER {
+                continue;
+            }
+            let bar = Rect::new(rect.x, rect.y - AGENT_HEADER, rect.w, AGENT_HEADER);
+            let Self { scene, ctx, pane_hits, .. } = self;
+            let Ctx { text, theme, .. } = ctx;
+            draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, t);
+            pane_hits.push((bar, self.active, id));
+        }
+    }
+
+    /// The title bar over the window's top, where the system's would be:
+    /// the sidebar's color across, the title centered. AppKit keeps the
+    /// traffic lights and the dragging; this is only the look.
+    fn draw_titlebar(&mut self) {
+        let top = self.top();
+        if top <= 0.0 {
+            return;
+        }
+        let bar = Rect::new(0.0, 0.0, self.width, top);
+        let Self { scene, ctx, title, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        scene.fill(bar, theme.panel(SURFACE_LIFT / 2.0));
+        scene.fill(Rect::new(0.0, top - 1.0, bar.w, 1.0), theme.divider);
+        // Clear of the traffic lights on the left, centered in what's left.
+        // Fixed in points, like the bar: zoom leaves it alone.
+        let font = 13.0 / self.zoom;
+        let room = (bar.w - 2.0 * 84.0 / self.zoom).max(0.0);
+        let shown = text.elide(title, UI_BOLD, font, room);
+        let w = text.measure(&shown, UI_BOLD, font);
+        let baseline = (top / 2.0 + text.ui_ascent(font) * 0.36).round();
+        text.draw_text(scene, &shown, (bar.w - w) / 2.0, baseline, UI_BOLD, font, theme.text_dim);
+    }
+
+    fn draw_tab_bar(&mut self, agents: &[Option<AgentState>]) {
+        self.tab_hits.clear();
+        self.close_hits.clear();
+        self.more_hits.clear();
+        self.new_tab_hit = Rect::default();
+        self.collapse_hit = Rect::default();
+        self.extend_hit = Rect::default();
+        if !self.tab_list_visible() {
+            return;
+        }
+        let now = Instant::now();
+        let extended = self.extended && !self.compact && self.strip == TabStrip::Left;
         let tabs: Vec<TabView> = (0..self.tabs.len())
             .map(|index| {
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
+                let lines = if extended { self.pane_lines(&leaves, now) } else { Vec::new() };
                 TabView {
+                    lines,
                     agent: agents[index],
                     title: self.tab_title(index),
                     panes: leaves.len(),
@@ -1990,6 +2182,29 @@ impl App {
             TabStrip::Left => self.draw_tab_sidebar(&tabs),
             TabStrip::Top => self.draw_tab_strip(&tabs),
         }
+    }
+
+    /// What each of `leaves` is doing, a line apiece: an agent's state, turn
+    /// and last prompt; a shell's running command, or its folder.
+    fn pane_lines(&self, leaves: &[u64], now: Instant) -> Vec<PaneLine> {
+        leaves
+            .iter()
+            .filter_map(|&id| {
+                if id == SETTINGS {
+                    return Some(PaneLine { id, agent: None, busy: false, text: "Settings".to_owned() });
+                }
+                let pane = self.panes.iter().find(|pane| pane.id == id)?;
+                if let Some(info) = pane.agent_info(now) {
+                    let mut text = agent_summary(&info);
+                    if let Some(prompt) = &info.prompt {
+                        text = format!("{text} · {prompt}");
+                    }
+                    return Some(PaneLine { id, agent: Some(info.state), busy: true, text });
+                }
+                let (busy, text) = pane.activity();
+                Some(PaneLine { id, agent: None, busy, text })
+            })
+            .collect()
     }
 
     /// One tab's row: number, color dot, title (or the rename field), the
@@ -2064,12 +2279,13 @@ impl App {
     fn draw_tab_strip(&mut self, tabs: &[TabView]) {
         let width = self.width;
         let theme = &self.ctx.theme;
-        self.scene.fill(Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), theme.panel(SURFACE_LIFT / 2.0));
-        self.scene.fill(Rect::new(0.0, TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
+        let top = self.top();
+        self.scene.fill(Rect::new(0.0, top, width, TAB_BAR_HEIGHT), theme.panel(SURFACE_LIFT / 2.0));
+        self.scene.fill(Rect::new(0.0, top + TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
         let plus = 34.0;
         let tab_width = ((width - 12.0 - plus) / tabs.len() as f32).min(TAB_MAX_WIDTH);
         for (index, tab) in tabs.iter().enumerate() {
-            let rect = Rect::new(6.0 + index as f32 * tab_width, 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
+            let rect = Rect::new(6.0 + index as f32 * tab_width, top + 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
             if index == self.active {
                 let theme = &self.ctx.theme;
                 self.scene.quad(Quad::new(rect, theme.raised).radius(6.0).border(1.0, theme.divider));
@@ -2084,7 +2300,7 @@ impl App {
         let Self { scene, ctx, new_tab_hit, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         let px = 6.0 + tabs.len() as f32 * tab_width;
-        let plus_rect = Rect::new(px, 5.0, 26.0, TAB_BAR_HEIGHT - 9.0);
+        let plus_rect = Rect::new(px, top + 5.0, 26.0, TAB_BAR_HEIGHT - 9.0);
         let ascent = text.ui_ascent(12.0);
         let baseline = (plus_rect.y + (plus_rect.h + ascent) / 2.0).round();
         text.draw_text(scene, "+", px + 8.0, baseline, UI, 15.0, theme.text_dim);
@@ -2096,13 +2312,13 @@ impl App {
         let area = self.tab_area();
         let theme = &self.ctx.theme;
         self.scene.fill(area, theme.panel(SURFACE_LIFT / 2.0));
-        self.scene.fill(Rect::new(area.right() - 1.0, 0.0, 1.0, area.h), theme.divider);
-        self.scene.push_clip(Rect::new(0.0, 0.0, area.w - 1.0, area.h));
+        self.scene.fill(Rect::new(area.right() - 1.0, area.y, 1.0, area.h), theme.divider);
+        self.scene.push_clip(Rect::new(0.0, area.y, area.w - 1.0, area.h));
         let dragged = match self.pointer {
             Pointer::Tab { index, dragging: true, .. } => Some(index),
             _ => None,
         };
-        let mut y = 8.0;
+        let mut y = area.y + 8.0;
         for (index, tab) in tabs.iter().enumerate() {
             let rect = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
             if self.compact {
@@ -2110,17 +2326,23 @@ impl App {
                 y += SIDEBAR_ROW + 4.0;
                 continue;
             }
+            let extra = if tab.lines.is_empty() { 0.0 } else { tab.lines.len() as f32 * SIDEBAR_LINE + 6.0 };
+            let row = Rect::new(rect.x, rect.y, rect.w, rect.h + extra);
             draw_sidebar_row(
                 &mut self.scene,
                 &self.ctx.theme,
-                rect,
+                row,
                 tab.color,
                 index == self.active,
                 dragged == Some(index),
             );
-            let badge = (tab.panes > 1).then(|| format!("{}", tab.panes));
+            let badge = (tab.panes > 1 && tab.lines.is_empty()).then(|| format!("{}", tab.panes));
             self.draw_tab(index, tab, rect, badge);
-            y += SIDEBAR_ROW + 4.0;
+            if let Some(hit) = self.tab_hits.last_mut() {
+                hit.0 = row;
+            }
+            self.draw_pane_lines(index, tab, Rect::new(rect.x, rect.bottom() - 4.0, rect.w, extra));
+            y += row.h + 4.0;
         }
         let Self { scene, ctx, new_tab_hit, .. } = self;
         let Ctx { text, theme, .. } = ctx;
@@ -2136,7 +2358,7 @@ impl App {
         }
         *new_tab_hit = plus;
         // Collapse to compact, or expand back, from the bottom corner.
-        let collapse = Rect::new(6.0, area.h - 34.0, 28.0, 26.0);
+        let collapse = Rect::new(6.0, area.bottom() - 34.0, 28.0, 26.0);
         let collapse =
             if self.compact { Rect::new((area.w - 1.0 - 28.0) / 2.0, collapse.y, 28.0, 26.0) } else { collapse };
         if collapse.contains(self.mouse.0, self.mouse.1) {
@@ -2147,9 +2369,55 @@ impl App {
         let baseline = (collapse.y + (collapse.h + ascent * 0.72) / 2.0).round();
         text.draw_text(scene, glyph, collapse.x + (collapse.w - w) / 2.0, baseline, UI, 14.0, theme.text_faint);
         self.collapse_hit = collapse;
+        // Beside it, the extended rows' switch: a row with lines under it.
+        if !self.compact {
+            let extend = Rect::new(collapse.right() + 4.0, collapse.y, 28.0, 26.0);
+            if self.extended {
+                scene.quad(Quad::new(extend, theme.accent.alpha(0.18)).radius(5.0));
+            } else if extend.contains(self.mouse.0, self.mouse.1) {
+                scene.quad(Quad::new(extend, theme.raised).radius(5.0));
+            }
+            let ink = if self.extended { theme.accent } else { theme.text_faint };
+            let (x, y) = (extend.x + 8.0, extend.y + 7.0);
+            scene.quad(Quad::new(Rect::new(x, y, 12.0, 3.0), ink).radius(1.0));
+            for i in 0..2 {
+                let line = Rect::new(x + 3.0, y + 6.0 + i as f32 * 4.0, 9.0, 1.5);
+                scene.quad(Quad::new(line, ink.alpha(0.8)).radius(0.75));
+            }
+            self.extend_hit = extend;
+        }
         scene.pop_clip();
         if self.compact {
             self.draw_compact_hint(tabs);
+        }
+    }
+
+    /// The extended sidebar's lines under a tab's title, one per pane:
+    /// a dot for what it's doing, then what that is.
+    fn draw_pane_lines(&mut self, index: usize, tab: &TabView, area: Rect) {
+        let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
+        let focus = self.tabs.get(index).map(|tab| tab.focus);
+        let Self { scene, ctx, pane_hits, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        let font = 11.5;
+        let ascent = text.ui_ascent(font);
+        for (i, line) in tab.lines.iter().enumerate() {
+            let rect = Rect::new(area.x, area.y + i as f32 * SIDEBAR_LINE, area.w, SIDEBAR_LINE);
+            let cy = rect.y + rect.h / 2.0;
+            let dot = Rect::new(rect.x + 16.0, cy - 3.0, 6.0, 6.0);
+            let color = match line.agent {
+                Some(state) => agent_color(theme, state, t),
+                None if line.busy => theme.accent.alpha(0.7),
+                None => theme.text_faint.alpha(0.5),
+            };
+            scene.quad(Quad::new(dot, color).radius(3.0));
+            let x = rect.x + 30.0;
+            let baseline = (cy + ascent * 0.36).round();
+            let ink = if Some(line.id) == focus && tab.panes > 1 { theme.text } else { theme.text_dim };
+            let room = (rect.right() - 8.0 - x).max(0.0);
+            let shown = text.elide(&line.text, UI, font, room);
+            text.draw_text(scene, &shown, x, baseline, UI, font, ink);
+            pane_hits.push((rect, index, line.id));
         }
     }
 
@@ -2332,11 +2600,11 @@ impl App {
         let pill = if !sidebar {
             None
         } else if *compact {
-            Some(Rect::new((area.w - 1.0 - 28.0) / 2.0, area.h - 64.0, 28.0, 26.0))
+            Some(Rect::new((area.w - 1.0 - 28.0) / 2.0, area.bottom() - 64.0, 28.0, 26.0))
         } else {
             let label = "Update Available…";
             let w = (text.measure(label, UI_BOLD, 12.0) + 38.0).min(area.w - 48.0);
-            Some(Rect::new(40.0, area.h - 34.0, w, 26.0))
+            Some(Rect::new(40.0, area.bottom() - 34.0, w, 26.0))
         };
         if let Some(pill) = pill {
             scene.quad(Quad::new(pill, blue_hover(pill)).radius(pill.h / 2.0));
@@ -2468,6 +2736,18 @@ impl App {
     }
 }
 
+/// How long a pane sits idle before coming back to it shows a recap:
+/// `TEMINO_RECAP_MINUTES`, else the `recap_minutes` setting, else 10.
+/// Zero turns it off (Command+I still shows one).
+fn recap_idle() -> Duration {
+    let minutes = std::env::var("TEMINO_RECAP_MINUTES")
+        .ok()
+        .or_else(|| crate::setting("recap_minutes"))
+        .and_then(|minutes| minutes.parse::<f32>().ok())
+        .unwrap_or(10.0);
+    Duration::from_secs_f32(minutes.max(0.0) * 60.0)
+}
+
 fn tabs_path() -> String {
     format!("{}/tabs", crate::settings_dir())
 }
@@ -2541,6 +2821,90 @@ fn draw_tab_number(
         text.draw_text(scene, &label, cx - w / 2.0, baseline, UI, font, color);
     } else if agent.is_some() {
         scene.quad(Quad::new(Rect::new(cx - 2.0, cy - 2.0, 4.0, 4.0), color).radius(2.0));
+    }
+}
+
+/// An agent state's color: the accent while it works, amber while it
+/// waits on you, green when it finished a turn you haven't seen.
+fn agent_color(theme: &Theme, state: AgentState, t: f32) -> Color {
+    let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU / 1.4).sin();
+    match state {
+        AgentState::Idle => theme.text_faint,
+        AgentState::Running => theme.accent.alpha(0.55 + 0.45 * pulse),
+        AgentState::Waiting => Color::hex(AGENT_WAITING).alpha(0.7 + 0.3 * pulse),
+        AgentState::Done => Color::hex(AGENT_DONE),
+    }
+}
+
+/// "Running 2m 14s", "Waiting for you", "Done in 3m 02s", "Idle".
+fn agent_summary(info: &AgentInfo) -> String {
+    match (info.state, info.turn) {
+        (AgentState::Running, Some(turn)) => format!("Running {}", ui::short_duration(turn)),
+        (AgentState::Done, Some(turn)) => format!("Done in {}", ui::short_duration(turn)),
+        (state, _) => state.label().to_owned(),
+    }
+}
+
+/// The bar over an agent's pane. Left: a dot and what it's doing, with the
+/// turn's clock; then your last prompt. Right: its subagents, its session's
+/// name and how long it has run.
+fn draw_agent_header(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    bar: Rect,
+    info: &AgentInfo,
+    focused: bool,
+    t: f32,
+) {
+    let color = agent_color(theme, info.state, t);
+    let fill = theme.panel(SURFACE_LIFT).mix(color, if info.state == AgentState::Waiting { 0.12 } else { 0.04 });
+    scene.fill(bar, fill);
+    scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
+    if focused && info.state != AgentState::Idle {
+        scene.fill(Rect::new(bar.x, bar.bottom() - 2.0, bar.w, 2.0), color.alpha(0.6));
+    }
+    let font = 12.0;
+    let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
+    let cy = bar.y + bar.h / 2.0;
+    let mut x = bar.x + 12.0;
+    scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), color).radius(4.0));
+    x += 16.0;
+    let summary = agent_summary(info);
+    let ink = match info.state {
+        AgentState::Waiting => Color::hex(AGENT_WAITING),
+        AgentState::Done => Color::hex(AGENT_DONE),
+        _ => theme.text,
+    };
+    text.draw_text(scene, &summary, x, baseline, UI_BOLD, font, ink);
+    x += text.measure(&summary, UI_BOLD, font) + 14.0;
+    // The right side, laid out from the edge in: the subagents whenever
+    // they fit, the rest only while the prompt keeps some room.
+    let mut right = bar.right() - 12.0;
+    if info.subagents > 0 {
+        let s = if info.subagents == 1 { "" } else { "s" };
+        let chip = format!("{} subagent{s}", info.subagents);
+        let w = text.measure(&chip, UI, 11.0);
+        if right - w - 12.0 > x {
+            let pill = Rect::new(right - w - 12.0, cy - 9.0, w + 12.0, 18.0);
+            scene.quad(Quad::new(pill, theme.accent.alpha(0.16)).radius(9.0));
+            text.draw_text(scene, &chip, pill.x + 6.0, baseline, UI, 11.0, theme.accent);
+            right = pill.x - 12.0;
+        }
+    }
+    let uptime = format!("up {}", ui::short_duration(info.uptime));
+    for chip in info.name.iter().chain(std::iter::once(&uptime)) {
+        let w = text.measure(chip, UI, 11.0);
+        if right - w < x + 160.0 {
+            break;
+        }
+        text.draw_text(scene, chip, right - w, baseline, UI, 11.0, theme.text_faint);
+        right -= w + 14.0;
+    }
+    if let Some(prompt) = &info.prompt {
+        let room = right - x - 14.0;
+        let shown = text.elide(&format!("› {prompt}"), UI, font, room);
+        text.draw_text(scene, &shown, x, baseline, UI, font, theme.text_dim);
     }
 }
 
