@@ -30,8 +30,8 @@ shopt -s checkwinsize
 
 __temino_precmd() {
 	local status=$?
-	builtin printf '\e]133;D;%s\a\e]7;file://%s%s\a\e]133;A\a' \
-		"$status" "${HOSTNAME:-localhost}" "$PWD"
+	builtin printf '\e]133;D;%s\a\e]7;file://%s%s\a\e]6973;path;%s\a\e]133;A\a' \
+		"$status" "${HOSTNAME:-localhost}" "$PWD" "$PATH"
 	__temino_ran=
 	return $status
 }

@@ -1,8 +1,9 @@
 //! Over-the-air updates from the GitHub releases: a check at launch (once a
 //! day, unless the settings file says `updates=off`) and from the menu.
-//! A newer release's build for this system is downloaded with curl and
-//! swapped in; it runs from the next launch. On Haiku, replacing the package
-//! stops the running app, so that waits for quit.
+//! A newer release is offered in a card (Skip, Later, Install and Relaunch);
+//! installing downloads this system's build with curl, swaps it in and
+//! relaunches. On Haiku, replacing the package stops the running app, so
+//! that waits for quit.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,8 +36,54 @@ fn asset_suffix() -> Option<&'static str> {
     }
 }
 
+/// A newer release with a build for this system.
+#[derive(Clone)]
+pub struct Release {
+    pub version: String,
+    tag: String,
+    url: String,
+    /// The download's size in bytes, and the day it was published (YYYY-MM-DD).
+    pub size: u64,
+    pub date: String,
+}
+
+impl Release {
+    pub fn notes_url(&self) -> String {
+        format!("https://github.com/bluevisor/temino/releases/tag/{}", self.tag)
+    }
+
+    /// "77.9 MB".
+    pub fn size_label(&self) -> String {
+        let mb = self.size as f64 / 1_000_000.0;
+        if mb >= 1.0 {
+            format!("{mb:.1} MB")
+        } else {
+            format!("{} KB", self.size.div_ceil(1000))
+        }
+    }
+
+    /// "Oct 27, 2026".
+    pub fn date_label(&self) -> String {
+        const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let mut parts = self.date.split('-').map(|p| p.parse::<usize>().unwrap_or(0));
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(year), Some(month @ 1..=12), Some(day)) => format!("{} {day}, {year}", MONTHS[month - 1]),
+            _ => self.date.clone(),
+        }
+    }
+}
+
+/// What the updater thread tells the app.
+pub enum Event {
+    /// A newer release to offer.
+    Available(Release),
+    /// The offered release is in place: relaunch to use it.
+    Installed,
+    Failed(String),
+}
+
 /// Checks in the background; `manual` (the menu) skips the once-a-day
-/// limit and also reports "up to date" and failures.
+/// limit and a skipped version, and also reports "up to date" and failures.
 pub fn check(sender: Sender<Msg>, manual: bool) {
     if !manual {
         if crate::setting("updates").as_deref() == Some("off") {
@@ -50,22 +97,40 @@ pub fn check(sender: Sender<Msg>, manual: bool) {
         crate::save_setting("update_checked", &now.to_string());
     }
     let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
-        let message = match run() {
-            Ok(Some(version)) => Some(format!("Temino {version} is installed. Restart Temino to use it.")),
-            Ok(None) if manual => Some(format!("Temino {} is up to date", env!("CARGO_PKG_VERSION"))),
-            Err(error) if manual => Some(format!("Update failed: {error}")),
-            _ => None,
+        let skipped = crate::setting("update_skipped");
+        let message = match latest() {
+            Ok(Some(release)) if manual || skipped.as_deref() != Some(release.version.as_str()) => {
+                Msg::Update(Event::Available(release))
+            }
+            Ok(_) if manual => Msg::Notice(format!("Temino {} is up to date", env!("CARGO_PKG_VERSION"))),
+            Err(error) if manual => Msg::Notice(format!("Update check failed: {error}")),
+            _ => return,
         };
-        if let Some(message) = message {
-            let _ = sender.send(Msg::Notice(message));
-        }
+        let _ = sender.send(message);
     });
 }
 
-/// Installs the latest release if it is newer; its version, if so.
-fn run() -> Result<Option<String>, String> {
+/// "Skip": the daily check stops offering this version.
+pub fn skip(version: &str) {
+    crate::save_setting("update_skipped", version);
+}
+
+/// Downloads and installs `release` in the background.
+pub fn install(sender: Sender<Msg>, release: Release) {
+    let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
+        let event = match download(&release) {
+            Ok(()) => Event::Installed,
+            Err(error) => Event::Failed(error),
+        };
+        let _ = sender.send(Msg::Update(event));
+    });
+}
+
+/// The latest release, if it is newer than this build.
+fn latest() -> Result<Option<Release>, String> {
     let suffix = asset_suffix().ok_or("no builds for this system")?;
-    let json = curl_text(LATEST)?;
+    // TEMINO_UPDATE_URL stands in for GitHub (a file:// URL works), for testing.
+    let json = curl_text(&std::env::var("TEMINO_UPDATE_URL").unwrap_or_else(|_| LATEST.to_owned()))?;
     let tag = json_strings(&json, "tag_name").into_iter().next().ok_or("no release found")?;
     let version = tag.trim_start_matches('v').to_owned();
     if !newer(&version, env!("CARGO_PKG_VERSION")) {
@@ -75,13 +140,27 @@ fn run() -> Result<Option<String>, String> {
         .into_iter()
         .find(|url| url.ends_with(suffix))
         .ok_or_else(|| format!("{tag} has no build for this system"))?;
+    let size = asset_size(&json, &url).unwrap_or(0);
+    let date = json_strings(&json, "published_at").into_iter().next().unwrap_or_default();
+    let date = date.split('T').next().unwrap_or_default().to_owned();
+    Ok(Some(Release { version, tag, url, size, date }))
+}
+
+fn download(release: &Release) -> Result<(), String> {
     let dir = PathBuf::from(format!("{}/update", crate::settings_dir()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let download = dir.join(url.rsplit('/').next().unwrap_or("download"));
-    run_command(Command::new("curl").args(["-fsSL", "--max-time", "600", "-o"]).arg(&download).arg(&url))?;
-    install(&dir, &download)?;
-    Ok(Some(version))
+    let download = dir.join(release.url.rsplit('/').next().unwrap_or("download"));
+    run_command(Command::new("curl").args(["-fsSL", "--max-time", "600", "-o"]).arg(&download).arg(&release.url))?;
+    install_download(&dir, &download)
+}
+
+/// The `"size"` of the asset whose download is `url`: GitHub lists it
+/// before the URL in the asset's object.
+fn asset_size(json: &str, url: &str) -> Option<u64> {
+    let before = &json[..json.find(&format!("\"{url}\""))?];
+    let after = before[before.rfind("\"size\"")? + 6..].trim_start().strip_prefix(':')?.trim_start();
+    after[..after.find(|c: char| !c.is_ascii_digit())?].parse().ok()
 }
 
 /// Whether dotted version `a` is past `b`.
@@ -135,7 +214,7 @@ fn current_exe() -> Result<PathBuf, String> {
 /// Swaps Temino.app for the one in the disk image; the running app keeps
 /// its files.
 #[cfg(target_os = "macos")]
-fn install(dir: &Path, dmg: &Path) -> Result<(), String> {
+fn install_download(dir: &Path, dmg: &Path) -> Result<(), String> {
     let exe = current_exe()?;
     let bundle = exe
         .ancestors()
@@ -166,7 +245,7 @@ fn install(dir: &Path, dmg: &Path) -> Result<(), String> {
 
 /// Replaces the temino binary; the running one keeps its inode.
 #[cfg(not(any(target_os = "macos", target_os = "haiku")))]
-fn install(dir: &Path, tarball: &Path) -> Result<(), String> {
+fn install_download(dir: &Path, tarball: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let exe = current_exe()?;
     run_command(Command::new("tar").arg("xzf").arg(tarball).arg("-C").arg(dir))?;
@@ -184,34 +263,55 @@ fn install(dir: &Path, tarball: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Leaves the package for `apply_at_quit`.
+/// Leaves the package for `finish`.
 #[cfg(target_os = "haiku")]
-fn install(_dir: &Path, _package: &Path) -> Result<(), String> {
+fn install_download(_dir: &Path, _package: &Path) -> Result<(), String> {
     if !current_exe()?.starts_with("/boot/home/config/apps") {
         return Err("only a Temino package in ~/config/packages updates itself".into());
     }
     Ok(())
 }
 
-/// On Haiku, moves a downloaded package into ~/config/packages in place of
-/// the old one, from a shell that outlives the app (the swap stops it).
-pub fn apply_at_quit() {
-    if !cfg!(target_os = "haiku") {
+/// At quit: on Haiku, moves a downloaded package into ~/config/packages in
+/// place of the old one, from a shell that outlives the app (the swap stops
+/// it). With `relaunch`, that shell then starts Temino again once this one
+/// is gone.
+pub fn finish(relaunch: bool) {
+    let mut script = String::from("while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; ");
+    if cfg!(target_os = "haiku") {
+        let dir = format!("{}/update", crate::settings_dir());
+        let package = std::fs::read_dir(&dir).ok().and_then(|entries| {
+            entries.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "hpkg"))
+        });
+        let Some(package) = package else { return };
+        let packages = "/boot/home/config/packages";
+        // The package swap stops the app, so this doesn't wait for it.
+        script = format!(
+            "sleep 1; for old in {packages}/temino-*.hpkg; do rm -f \"$old\"; done; mv \"{}\" {packages}/ && rm -rf \"{dir}\"; sleep 2; ",
+            package.display()
+        );
+    } else if !relaunch {
         return;
     }
-    let dir = format!("{}/update", crate::settings_dir());
-    let Some(package) = std::fs::read_dir(&dir)
-        .ok()
-        .and_then(|entries| entries.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "hpkg")))
-    else {
-        return;
-    };
-    let packages = "/boot/home/config/packages";
-    let script = format!(
-        "sleep 1; for old in {packages}/temino-*.hpkg; do rm -f \"$old\"; done; mv \"{}\" {packages}/ && rm -rf \"{dir}\"",
-        package.display()
-    );
-    let _ = Command::new("sh").arg("-c").arg(script).spawn();
+    let Ok(exe) = current_exe() else { return };
+    let bundle = exe.ancestors().nth(3).filter(|b| b.extension().is_some_and(|e| e == "app"));
+    if relaunch {
+        script += match bundle {
+            Some(_) => "open -n \"$2\"",
+            None => "\"$2\" >/dev/null 2>&1 &",
+        };
+    }
+    let target = bundle.unwrap_or(&exe).to_owned();
+    let _ = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("sh")
+        .arg(std::process::id().to_string())
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 #[cfg(test)]
@@ -232,5 +332,21 @@ mod tests {
         let json = r#"{"tag_name": "v0.3.0", "assets": [{"browser_download_url":"https://x/a.zip"}, {"browser_download_url": "https://x/b.hpkg"}]}"#;
         assert_eq!(json_strings(json, "tag_name"), ["v0.3.0"]);
         assert_eq!(json_strings(json, "browser_download_url"), ["https://x/a.zip", "https://x/b.hpkg"]);
+        let json = r#"{"assets": [{"size": 12, "browser_download_url": "https://x/a.zip"}, {"size":77912345,"browser_download_url":"https://x/b.dmg"}]}"#;
+        assert_eq!(asset_size(json, "https://x/b.dmg"), Some(77912345));
+        assert_eq!(asset_size(json, "https://x/a.zip"), Some(12));
+    }
+
+    #[test]
+    fn labels() {
+        let release = Release {
+            version: "0.2.6".into(),
+            tag: "v0.2.6".into(),
+            url: String::new(),
+            size: 77_912_345,
+            date: "2026-10-27".into(),
+        };
+        assert_eq!(release.size_label(), "77.9 MB");
+        assert_eq!(release.date_label(), "Oct 27, 2026");
     }
 }

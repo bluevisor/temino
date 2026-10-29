@@ -4,7 +4,7 @@
 
 __temino_precmd() {
 	local ret=$?
-	builtin printf '\e]133;D;%s\a\e]7;file://%s%s\a\e]133;A\a' "$ret" "${HOST:-localhost}" "$PWD"
+	builtin printf '\e]133;D;%s\a\e]7;file://%s%s\a\e]6973;path;%s\a\e]133;A\a' "$ret" "${HOST:-localhost}" "$PWD" "$PATH"
 }
 
 # Runs last, after any theme's own precmd has set its prompt.

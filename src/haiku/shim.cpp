@@ -146,7 +146,8 @@ public:
 		fIBeam(B_CURSOR_ID_I_BEAM),
 		fArrow(B_CURSOR_ID_SYSTEM_DEFAULT),
 		fResizeColumn(B_CURSOR_ID_RESIZE_EAST_WEST),
-		fResizeRow(B_CURSOR_ID_RESIZE_NORTH_SOUTH)
+		fResizeRow(B_CURSOR_ID_RESIZE_NORTH_SOUTH),
+		fLink(B_CURSOR_ID_FOLLOW_LINK)
 	{
 		SetViewColor(B_TRANSPARENT_COLOR);
 		SetEventMask(0, 0);
@@ -223,8 +224,8 @@ public:
 			case kMsgCursor:
 			{
 				int32 kind = message->GetInt32("kind", 0);
-				const BCursor* cursors[] = {&fIBeam, &fArrow, &fResizeColumn, &fResizeRow};
-				SetViewCursor(cursors[kind >= 0 && kind < 4 ? kind : 0]);
+				const BCursor* cursors[] = {&fIBeam, &fArrow, &fResizeColumn, &fResizeRow, &fLink};
+				SetViewCursor(cursors[kind >= 0 && kind < 5 ? kind : 0]);
 				break;
 			}
 			case B_INPUT_METHOD_EVENT:
@@ -345,6 +346,7 @@ private:
 	BCursor fArrow;
 	BCursor fResizeColumn;
 	BCursor fResizeRow;
+	BCursor fLink;
 };
 
 
