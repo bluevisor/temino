@@ -11,7 +11,7 @@ use crate::complete::Commands;
 use crate::editor::History;
 use crate::gpu::Gpu;
 use crate::keys::Named;
-use crate::pane::{AgentInfo, Ctx, Pane};
+use crate::pane::{AgentInfo, Ctx, MarkNote, Pane};
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::settings::{self, Action, Field};
@@ -99,6 +99,15 @@ impl Mark {
             Mark::Important => theme.error,
             Mark::Waiting => theme.warning,
             Mark::Later => theme.text_faint,
+        }
+    }
+
+    /// What it means, for the model writing a recap.
+    fn meaning(self) -> &'static str {
+        match self {
+            Mark::Important => "important, to deal with first",
+            Mark::Waiting => "waiting: done for now and held up by something else",
+            Mark::Later => "set aside to come back to later",
         }
     }
 
@@ -274,6 +283,8 @@ struct Tab {
     shown: Option<(f32, f32)>,
     slide: Option<((f32, f32), Instant)>,
     mark: Option<Mark>,
+    /// When the mark was set, this run; a restored mark doesn't know.
+    marked_at: Option<Instant>,
 }
 
 /// What a row of the tab menu does.
@@ -769,6 +780,7 @@ impl App {
             shown: None,
             slide: None,
             mark: None,
+            marked_at: None,
         });
         self.switch_tab(self.tabs.len() - 1);
         self.save_tabs();
@@ -801,6 +813,7 @@ impl App {
                 shown: None,
                 slide: None,
                 mark: mark.and_then(Mark::from_code),
+                marked_at: None,
             });
             if current == "*" {
                 active = self.tabs.len() - 1;
@@ -1008,10 +1021,11 @@ impl App {
             pane.focus_changed(false);
             pane.focus_lost(now);
         }
+        let note = after.and_then(|id| self.mark_note(id, now));
         if let Some(pane) = after.and_then(|id| self.panes.iter_mut().find(|p| p.id == id)) {
             pane.focus_changed(window);
             if window {
-                pane.focus_gained(now, Some(idle));
+                pane.focus_gained(now, Some(idle), note);
             }
         }
     }
@@ -1305,10 +1319,11 @@ impl App {
             if let Some(id) = self.focused_id() {
                 // With TEMINO_FIND_TEST=<query>, the search bar instead.
                 let find = std::env::var("TEMINO_FIND_TEST").ok();
+                let note = self.mark_note(id, now);
                 if let Some(pane) = self.pane(id) {
                     match find {
                         Some(query) => pane.find_test(&query),
-                        None => pane.focus_gained(now, None),
+                        None => pane.focus_gained(now, None, note),
                     }
                 }
             }
@@ -1375,11 +1390,12 @@ impl App {
                 self.focused = focused;
                 self.ctx.blink_epoch = now;
                 if let Some(id) = self.focused_id() {
+                    let note = self.mark_note(id, now);
                     if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
                         pane.focus_changed(focused);
                         // Back from another app counts as coming back to the pane.
                         if focused {
-                            pane.focus_gained(now, Some(recap_idle()));
+                            pane.focus_gained(now, Some(recap_idle()), note);
                         } else {
                             pane.focus_lost(now);
                         }
@@ -1720,8 +1736,10 @@ impl App {
                 (_, Some('i')) => {
                     // "Where was I?" on demand.
                     if let Some(id) = self.focused_id() {
+                        let now = Instant::now();
+                        let note = self.mark_note(id, now);
                         if let Some(pane) = self.pane(id) {
-                            pane.focus_gained(Instant::now(), None);
+                            pane.focus_gained(now, None, note);
                         }
                     }
                     true
@@ -1835,6 +1853,7 @@ impl App {
             shown: None,
             slide: None,
             mark: None,
+            marked_at: None,
         });
         self.switch_tab(self.tabs.len() - 1);
     }
@@ -2033,6 +2052,7 @@ impl App {
     fn toggle_mark(&mut self, index: usize, mark: Mark) {
         let Some(tab) = self.tabs.get_mut(index) else { return };
         tab.mark = if tab.mark == Some(mark) { None } else { Some(mark) };
+        tab.marked_at = tab.mark.map(|_| Instant::now());
         let toast = match tab.mark {
             Some(mark) => format!("Marked {}", mark.label()),
             None => "Mark cleared".to_owned(),
@@ -2042,16 +2062,35 @@ impl App {
         self.dirty = true;
     }
 
+    /// The tab holding pane `id`.
+    fn tab_of(&self, id: u64) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| {
+            let mut leaves = Vec::new();
+            tab.root.leaves(&mut leaves);
+            leaves.contains(&id)
+        })
+    }
+
     /// The mark on the tab holding pane `id`.
     fn mark_of(&self, id: u64) -> Option<Mark> {
-        self.tabs
-            .iter()
-            .find(|tab| {
-                let mut leaves = Vec::new();
-                tab.root.leaves(&mut leaves);
-                leaves.contains(&id)
-            })
-            .and_then(|tab| tab.mark)
+        self.tab_of(id).and_then(|tab| tab.mark)
+    }
+
+    /// What the mark on pane `id`'s tab adds to its recap.
+    fn mark_note(&self, id: u64, now: Instant) -> Option<MarkNote> {
+        let tab = self.tab_of(id)?;
+        let mark = tab.mark?;
+        let ago = tab.marked_at.map(|at| ui::short_duration(now.duration_since(at)));
+        Some(MarkNote {
+            fact: match &ago {
+                Some(ago) => format!("{} · marked {ago} ago", mark.label()),
+                None => mark.label().to_owned(),
+            },
+            context: match &ago {
+                Some(ago) => format!("The user marked this tab {} {ago} ago.", mark.meaning()),
+                None => format!("The user marked this tab {}.", mark.meaning()),
+            },
+        })
     }
 
     fn move_tab(&mut self, from: usize, to: usize) {
