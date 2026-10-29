@@ -50,6 +50,8 @@ const AGENT_SCAN: Duration = Duration::from_millis(300);
 const AGENT_SCAN_LINES: usize = 10;
 const AGENT_QUIET: Duration = Duration::from_millis(1500);
 const AGENT_ECHO: Duration = Duration::from_millis(400);
+/// How long after you type output still counts as the agent answering.
+const AGENT_ASKED: Duration = Duration::from_secs(10);
 /// How long a recap stays up, and at most while its summary is on the way.
 const RECAP_SHOWN: Duration = Duration::from_secs(6);
 const RECAP_WAIT: Duration = Duration::from_secs(20);
@@ -486,10 +488,16 @@ impl Pane {
         let busy = self.watcher.as_ref().and_then(agent::Watcher::report).is_some_and(|report| report.busy);
         let input = self.session.input_at();
         let notified = self.notified_at.is_some_and(|at| input.is_none_or(|input| at > input));
-        // Output that isn't just the echo of your typing.
-        let printing = self.session.output_at.is_some_and(|at| {
-            now.duration_since(at) < AGENT_QUIET && input.is_none_or(|input| at.duration_since(input) > AGENT_ECHO)
-        });
+        // Output that isn't just the echo of your typing. On its own it only
+        // keeps a turn going or starts one you just asked for: an agent at
+        // rest repaints too (status line, a resize), and that isn't a turn
+        // to pop green for.
+        let in_turn = matches!(self.agent_was, Some(AgentState::Running | AgentState::Waiting));
+        let asked = input.is_some_and(|input| now.duration_since(input) < AGENT_ASKED);
+        let printing = (in_turn || asked)
+            && self.session.output_at.is_some_and(|at| {
+                now.duration_since(at) < AGENT_QUIET && input.is_none_or(|input| at.duration_since(input) > AGENT_ECHO)
+            });
         let state = if notified
             || title == Some(AgentState::Waiting)
             || (screen == Some(AgentState::Waiting) && title != Some(AgentState::Running))
