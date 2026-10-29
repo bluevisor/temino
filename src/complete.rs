@@ -163,9 +163,18 @@ pub fn complete(text: &str, cursor: usize, cwd: &str, commands: &mut Commands) -
             format!("{cwd}/{dir_part}")
         };
         let Ok(entries) = std::fs::read_dir(if dir.is_empty() { "." } else { &dir }) else { return None };
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
-            if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
+        let entries: Vec<_> = entries
+            .flatten()
+            .filter_map(|entry| Some((entry.file_name().to_str()?.to_owned(), entry)))
+            .filter(|(name, _)| !name.starts_with('.') || prefix.starts_with('.'))
+            .collect();
+        // Names that start with the prefix as typed; only when there are
+        // none, names that start with it in another case ("is" finds iSay).
+        let folded = prefix.to_lowercase();
+        let exact = entries.iter().any(|(name, _)| name.starts_with(prefix));
+        for (name, entry) in entries {
+            let matches = if exact { name.starts_with(prefix) } else { name.to_lowercase().starts_with(&folded) };
+            if !matches {
                 continue;
             }
             let is_dir = std::fs::metadata(entry.path()).map(|m| m.is_dir()).unwrap_or(false);
@@ -229,6 +238,24 @@ mod tests {
         assert_eq!(hint("cat no", cwd, &mut commands).as_deref(), Some("tes-"));
         assert_eq!(hint("cat notes-", cwd, &mut commands), None);
         assert_eq!(hint("cla", cwd, &mut commands).as_deref(), Some("ude"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paths_match_in_another_case_only_when_nothing_matches_as_typed() {
+        let dir = std::env::temp_dir().join(format!("temino-case-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("iSay")).unwrap();
+        std::fs::write(dir.join("Notes.txt"), "").unwrap();
+        std::fs::write(dir.join("notebook"), "").unwrap();
+        let cwd = dir.to_str().unwrap();
+        let mut commands = Commands::new();
+        let labels = |text: &str, commands: &mut Commands| {
+            let completion = complete(text, text.len(), cwd, commands).unwrap();
+            completion.candidates.into_iter().map(|c| c.replacement).collect::<Vec<_>>()
+        };
+        assert_eq!(labels("cd is", &mut commands), ["iSay/"]);
+        assert_eq!(labels("cat no", &mut commands), ["notebook "]);
+        assert_eq!(labels("cat NO", &mut commands), ["Notes.txt ", "notebook "]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

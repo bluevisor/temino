@@ -35,7 +35,7 @@ impl AgentState {
 }
 
 /// Agent programs, by the name they're run as.
-const AGENTS: [&str; 14] = [
+const AGENTS: [&str; 16] = [
     "claude",
     "claude-code",
     "codex",
@@ -43,6 +43,8 @@ const AGENTS: [&str; 14] = [
     "aider",
     "opencode",
     "cursor-agent",
+    // Cursor's CLI, by its newer name.
+    "agent",
     "amp",
     "goose",
     "crush",
@@ -50,20 +52,20 @@ const AGENTS: [&str; 14] = [
     "copilot",
     "droid",
     "kiro-cli",
+    "haikucode",
 ];
 
 /// Words that run the next word as the program.
 const LAUNCHERS: [&str; 10] = ["env", "npx", "bunx", "pnpx", "exec", "command", "nohup", "time", "sudo", "uvx"];
 
-/// Whether `command` runs an agent: `claude`, `npx @openai/codex`,
-/// `FOO=1 gemini -p ...`.
-pub fn is_agent_command(command: &str) -> bool {
-    agent_program(command).is_some()
-}
+/// Other programs that get a header over their pane (their name and how
+/// long they've run), by the name they're run as: `htop`, `lazygit`.
+const HEADER_PROGRAMS: [&str; 0] = [];
 
-/// The agent `command` runs, as its entry in AGENTS (`kiro` for both of
-/// Kiro's names).
-pub fn agent_program(command: &str) -> Option<&'static str> {
+/// The program `command` runs, by name: past launchers and variables,
+/// without its path, package scope or version (`FOO=1 npx
+/// @anthropic-ai/claude-code@latest` → `claude-code`).
+pub fn program_name(command: &str) -> Option<&str> {
     let mut words = command.split_whitespace().filter(|word| !word.starts_with('-'));
     let program = loop {
         match words.next() {
@@ -74,8 +76,19 @@ pub fn agent_program(command: &str) -> Option<&'static str> {
         }
     };
     let name = program.rsplit('/').next().unwrap_or(program);
-    // `@anthropic-ai/claude-code@latest` → `claude-code`.
-    let name = name.split('@').find(|part| !part.is_empty()).unwrap_or(name);
+    Some(name.split('@').find(|part| !part.is_empty()).unwrap_or(name))
+}
+
+/// Whether `command` runs an agent: `claude`, `npx @openai/codex`,
+/// `FOO=1 gemini -p ...`.
+pub fn is_agent_command(command: &str) -> bool {
+    agent_program(command).is_some()
+}
+
+/// The agent `command` runs, as its entry in AGENTS (`kiro-cli` for both of
+/// Kiro's names).
+pub fn agent_program(command: &str) -> Option<&'static str> {
+    let name = program_name(command)?;
     let name = name.strip_suffix("-cli").unwrap_or(name);
     if name == "kiro" {
         return Some("kiro-cli");
@@ -102,7 +115,7 @@ pub fn agent_brand(program: &str) -> (&'static str, u32) {
         "gemini" => ("Gemini CLI", 0x4796E3),
         "aider" => ("Aider", 0x14B014),
         "opencode" => ("opencode", 0x9A9A9A),
-        "cursor-agent" => ("Cursor Agent", 0x9A9A9A),
+        "cursor-agent" | "agent" => ("Cursor Agent", 0x9A9A9A),
         "amp" => ("Amp", 0xF34E3F),
         "goose" => ("Goose", 0x9A9A9A),
         "crush" => ("Crush", 0xFF60FF),
@@ -110,8 +123,15 @@ pub fn agent_brand(program: &str) -> (&'static str, u32) {
         "copilot" => ("Copilot", 0x8957E5),
         "droid" => ("Droid", 0xEE6018),
         "kiro-cli" => ("Kiro", 0x9046FF),
+        "haikucode" => ("Haiku Code", 0x9A9A9A),
         _ => ("Agent", 0x9A9A9A),
     }
+}
+
+/// The name to put in the header over `command`'s pane, when it runs one
+/// of `HEADER_PROGRAMS`.
+pub fn header_program(command: &str) -> Option<&str> {
+    program_name(command).filter(|name| HEADER_PROGRAMS.contains(name))
 }
 
 /// What an agent's window title says, if it says anything we know.
@@ -138,7 +158,7 @@ pub fn is_agent_title(title: &str) -> bool {
 /// interrupt hint, or a question waiting on you.
 pub fn screen_state(tail: &str) -> Option<AgentState> {
     let lower = tail.to_lowercase();
-    const ASKING: [&str; 12] = [
+    const ASKING: [&str; 13] = [
         "do you want",
         "would you like",
         "allow execution",
@@ -151,6 +171,8 @@ pub fn screen_state(tail: &str) -> Option<AgentState> {
         "❯ 1. yes",
         "› 1. yes",
         "▌ yes",
+        // Haiku Code: "approve <what>  (Y)es  (N)o".
+        "(y)es",
     ];
     const WORKING: [&str; 3] = ["esc to interrupt", "esc to cancel", "ctrl+c to interrupt"];
     if WORKING.iter().any(|hint| lower.contains(hint)) {
@@ -426,8 +448,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn program_names_skip_launchers_paths_and_versions() {
+        assert_eq!(program_name("FOO=1 sudo /usr/bin/htop -d 5"), Some("htop"));
+        assert_eq!(program_name("npx @anthropic-ai/claude-code@latest"), Some("claude-code"));
+        assert_eq!(program_name("env"), None);
+    }
+
+    #[test]
     fn agent_commands_are_recognized_through_launchers() {
         assert!(is_agent_command("claude"));
+        assert!(is_agent_command("haikucode"));
+        assert!(is_agent_command("agent -p \"fix the build\""));
         assert!(is_agent_command("claude --resume"));
         assert!(is_agent_command("/opt/homebrew/bin/codex"));
         assert!(is_agent_command("npx @anthropic-ai/claude-code@latest"));
@@ -451,6 +482,8 @@ mod tests {
         assert_eq!(screen_state("✻ Thinking… (esc to interrupt)"), Some(AgentState::Running));
         assert_eq!(screen_state("Do you want to proceed?\n❯ 1. Yes\n  2. No"), Some(AgentState::Waiting));
         assert_eq!(screen_state("> "), None);
+        assert_eq!(screen_state("approve bash: rm -rf target  (Y)es  (N)o"), Some(AgentState::Waiting));
+        assert_eq!(screen_state("(Esc to interrupt · Enter queues)"), Some(AgentState::Running));
     }
 
     #[test]

@@ -25,6 +25,12 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
 - **An editor for commands.** Syntax colors (known commands green, unknown
   red, flags, strings, variables), multi-line input (Shift+Enter), undo,
   word motions, selection, and fish-style **autosuggestions** from history.
+- **AI mode.** Tab on an empty line switches the editor to plain words. Describe
+  something to do ("rename example.jpg to example_backup.jpg") and the command
+  lands in the editor to check before Enter runs it; ask a question and the
+  answer shows in a block. It uses the model server in `llm_url`; with a
+  [TypeSafe](https://typesafe.ai) key (`typesafe_key` in the settings file, or
+  `TYPESAFE_API_KEY`) Jev decides command or answer first, from the request alone.
 - **Completion and history.** Tab completes commands and paths in a menu;
   Ctrl+R searches history; Up/Down walks it.
 - **A real terminal underneath.** The grid is
@@ -53,7 +59,8 @@ macOS, Ctrl+Shift (or Super) on Linux.
 | Key | |
 |---|---|
 | Enter / Shift+Enter | run / new line |
-| Tab, Ctrl+R, ↑ ↓ | complete, search history, browse history |
+| Tab on an empty line | switch between the shell and AI mode |
+| Tab, Ctrl+Shift+Space, Ctrl+R, ↑ ↓ | complete, list every command, search history, browse history |
 | → or End at the end of the line | accept the suggestion (Ctrl+→ one word) |
 | Cmd+T | new tab |
 | Cmd+D / Cmd+E | split the pane right / down |

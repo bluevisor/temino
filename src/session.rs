@@ -88,6 +88,8 @@ pub enum BlockKind {
     Command,
     /// Output printed while the prompt was idle (background jobs).
     Background,
+    /// A request to the model in AI mode, and its answer.
+    Ai,
 }
 
 pub struct Block {
@@ -788,6 +790,22 @@ impl Session {
             }
         }
         self.write(&bytes);
+    }
+
+    /// A block for a request in AI mode, waiting on its answer.
+    pub fn ask(&mut self, request: &str) -> u64 {
+        self.flush_idle_output();
+        self.new_block(BlockKind::Ai, request.to_owned()).id
+    }
+
+    /// Fills in the answer to request `id`; `ok` false marks it failed.
+    pub fn answer(&mut self, id: u64, text: &str, ok: bool) {
+        let Some(block) = self.blocks.iter_mut().find(|b| b.id == id) else { return };
+        // The model's text, not a program's: no escape sequences.
+        let text: String = text.chars().filter(|&c| c == '\n' || c == '\t' || !c.is_control()).collect();
+        block.feed(text.replace('\n', "\r\n").as_bytes());
+        block.finished = Some(Instant::now());
+        block.exit = Some(if ok { 0 } else { 1 });
     }
 
     /// Ctrl+C at a continuation prompt abandons the command.
