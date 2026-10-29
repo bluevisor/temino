@@ -980,14 +980,14 @@ impl App {
             UiEvent::Preedit(text) => self.preedit = text,
             UiEvent::Background(index) => self.set_background(index),
             UiEvent::Shell(index) => self.set_shell(index),
-            UiEvent::Wheel { dy, x, y, .. } => {
+            UiEvent::Wheel { dy, x, y, precise, .. } => {
                 let (x, y) = (x / self.zoom, y / self.zoom);
                 if let Some((SETTINGS, _)) = self.pane_at(x, y) {
                     self.settings.wheel(dy);
                 } else if let Some((id, rect)) = self.pane_at(x, y) {
                     let Self { panes, ctx, .. } = self;
                     if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
-                        pane.wheel(ctx, dy, x - rect.x, y - rect.y);
+                        pane.wheel(ctx, dy, precise, x - rect.x, y - rect.y);
                     }
                 }
             }

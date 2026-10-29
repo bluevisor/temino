@@ -147,7 +147,7 @@ extern "C" fn on_event(raw: *const RawEvent, context: *mut c_void) {
         2 => UiEvent::MouseDown { x: raw.x, y: raw.y, buttons: raw.buttons, clicks: raw.clicks, mods: raw.modifiers },
         3 => UiEvent::MouseUp { x: raw.x, y: raw.y },
         4 => UiEvent::MouseMoved { x: raw.x, y: raw.y, buttons: raw.buttons },
-        5 => UiEvent::Wheel { dx: raw.dx, dy: raw.dy, x: raw.x, y: raw.y, mods: raw.modifiers },
+        5 => UiEvent::Wheel { dx: raw.dx, dy: raw.dy, x: raw.x, y: raw.y, mods: raw.modifiers, precise: false },
         6 => UiEvent::Resize { width: raw.width.max(1) as u32, height: raw.height.max(1) as u32, scale: 1.0 },
         7 => UiEvent::Focus(raw.buttons != 0),
         8 => UiEvent::Close,
