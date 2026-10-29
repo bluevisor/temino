@@ -13,6 +13,7 @@ const PAD: f32 = 32.0;
 const ROW: f32 = 58.0;
 const CONTROL_HEIGHT: f32 = 26.0;
 const SWATCH: f32 = 22.0;
+const FIELD_WIDTH: f32 = 260.0;
 /// How far one wheel line scrolls the page.
 const WHEEL_STEP: f32 = 48.0;
 
@@ -31,6 +32,42 @@ pub struct Values {
     pub updates: bool,
     /// The window can be see-through (macOS).
     pub see_through: bool,
+    /// The header over a pane running an agent (or a listed program).
+    pub headers: bool,
+    /// What each text field holds now, in `Field::ALL` order.
+    pub fields: [String; Field::ALL.len()],
+    /// The field being typed in, its text, and whether that's all selected.
+    pub editing: Option<(Field, String, bool)>,
+}
+
+/// A setting typed in rather than picked: the model server and the keys.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Field {
+    LlmUrl,
+    LlmKey,
+    TypesafeKey,
+}
+
+impl Field {
+    pub const ALL: [Field; 3] = [Field::LlmUrl, Field::LlmKey, Field::TypesafeKey];
+
+    /// Its line in the settings file.
+    pub fn key(self) -> &'static str {
+        match self {
+            Field::LlmUrl => "llm_url",
+            Field::LlmKey => "llm_key",
+            Field::TypesafeKey => "typesafe_key",
+        }
+    }
+
+    /// Keys show as dots.
+    fn secret(self) -> bool {
+        self != Field::LlmUrl
+    }
+
+    fn index(self) -> usize {
+        Field::ALL.iter().position(|&f| f == self).unwrap()
+    }
 }
 
 /// What a click on the page asks for.
@@ -45,6 +82,9 @@ pub enum Action {
     Zoom(i32),
     Updates(bool),
     CheckForUpdates,
+    Headers(bool),
+    /// Start typing in a text field.
+    Edit(Field),
 }
 
 #[derive(Default)]
@@ -95,8 +135,10 @@ impl Page {
         y = ui.section(x, y, width, "Appearance", &rows, values);
         y = ui.section(x, y, width, "Text", &[Row::Zoom], values);
         y = ui.section(x, y, width, "Shell", &[Row::Shell], values);
-        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop], values);
+        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Headers], values);
         y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::CheckForUpdates], values);
+        let fields = Field::ALL.map(Row::Field);
+        y = ui.section(x, y, width, "AI", &fields, values);
         let version = format!("Temino {}", env!("CARGO_PKG_VERSION"));
         ui.text.draw_text(ui.scene, &version, x, y + 4.0, UI, 11.5, theme.text_faint);
         y += 24.0;
@@ -118,6 +160,8 @@ enum Row {
     TabsTop,
     Updates,
     CheckForUpdates,
+    Headers,
+    Field(Field),
 }
 
 struct Ui<'a> {
@@ -163,9 +207,13 @@ impl Ui<'_> {
             Row::Blur => ("Blur behind the window", "Soften what shows through".to_owned()),
             Row::Zoom => ("Size", format!("{:.0}% · Command+plus and Command+minus too", values.zoom)),
             Row::Shell => ("Default shell", "For new tabs and panes; a missing one is installed".to_owned()),
+            Row::Headers => ("Status header", "Over a pane running an agent: what it's doing, for how long".to_owned()),
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
+            Row::Field(Field::LlmUrl) => ("Model server", "OpenAI-compatible, for AI mode and tab recaps".to_owned()),
+            Row::Field(Field::LlmKey) => ("Model server key", "If the server asks for one".to_owned()),
+            Row::Field(Field::TypesafeKey) => ("TypeSafe key", "Lets Jev decide: command or answer".to_owned()),
         };
         let left = rect.x + 16.0;
         self.text.draw_text(self.scene, label, left, rect.y + 25.0, UI, 13.0, theme.text);
@@ -205,7 +253,61 @@ impl Ui<'_> {
             }
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::CheckForUpdates => self.button(right, control_y, "Check for Updates", Action::CheckForUpdates),
+            Row::Headers => self.toggle(right, rect.y, values.headers, Action::Headers(!values.headers)),
+            Row::Field(field) => self.field(right, control_y, field, values),
         }
+    }
+
+    /// A text field, right-aligned at `right`: the setting's value (keys as
+    /// dots), or what's being typed with a caret.
+    fn field(&mut self, right: f32, y: f32, field: Field, values: &Values) {
+        let theme = self.theme;
+        let size = 12.0;
+        let rect = Rect::new(right - FIELD_WIDTH, y, FIELD_WIDTH, CONTROL_HEIGHT);
+        let editing = values.editing.as_ref().filter(|(f, _, _)| *f == field);
+        let border = if editing.is_some() {
+            theme.accent
+        } else if self.hovered(rect) {
+            theme.text_faint
+        } else {
+            theme.divider
+        };
+        self.scene.quad(Quad::new(rect, Color::hex(0x000000).alpha(0.22)).radius(7.0).border(1.0, border));
+        let shown = |text: &str| {
+            if field.secret() && !text.is_empty() {
+                "•".repeat(text.chars().count().min(24))
+            } else {
+                text.to_owned()
+            }
+        };
+        let baseline = (rect.y + (rect.h + self.text.ui_ascent(size) * 0.72) / 2.0).round();
+        let x = rect.x + 10.0;
+        self.scene.push_clip(rect.inset(8.0, 0.0));
+        match editing {
+            Some((_, text, selected)) => {
+                let text = shown(text);
+                let w = self.text.measure(&text, UI, size);
+                // Long text scrolls so the caret stays in view.
+                let x = x - (w - (rect.w - 24.0)).max(0.0);
+                if *selected && !text.is_empty() {
+                    let mark = Rect::new(x - 1.0, rect.y + 5.0, w + 2.0, rect.h - 10.0);
+                    self.scene.quad(Quad::new(mark, theme.selection).radius(2.0));
+                }
+                self.text.draw_text(self.scene, &text, x, baseline, UI, size, theme.text);
+                self.scene.fill(Rect::new(x + w + 1.0, rect.y + 6.0, 1.0, rect.h - 12.0), theme.cursor);
+            }
+            None => {
+                let value = &values.fields[field.index()];
+                let (text, color) = match (value.is_empty(), field) {
+                    (true, Field::LlmUrl) => ("Orin: orin.local, then tailnet".to_owned(), theme.text_faint),
+                    (true, _) => ("Not set".to_owned(), theme.text_faint),
+                    (false, _) => (shown(value), theme.text),
+                };
+                self.text.draw_text(self.scene, &text, x, baseline, UI, size, color);
+            }
+        }
+        self.scene.pop_clip();
+        self.hit(rect, Action::Edit(field));
     }
 
     /// The backgrounds as color dots, right-aligned at `right`.
@@ -316,6 +418,9 @@ mod tests {
             zoom: 100.0,
             updates: true,
             see_through: true,
+            headers: true,
+            fields: Default::default(),
+            editing: None,
         };
         let mut page = Page::default();
         let rect = Rect::new(200.0, 0.0, 900.0, 2000.0);
@@ -329,9 +434,11 @@ mod tests {
         expected.extend([
             Action::TabsTop(false),
             Action::TabsTop(true),
+            Action::Headers(false),
             Action::Updates(false),
             Action::CheckForUpdates,
         ]);
+        expected.extend(Field::ALL.map(Action::Edit));
         assert_eq!(actions, expected);
         // A click lands on what's under it, and nothing overlaps.
         for (rect, action) in &page.hits {

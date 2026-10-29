@@ -6,6 +6,7 @@
 
 mod agent;
 mod app;
+mod ask;
 mod complete;
 mod editor;
 #[cfg(not(target_os = "macos"))]

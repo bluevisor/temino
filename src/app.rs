@@ -13,7 +13,7 @@ use crate::keys::Named;
 use crate::pane::{AgentInfo, Ctx, Pane};
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
-use crate::settings::{self, Action};
+use crate::settings::{self, Action, Field};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{Color, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
@@ -349,6 +349,11 @@ pub struct App {
     dividers: Vec<Divider>,
     tab_menu: Option<TabMenu>,
     renaming: Option<Rename>,
+    /// The Settings text field being typed in, its text, and whether
+    /// that's all selected.
+    field: Option<(Field, String, bool)>,
+    /// Whether panes running an agent (or a listed program) get a header.
+    headers: bool,
     hover_tab: Option<usize>,
     mouse: (f32, f32),
     /// What an input method is composing, drawn at the cursor.
@@ -589,6 +594,8 @@ impl App {
             dividers: Vec::new(),
             tab_menu: None,
             renaming: None,
+            field: None,
+            headers: crate::setting("headers").as_deref() != Some("off"),
             hover_tab: None,
             mouse: (0.0, 0.0),
             preedit: String::new(),
@@ -980,10 +987,15 @@ impl App {
         } else {
             tab.root.layout(rect, &mut Vec::new(), &mut panes, &mut dividers);
         }
-        // A pane with an agent in it gives its top to the agent's header.
+        // A pane with an agent (or a listed program) in it gives its top
+        // to the header.
         for (id, rect) in &mut panes {
-            let agent = self.panes.iter().any(|pane| pane.id == *id && pane.agent_now.is_some());
-            if agent && rect.h > 3.0 * AGENT_HEADER {
+            let header = self.headers
+                && self
+                    .panes
+                    .iter()
+                    .any(|pane| pane.id == *id && (pane.agent_now.is_some() || pane.program_now.is_some()));
+            if header && rect.h > 3.0 * AGENT_HEADER {
                 rect.y += AGENT_HEADER;
                 rect.h -= AGENT_HEADER;
             }
@@ -1172,6 +1184,14 @@ impl App {
             UiEvent::Text(text) => {
                 self.preedit.clear();
                 self.ctx.blink_epoch = Instant::now();
+                if let Some((_, field, selected)) = self.field.as_mut() {
+                    if std::mem::take(selected) {
+                        field.clear();
+                    }
+                    field.extend(text.chars().filter(|c| !c.is_control()));
+                    self.dirty = true;
+                    return;
+                }
                 if let Some(id) = self.focused_id() {
                     if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
                         pane.text_input(&text);
@@ -1331,7 +1351,7 @@ impl App {
                 return;
             }
         }
-        if self.rename_key(&key) {
+        if self.rename_key(&key) || self.field_key(&key) {
             return;
         }
         let named = key.named;
@@ -1504,6 +1524,9 @@ impl App {
             zoom: self.zoom_percent(),
             updates: crate::setting("updates").as_deref() != Some("off"),
             see_through: cfg!(target_os = "macos"),
+            fields: Field::ALL.map(|field| crate::setting(field.key()).unwrap_or_default()),
+            editing: self.field.clone(),
+            headers: self.headers,
         }
     }
 
@@ -1532,7 +1555,77 @@ impl App {
             Action::CheckForUpdates => {
                 self.check_for_updates();
             }
+            Action::Headers(on) => {
+                self.headers = on;
+                crate::save_setting("headers", if on { "on" } else { "off" });
+                self.relayout();
+            }
+            Action::Edit(field) => {
+                self.finish_field();
+                let text = crate::setting(field.key()).unwrap_or_default();
+                self.field = Some((field, text, true));
+            }
         }
+    }
+
+    /// Ends typing in a Settings field, keeping what was typed.
+    fn finish_field(&mut self) {
+        let Some((field, text, _)) = self.field.take() else { return };
+        crate::save_setting(field.key(), text.trim());
+        if matches!(field, Field::LlmUrl | Field::LlmKey) {
+            crate::llm::forget_model();
+        }
+        self.dirty = true;
+    }
+
+    /// A key while typing in a Settings field; false lets it through.
+    fn field_key(&mut self, key: &KeyEvent) -> bool {
+        let Some((_, text, selected)) = self.field.as_mut() else { return false };
+        self.dirty = true;
+        if key.cmd() {
+            match key.base_char() {
+                Some('a') => *selected = true,
+                Some('v') => {
+                    // Keys come pasted: the first line, without spaces round it.
+                    let pasted = platform::clipboard_get().unwrap_or_default();
+                    let pasted = pasted.lines().next().unwrap_or("").trim();
+                    if *selected {
+                        text.clear();
+                    }
+                    text.push_str(pasted);
+                    *selected = false;
+                }
+                _ => {
+                    self.finish_field();
+                    return false;
+                }
+            }
+            return true;
+        }
+        match key.named {
+            Some(Named::Enter | Named::Tab) => self.finish_field(),
+            Some(Named::Escape) => self.field = None,
+            Some(Named::Backspace | Named::Delete) if *selected => text.clear(),
+            Some(Named::Backspace) => {
+                text.pop();
+            }
+            Some(_) => {}
+            None if !key.ctrl() => {
+                let typed: String = String::from_utf8_lossy(&key.bytes).chars().filter(|c| !c.is_control()).collect();
+                if typed.is_empty() {
+                    return true;
+                }
+                if *selected {
+                    text.clear();
+                }
+                text.push_str(&typed);
+            }
+            None => {}
+        }
+        if let Some((_, _, selected)) = self.field.as_mut() {
+            *selected = false;
+        }
+        true
     }
 
     /// Command+U, the menu and Settings: the card again if an update is
@@ -1708,6 +1801,12 @@ impl App {
     }
 
     fn mouse_down(&mut self, x: f32, y: f32, pressed: i32, clicks: i32, mods: u32) {
+        // A click off the field being typed in ends it.
+        let on_field = matches!(self.pane_at(x, y), Some((SETTINGS, _)))
+            && matches!(self.settings.action_at(x, y), Some(Action::Edit(_)));
+        if !on_field {
+            self.finish_field();
+        }
         if let Some(menu) = self.tab_menu.take() {
             // A click anywhere else only closes the menu.
             if let Some(&(_, action)) = self.menu_hits.iter().find(|(r, _)| r.contains(x, y)) {
@@ -2079,6 +2178,9 @@ impl App {
                         let state = pane.agent(now);
                         moved |= state.is_some() != pane.agent_now.is_some();
                         pane.agent_now = state;
+                        let program = pane.header_program();
+                        moved |= program.is_some() != pane.program_now.is_some();
+                        pane.program_now = program;
                         state
                     })
                     .max()
@@ -2105,21 +2207,32 @@ impl App {
     }
 
     /// The bar over each pane with an agent: what it's doing and for how
-    /// long, what you last asked it, its subagents and its session.
+    /// long, what you last asked it, its subagents and its session. A
+    /// listed program gets its name and how long it has run.
     fn draw_agent_headers(&mut self, visible: &[(u64, Rect)]) {
+        if !self.headers {
+            return;
+        }
         let now = Instant::now();
         let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
         let focus = self.focused_id();
         for &(id, rect) in visible {
             let Some(pane) = self.panes.iter().find(|pane| pane.id == id) else { continue };
-            let Some(info) = pane.agent_info(now) else { continue };
-            if rect.h <= 2.0 * AGENT_HEADER {
+            let info = pane.agent_info(now);
+            let program = pane.program_now.clone();
+            if (info.is_none() && program.is_none()) || rect.h <= 2.0 * AGENT_HEADER {
                 continue;
             }
             let bar = Rect::new(rect.x, rect.y - AGENT_HEADER, rect.w, AGENT_HEADER);
             let Self { scene, ctx, pane_hits, .. } = self;
             let Ctx { text, theme, .. } = ctx;
-            draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, t);
+            match (info, program) {
+                (Some(info), _) => draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, t),
+                (None, Some((name, started))) => {
+                    draw_program_header(scene, text, theme, bar, &name, now.duration_since(started))
+                }
+                (None, None) => {}
+            }
             pane_hits.push((bar, self.active, id));
         }
     }
@@ -2139,7 +2252,7 @@ impl App {
         scene.fill(Rect::new(0.0, top - 1.0, bar.w, 1.0), theme.divider);
         // Clear of the traffic lights on the left, centered in what's left.
         // Fixed in points, like the bar: zoom leaves it alone.
-        let font = 13.0 / self.zoom;
+        let font = 15.0 / self.zoom;
         let room = (bar.w - 2.0 * 84.0 / self.zoom).max(0.0);
         let shown = text.elide(title, UI_BOLD, font, room);
         let w = text.measure(&shown, UI_BOLD, font);
@@ -2207,14 +2320,12 @@ impl App {
             .collect()
     }
 
-    /// One tab's row: number, color dot, title (or the rename field), the
+    /// One tab's row: number, title (or the rename field), the
     /// ⋯ menu button while hovered or active, an optional badge, and ×;
     /// records the hit areas.
     fn draw_tab(&mut self, index: usize, tab: &TabView, rect: Rect, badge: Option<String>) {
         let current = index == self.active;
         let hovered = self.hover_tab == Some(index);
-        // The sidebar tints the whole row; the strip marks colors with a dot.
-        let dot = tab.color.filter(|_| self.strip == TabStrip::Top);
         let left = self.strip == TabStrip::Left;
         let (font, number) = if left { (SIDEBAR_FONT, 22.0) } else { (12.0, 18.0) };
         let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
@@ -2227,10 +2338,6 @@ impl App {
             let center = (x + number / 2.0, rect.y + rect.h / 2.0);
             draw_tab_number(scene, text, theme, index, center, number, tab.agent, t);
             x += number + 8.0;
-        }
-        if let Some(color) = dot {
-            scene.quad(Quad::new(Rect::new(x, rect.y + (rect.h - 8.0) / 2.0, 8.0, 8.0), color).radius(4.0));
-            x += 14.0;
         }
         let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
         let mut right = close.x - 4.0;
@@ -2286,14 +2393,7 @@ impl App {
         let tab_width = ((width - 12.0 - plus) / tabs.len() as f32).min(TAB_MAX_WIDTH);
         for (index, tab) in tabs.iter().enumerate() {
             let rect = Rect::new(6.0 + index as f32 * tab_width, top + 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
-            if index == self.active {
-                let theme = &self.ctx.theme;
-                self.scene.quad(Quad::new(rect, theme.raised).radius(6.0).border(1.0, theme.divider));
-                if let Some(color) = tab.color {
-                    let line = Rect::new(rect.x + 8.0, rect.bottom() - 2.0, rect.w - 16.0, 2.0);
-                    self.scene.quad(Quad::new(line, color).radius(1.0));
-                }
-            }
+            draw_tab_background(&mut self.scene, &self.ctx.theme, rect, tab.color, index == self.active, false);
             let badge = (tab.panes > 1).then(|| format!("{}", tab.panes));
             self.draw_tab(index, tab, rect, badge);
         }
@@ -2328,7 +2428,7 @@ impl App {
             }
             let extra = if tab.lines.is_empty() { 0.0 } else { tab.lines.len() as f32 * SIDEBAR_LINE + 6.0 };
             let row = Rect::new(rect.x, rect.y, rect.w, rect.h + extra);
-            draw_sidebar_row(
+            draw_tab_background(
                 &mut self.scene,
                 &self.ctx.theme,
                 row,
@@ -2426,7 +2526,7 @@ impl App {
         let Self { scene, ctx, tab_hits, .. } = self;
         let Ctx { text, theme, blink_epoch, .. } = ctx;
         let current = index == self.active;
-        draw_sidebar_row(scene, theme, rect, tab.color, current, dragged);
+        draw_tab_background(scene, theme, rect, tab.color, current, dragged);
         let center = (rect.x + rect.w / 2.0 + 1.0, rect.y + rect.h / 2.0);
         let t = blink_epoch.elapsed().as_secs_f32();
         draw_tab_number(scene, text, theme, index, center, 24.0, tab.agent, t);
@@ -2754,10 +2854,17 @@ fn tabs_path() -> String {
 
 /// TEMINO_CAPTURE: saves each frame, straight from the GPU readback, for
 /// screenshots that no other window or the pointer can get into.
-/// A sidebar row's background: a tab with a color is tinted with it all
+/// A tab's background, in the sidebar or the strip: a tab with a color is tinted with it all
 /// over, more strongly and outlined in it while active; an uncolored tab
 /// is raised only while active.
-fn draw_sidebar_row(scene: &mut Scene, theme: &Theme, rect: Rect, color: Option<Color>, current: bool, dragged: bool) {
+fn draw_tab_background(
+    scene: &mut Scene,
+    theme: &Theme,
+    rect: Rect,
+    color: Option<Color>,
+    current: bool,
+    dragged: bool,
+) {
     let (fill, border) = match (color, current) {
         (Some(color), true) => (theme.raised.mix(color, 0.42), color.mix(theme.text, 0.15)),
         (Some(color), false) => (color.alpha(0.22), color.alpha(0.0)),
@@ -2906,6 +3013,28 @@ fn draw_agent_header(
         let shown = text.elide(&format!("› {prompt}"), UI, font, room);
         text.draw_text(scene, &shown, x, baseline, UI, font, theme.text_dim);
     }
+}
+
+/// The bar over a listed program's pane: its name, and how long it has run.
+fn draw_program_header(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    bar: Rect,
+    name: &str,
+    uptime: Duration,
+) {
+    scene.fill(bar, theme.panel(SURFACE_LIFT));
+    scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
+    let font = 12.0;
+    let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
+    let cy = bar.y + bar.h / 2.0;
+    let x = bar.x + 12.0;
+    scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), theme.text_faint).radius(4.0));
+    text.draw_text(scene, name, x + 16.0, baseline, UI_BOLD, font, theme.text);
+    let uptime = format!("up {}", ui::short_duration(uptime));
+    let w = text.measure(&uptime, UI, 11.0);
+    text.draw_text(scene, &uptime, bar.right() - 12.0 - w, baseline, UI, 11.0, theme.text_faint);
 }
 
 fn write_ppm(path: &std::ffi::OsStr, bgra: &[u8], width: u32, height: u32) {

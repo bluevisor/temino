@@ -11,6 +11,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::TermMode;
 
 use crate::agent::{self, AgentState};
+use crate::ask::{self, Reply};
 use crate::complete::{self, Candidate, Commands, Completion, Kind};
 use crate::editor::{Editor, History};
 use crate::keys::{self, Named};
@@ -192,6 +193,8 @@ pub struct Pane {
     pub agent_unseen: bool,
     /// The agent's state this frame, read once by the window.
     pub agent_now: Option<AgentState>,
+    /// The listed program running here this frame, and since when.
+    pub program_now: Option<(String, Instant)>,
     /// Claude Code's own account of the agent, read in the background.
     watcher: Option<agent::Watcher>,
     /// What's been typed to the agent since the last Enter, and the last
@@ -205,7 +208,14 @@ pub struct Pane {
     /// on coming back to it after a while.
     left_at: Option<Instant>,
     recap: Option<Recap>,
+    /// AI mode: Enter sends the editor's text to the model instead of the
+    /// shell. The request on its way: its block and the model's reply.
+    ai: bool,
+    asking: Option<(u64, Answer)>,
 }
+
+/// The model's reply to an AI-mode request, filled in by its thread.
+type Answer = Arc<Mutex<Option<Result<Reply, String>>>>;
 
 /// "Where was I?": a line of facts about a pane you come back to, and a
 /// model's sentence on what you were doing, which arrives a little later.
@@ -288,6 +298,7 @@ impl Pane {
             agent_block: None,
             screen: None,
             agent_unseen: false,
+            program_now: None,
             agent_now: None,
             watcher: None,
             typed: String::new(),
@@ -296,6 +307,8 @@ impl Pane {
             last_turn: None,
             left_at: None,
             recap: None,
+            ai: false,
+            asking: None,
         })
     }
 
@@ -315,6 +328,12 @@ impl Pane {
     }
 
     /// Runs `command` as if typed, as soon as the shell is at its prompt.
+    /// The listed program running here that gets a header, and since when.
+    pub fn header_program(&self) -> Option<(String, Instant)> {
+        let block = self.session.active().filter(|block| block.kind == BlockKind::Command)?;
+        agent::header_program(&block.command).map(|name| (name.to_owned(), block.started))
+    }
+
     pub fn run_when_ready(&mut self, command: String) {
         self.queued = Some(command);
     }
@@ -637,7 +656,7 @@ impl Pane {
 
     /// Advances animations; true when the pane needs a new frame.
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut dirty = self.session.tick(now);
+        let mut dirty = self.session.tick(now) | self.take_answer();
         if let Some(recap) = &mut self.recap {
             if recap.summary_at.is_none() && recap.summary().is_some() {
                 recap.summary_at = Some(now);
@@ -679,7 +698,10 @@ impl Pane {
             let period = BLINK.as_millis() as u64;
             want(ctx.blink_epoch + Duration::from_millis((elapsed / period + 1) * period));
         }
-        if self.session.active().is_some_and(|b| !b.alt_screen()) || self.session.phase == Phase::Boot {
+        if self.session.active().is_some_and(|b| !b.alt_screen())
+            || self.session.phase == Phase::Boot
+            || self.asking.is_some()
+        {
             want(now + Duration::from_millis(80));
         }
         next
@@ -688,6 +710,9 @@ impl Pane {
     pub fn next_wakeup(&self) -> Option<Instant> {
         let mut times = vec![self.session.deadline(), self.reflow_at];
         times.push(self.bell.map(|at| at + Duration::from_millis(200)));
+        if self.asking.is_some() {
+            times.push(Some(Instant::now() + Duration::from_millis(100)));
+        }
         if let Some(recap) = &self.recap {
             // Fading, or waiting on its summary.
             let until = recap.until();
@@ -888,6 +913,8 @@ impl Pane {
             Some(Named::Enter) => {
                 if shift || key.option() {
                     self.editor.insert("\n");
+                } else if self.ai {
+                    self.ask(ctx);
                 } else {
                     self.submit(ctx);
                 }
@@ -931,11 +958,18 @@ impl Pane {
                     self.editor.browse(&ctx.history, false);
                 }
             }
-            // Tab takes a grey history suggestion whole; otherwise it completes.
+            // Tab on an empty line switches between the shell and AI mode;
+            // after text it takes a grey history suggestion whole, or completes.
+            Some(Named::Tab) if self.editor.text.is_empty() && self.session.phase == Phase::Ready => {
+                self.ai = !self.ai;
+                self.hint = None;
+            }
+            Some(Named::Tab) if self.ai => {}
             Some(Named::Tab) => match self.editor.suggestion(&ctx.history).map(str::to_owned) {
                 Some(rest) if !shift => self.editor.insert(&rest),
                 _ => self.tab(ctx),
             },
+            Some(Named::Escape) if self.ai && self.editor.text.is_empty() => self.ai = false,
             Some(Named::Escape) => {
                 self.selected = None;
                 self.selection = None;
@@ -965,6 +999,9 @@ impl Pane {
                         Some('l') => self.clear_blocks(),
                         Some('z') => self.editor.undo(),
                         Some('r') => self.open_history_menu(ctx),
+                        // Every command, or what completes the word: Tab's
+                        // menu, now that Tab on an empty line means AI mode.
+                        Some(' ') if shift && !self.ai => self.tab(ctx),
                         Some('d') => {
                             if self.editor.text.is_empty() {
                                 self.session.submit("exit");
@@ -1001,6 +1038,9 @@ impl Pane {
     /// The grey text after the caret: the newest history entry that starts
     /// with what's typed, or else what Tab would fill in for the last word.
     fn suggestion(&mut self, ctx: &mut Ctx) -> Option<String> {
+        if self.ai {
+            return None;
+        }
         if let Some(rest) = self.editor.suggestion(&ctx.history) {
             return Some(rest.to_owned());
         }
@@ -1037,6 +1077,69 @@ impl Pane {
         self.selected = None;
         self.selection = None;
         self.pin_to_bottom();
+    }
+
+    /// AI mode's Enter: the request goes to the model in a block of its own.
+    fn ask(&mut self, ctx: &mut Ctx) {
+        let request = self.editor.text.trim().to_owned();
+        self.completion = None;
+        if request.is_empty() || self.asking.is_some() {
+            return;
+        }
+        self.editor.take();
+        let id = self.session.ask(&request);
+        self.selected = None;
+        self.selection = None;
+        self.pin_to_bottom();
+        if !llm::enabled() {
+            self.session.answer(id, "AI mode needs a model server: set llm_url in the settings file.", false);
+            return;
+        }
+        let recent: Vec<String> = self
+            .session
+            .blocks
+            .iter()
+            .rev()
+            .filter(|b| b.kind == BlockKind::Command && !b.command.trim().is_empty())
+            .take(3)
+            .map(|b| agent::one_line(&b.command))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let prompt = ask::prompt(&request, &ctx.shell, &self.session.cwd, &recent);
+        let reply = Arc::new(Mutex::new(None));
+        let theirs = reply.clone();
+        let _ = std::thread::Builder::new().name("ask".into()).spawn(move || {
+            *theirs.lock().unwrap() = Some(ask::run(&request, &prompt));
+        });
+        self.asking = Some((id, reply));
+    }
+
+    /// Shows the model's reply once it's in: a command goes into the editor
+    /// to look over (Enter runs it, back in shell mode), an answer into its block.
+    fn take_answer(&mut self) -> bool {
+        let Some((id, reply)) = &self.asking else { return false };
+        let Some(reply) = reply.lock().unwrap().take() else { return false };
+        let id = *id;
+        self.asking = None;
+        match reply {
+            Ok(Reply::Command(command)) => {
+                let placed = self.editor.text.is_empty();
+                let note = if placed { "Enter runs it, or edit it first" } else { "copy it from here" };
+                self.session.answer(id, &format!("{command}\n\n{note}"), true);
+                if placed {
+                    self.editor.insert(&command);
+                    self.ai = false;
+                    self.hint = None;
+                }
+            }
+            Ok(Reply::Answer(answer)) if !answer.is_empty() => self.session.answer(id, &answer, true),
+            Ok(Reply::Answer(_)) => self.session.answer(id, "The model gave no answer.", false),
+            Err(error) => self.session.answer(id, &format!("The model couldn't be reached: {error}"), false),
+        }
+        self.pin_to_bottom();
+        true
     }
 
     fn tab(&mut self, ctx: &mut Ctx) {
@@ -1733,7 +1836,7 @@ impl Pane {
         let cell = text.cell;
         let columns = self.session.size.columns.max(1);
         let block = &mut self.session.blocks[index];
-        let command_lines = if block.kind == BlockKind::Command {
+        let command_lines = if block.kind != BlockKind::Background {
             block.command.split('\n').map(|line| crate::editor::columns(line).div_ceil(columns).max(1)).sum()
         } else {
             0
@@ -1866,7 +1969,7 @@ impl Pane {
             vec![
                 ("Enter".into(), "run"),
                 ("Shift+Enter".into(), "new line"),
-                ("Tab".into(), "accept · complete"),
+                ("Tab".into(), "complete · AI on empty"),
                 ("↑ ↓".into(), "history"),
                 ("Ctrl+R".into(), "search history"),
             ],
@@ -1932,6 +2035,10 @@ impl Pane {
         if block.kind == BlockKind::Background {
             text.draw_text(scene, "Background output", x, baseline, UI, 12.0, theme.text_faint);
         } else {
+            if block.kind == BlockKind::Ai {
+                let label = if text.has_glyph('✦', UI_BOLD) { "✦ AI  " } else { "AI  " };
+                x += text.draw_text(scene, label, x, baseline, UI_BOLD, 12.0, theme.variable);
+            }
             x += text.draw_text(scene, &ui::short_path(&block.cwd), x, baseline, UI, 12.0, theme.text_dim);
             if let Some(branch) = &block.branch {
                 x += 10.0;
@@ -1944,6 +2051,9 @@ impl Pane {
             } else {
                 match block.exit {
                     Some(0) | None => (format!("{}  ✓", ui::format_duration(block.duration())), theme.success),
+                    Some(_) if block.kind == BlockKind::Ai => {
+                        (format!("{}  failed", ui::format_duration(block.duration())), theme.error)
+                    }
                     Some(code) => (format!("{}  exit {code}", ui::format_duration(block.duration())), theme.error),
                 }
             };
@@ -1955,7 +2065,7 @@ impl Pane {
         let command_y = y + BLOCK_PAD_TOP + META_HEIGHT;
         let mut line_y = command_y;
         let mut command_rows_drawn = 0;
-        if block.kind == BlockKind::Command {
+        if block.kind != BlockKind::Background {
             for (index, (row, _)) in command_rows(&block.command, user_columns).iter().enumerate() {
                 if let Some(((l0, c0), (l1, c1))) =
                     command_selection.filter(|((l0, _), (l1, _))| (*l0..=*l1).contains(&index))
@@ -1986,7 +2096,7 @@ impl Pane {
                     y: output_y + first as f32 * cell.height,
                     first,
                     last,
-                    cursor: block.running(),
+                    cursor: block.running() && block.kind == BlockKind::Command,
                     focused,
                     selection,
                     blink_on: blink,
@@ -2013,7 +2123,8 @@ impl Pane {
         let phase = self.session.phase;
         let hint = if self.completion.is_none() { self.suggestion(ctx) } else { None };
         let Ctx { text, theme, commands, user_host, .. } = ctx;
-        let Pane { session, editor, layout, completion, .. } = self;
+        let Pane { session, editor, layout, completion, ai, .. } = self;
+        let ai = *ai && phase == Phase::Ready;
         let panel = Rect::new(0.0, y, width, height);
         layout.input = panel;
         scene.fill(panel, theme.panel(SURFACE_LIFT));
@@ -2037,9 +2148,15 @@ impl Pane {
         let prompt_color = match phase {
             Phase::Continuation => theme.warning,
             _ if !focused => theme.text_faint,
+            _ if ai => theme.variable,
             _ => theme.accent,
         };
-        let prompt = if text.has_glyph('❯', 0) { "❯" } else { ">" };
+        let prompt = match (ai, text.has_glyph('❯', 0)) {
+            (true, _) if text.has_glyph('✦', 0) => "✦",
+            (true, _) => "?",
+            (false, true) => "❯",
+            (false, false) => ">",
+        };
         text.draw_mono(scene, prompt, PAD_X, editor_y, Style::BOLD, prompt_color);
 
         let status = |scene: &mut Scene, text: &mut TextSystem, message: &str, color: Color| {
@@ -2070,8 +2187,10 @@ impl Pane {
                 if editor.text.is_empty() && !ctx.composing {
                     let hint = if phase == Phase::Continuation {
                         "The command needs more input; Ctrl+C cancels it"
+                    } else if ai {
+                        "Ask AI · describe a command, or ask anything · Tab back to the shell"
                     } else {
-                        "Type a command · Tab completes · ↑ history · Shift+Enter new line"
+                        "Type a command · Tab here for AI · Tab completes · ↑ history"
                     };
                     status(scene, text, hint, theme.text_faint);
                 }
@@ -2101,7 +2220,7 @@ impl Pane {
                 }
                 // Text with syntax colors.
                 commands.use_path(self.session.path.as_deref());
-                let spans = ui::highlight(&editor.text, editor.cursor, commands, theme);
+                let spans = if ai { Vec::new() } else { ui::highlight(&editor.text, editor.cursor, commands, theme) };
                 let mut colors = vec![theme.text; editor.text.len()];
                 for (start, end, color) in spans {
                     for slot in &mut colors[start..end.min(editor.text.len())] {

@@ -7,47 +7,73 @@ use std::sync::Mutex;
 
 use crate::json;
 
-/// The development model server, until there's a chosen one: on the
-/// tailnet only, so off it every call just fails and nothing is shown.
-const DEV_URL: &str = "http://jetson-orin.heron-minor.ts.net:8080/v1";
+/// The development model server, until there's a chosen one: the Orin on
+/// the local network, else over the tailnet. Off both, every call just
+/// fails and nothing is shown.
+const DEV_URLS: [&str; 2] = ["http://orin.local:8080/v1", "http://jetson-orin.heron-minor.ts.net:8080/v1"];
 
-/// The server's model, once asked: the first it lists, unless set.
-static MODEL: Mutex<Option<String>> = Mutex::new(None);
+/// The server that answered and its model, once asked: the first model it
+/// lists, unless one is set.
+static SERVER: Mutex<Option<(String, String)>> = Mutex::new(None);
 
-/// The server's base URL: `TEMINO_LLM_URL`, then the `llm_url` setting,
-/// then the development server. `off` turns the model off.
-fn base_url() -> Option<String> {
-    let url = std::env::var("TEMINO_LLM_URL")
-        .ok()
-        .or_else(|| crate::setting("llm_url"))
-        .filter(|url| !url.is_empty())
-        .unwrap_or_else(|| DEV_URL.to_owned());
-    (url != "off").then(|| url.trim_end_matches('/').to_owned())
+/// The server's base URL as set: `TEMINO_LLM_URL`, then the `llm_url`
+/// setting; None for the development server. `off` turns the model off.
+fn configured() -> Option<Option<String>> {
+    let url = std::env::var("TEMINO_LLM_URL").ok().or_else(|| crate::setting("llm_url")).filter(|url| !url.is_empty());
+    match url {
+        Some(url) if url == "off" => None,
+        Some(url) => Some(Some(url.trim_end_matches('/').to_owned())),
+        None => Some(None),
+    }
+}
+
+/// Asks for the server and its model again: after its address or key
+/// changed, or a call to it failed.
+pub fn forget_model() {
+    *SERVER.lock().unwrap() = None;
 }
 
 pub fn enabled() -> bool {
-    base_url().is_some()
+    configured().is_some()
+}
+
+/// The base URL to call and the model to ask for: the configured server,
+/// or the first development server that answers.
+fn server() -> Result<(String, String), String> {
+    let urls = match configured().ok_or("no model server")? {
+        Some(url) => vec![url],
+        None => DEV_URLS.map(str::to_owned).to_vec(),
+    };
+    let mut cached = SERVER.lock().unwrap();
+    if let Some((base, model)) = cached.as_ref().filter(|(base, _)| urls.contains(base)) {
+        return Ok((base.clone(), model.clone()));
+    }
+    let mut error = String::new();
+    for base in urls {
+        match model(&base) {
+            Ok(model) => {
+                *cached = Some((base.clone(), model.clone()));
+                return Ok((base, model));
+            }
+            Err(e) => error = e,
+        }
+    }
+    Err(error)
 }
 
 fn model(base: &str) -> Result<String, String> {
+    let listed = curl(&format!("{base}/models"), None, 3)?;
     if let Some(model) = crate::setting("llm_model").filter(|model| !model.is_empty()) {
         return Ok(model);
     }
-    let mut cached = MODEL.lock().unwrap();
-    if let Some(model) = cached.as_ref() {
-        return Ok(model.clone());
-    }
-    let list = json::parse(&curl(&format!("{base}/models"), None, 5)?).ok_or("unreadable model list")?;
+    let list = json::parse(&listed).ok_or("unreadable model list")?;
     let first = list.get("data").and_then(|data| data.array().first()).and_then(|model| model.str_at("id"));
-    let model = first.ok_or("the server lists no models")?.to_owned();
-    *cached = Some(model.clone());
-    Ok(model)
+    Ok(first.ok_or("the server lists no models")?.to_owned())
 }
 
 /// The model's answer to `prompt` under `system`, trimmed.
 pub fn complete(system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
-    let base = base_url().ok_or("no model server")?;
-    let model = model(&base)?;
+    let (base, model) = server()?;
     // Thinking models (Gemma 4, Qwen 3) otherwise spend the whole budget
     // reasoning and answer nothing; llama.cpp's templates take this switch.
     let body = format!(
@@ -56,7 +82,8 @@ pub fn complete(system: &str, prompt: &str, max_tokens: u32) -> Result<String, S
         quote(system),
         quote(prompt),
     );
-    let reply = json::parse(&curl(&format!("{base}/chat/completions"), Some(&body), 60)?).ok_or("unreadable reply")?;
+    let reply = curl(&format!("{base}/chat/completions"), Some(&body), 60).inspect_err(|_| forget_model())?;
+    let reply = json::parse(&reply).ok_or("unreadable reply")?;
     let message = reply.get("choices").and_then(|c| c.array().first()).and_then(|c| c.get("message"));
     let text = message.and_then(|m| m.str_at("content")).ok_or("no answer in the reply")?;
     // Some templates still lead with an empty thought.
@@ -64,21 +91,43 @@ pub fn complete(system: &str, prompt: &str, max_tokens: u32) -> Result<String, S
     Ok(text.trim().to_owned())
 }
 
+/// POSTs JSON `body` to `url` with a bearer `key`.
+pub fn post_with_key(url: &str, key: &str, body: &str, seconds: u32) -> Result<String, String> {
+    request(url, Some(body), Some(key), seconds)
+}
+
+/// The model server's key (the `llm_key` setting), if it wants one.
+fn server_key() -> Option<String> {
+    crate::setting("llm_key").filter(|key| !key.is_empty())
+}
+
 fn curl(url: &str, body: Option<&str>, seconds: u32) -> Result<String, String> {
-    let mut command = Command::new("curl");
-    command.args(["-fsS", "--max-time", &seconds.to_string(), url]);
-    if body.is_some() {
-        command.args(["-H", "Content-Type: application/json", "--data-binary", "@-"]);
+    request(url, body, server_key().as_deref(), seconds)
+}
+
+/// GETs `url`, or POSTs JSON `body` to it, with a bearer `key` if given.
+/// Everything goes to curl as a config on its stdin, so a key never shows
+/// in the process list.
+fn request(url: &str, body: Option<&str>, key: Option<&str>, seconds: u32) -> Result<String, String> {
+    let quoted = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut config = format!("url = {}\n", quoted(url));
+    if let Some(key) = key {
+        config.push_str(&format!("header = {}\n", quoted(&format!("Authorization: Bearer {key}"))));
     }
-    let mut child = command
+    if let Some(body) = body {
+        config.push_str("header = \"Content-Type: application/json\"\n");
+        config.push_str(&format!("data-binary = {}\n", quoted(body)));
+    }
+    let mut child = Command::new("curl")
+        .args(["-fsS", "--max-time", &seconds.to_string(), "-K", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("curl: {e}"))?;
-    if let (Some(body), Some(mut stdin)) = (body, child.stdin.take()) {
+    if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        let _ = stdin.write_all(body.as_bytes());
+        let _ = stdin.write_all(config.as_bytes());
     }
     let output = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
     if !output.status.success() {
