@@ -255,6 +255,13 @@ impl Recap {
     }
 }
 
+/// What a tab's mark adds to a recap: a fact on its first line, and a
+/// line for the model writing the summary.
+pub struct MarkNote {
+    pub fact: String,
+    pub context: String,
+}
+
 /// What the header over an agent's pane says.
 pub struct AgentInfo {
     /// The agent, as its entry in agent::AGENTS.
@@ -507,10 +514,12 @@ impl Pane {
         self.left_at = Some(now);
     }
 
-    /// Coming back to the pane: after `idle` or longer with nothing
-    /// happening in it, or when asked (`idle` None), a recap shows.
-    pub fn focus_gained(&mut self, now: Instant, idle: Option<Duration>) {
-        let last = [self.left_at, self.session.input_at(), self.session.output_at].into_iter().flatten().max();
+    /// Coming back to the pane: after `idle` or longer since the user last
+    /// did anything in it (output doesn't count: an agent works while
+    /// they're away), or when asked (`idle` None), a recap shows. `mark`
+    /// is what the tab's mark adds to it.
+    pub fn focus_gained(&mut self, now: Instant, idle: Option<Duration>, mark: Option<MarkNote>) {
+        let last = [self.left_at, self.session.input_at()].into_iter().flatten().max();
         let left = self.left_at.take();
         let away = last.map_or(Duration::ZERO, |last| now.duration_since(last));
         let due = match idle {
@@ -518,16 +527,19 @@ impl Pane {
             Some(idle) => left.is_some() && !idle.is_zero() && away >= idle,
         };
         if due {
-            self.show_recap(now, away);
+            self.show_recap(now, away, mark);
         }
     }
 
-    fn show_recap(&mut self, now: Instant, away: Duration) {
+    fn show_recap(&mut self, now: Instant, away: Duration, mark: Option<MarkNote>) {
         let mut facts = Vec::new();
         if away >= Duration::from_secs(60) {
-            facts.push(format!("↩ idle {}", ui::short_duration(away)));
+            facts.push(format!("↩ away {}", ui::short_duration(away)));
         } else {
             facts.push("↩".to_owned());
+        }
+        if let Some(mark) = &mark {
+            facts.push(mark.fact.clone());
         }
         let finished =
             self.session.blocks.iter().rev().find(|block| block.kind == BlockKind::Command && !block.running());
@@ -555,7 +567,10 @@ impl Pane {
         }
         let summary = Arc::new(Mutex::new(None));
         if llm::enabled() {
-            let context = self.recap_context(now);
+            let mut context = self.recap_context(now);
+            if let Some(mark) = &mark {
+                context = format!("{}\n{context}", mark.context);
+            }
             let theirs = summary.clone();
             let _ = std::thread::Builder::new().name("recap".into()).spawn(move || {
                 let answer = llm::complete(RECAP_SYSTEM, &context, 120).ok().filter(|answer| !answer.is_empty());
