@@ -26,7 +26,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
-use super::{buttons, mods, Cursor, KeyEvent, UiEvent};
+use super::{buttons, mods, Cursor, KeyEvent, UiEvent, ViewerKind, ViewerStyle};
 use crate::keys::Named;
 use crate::Msg;
 
@@ -48,6 +48,13 @@ extern "C" {
         width: *mut u32,
         height: *mut u32,
     ) -> bool;
+    /// Puts a host for viewers over the view; their events go to `callback`.
+    fn temino_viewer_init(view: *mut std::ffi::c_void, callback: extern "C" fn(u64, i32, *const std::ffi::c_char));
+    fn temino_viewer_open(id: u64, kind: i32, target: *const std::ffi::c_char, style: *const ViewerStyle);
+    fn temino_viewer_place(id: u64, x: f64, y: f64, width: f64, height: f64, visible: bool);
+    fn temino_viewer_close(id: u64);
+    /// Gives the keyboard to viewer `id`, or with 0 back to the terminal.
+    fn temino_viewer_focus(id: u64);
 }
 
 /// `text` in Apple Color Emoji at `size` pixels, shrunk to fit: its width,
@@ -79,6 +86,10 @@ enum Request {
     Title(String),
     Cursor(Cursor),
     Blur(bool),
+    ViewerOpen(u64, ViewerKind, String, ViewerStyle),
+    ViewerPlace(Vec<(u64, [f32; 4], bool)>),
+    ViewerClose(u64),
+    ViewerFocus(Option<u64>),
     Quit,
 }
 
@@ -374,6 +385,47 @@ pub fn set_text_caret(_x: i32, _y: i32, _height: i32) {}
 pub fn beep() {}
 
 /// Opens a link in the default browser (or whatever handles its scheme).
+pub fn viewer_open(id: u64, kind: ViewerKind, target: &str, style: ViewerStyle) {
+    request(Request::ViewerOpen(id, kind, target.to_owned(), style));
+}
+
+/// Where each viewer goes, in points from the window's top left, and
+/// whether it shows.
+pub fn viewer_place(frames: Vec<(u64, [f32; 4], bool)>) {
+    request(Request::ViewerPlace(frames));
+}
+
+pub fn viewer_close(id: u64) {
+    request(Request::ViewerClose(id));
+}
+
+pub fn viewer_focus(id: Option<u64>) {
+    request(Request::ViewerFocus(id));
+}
+
+/// A viewer's news, on the main thread, to the core thread.
+#[cfg(target_os = "macos")]
+extern "C" fn viewer_event(id: u64, kind: i32, text: *const std::ffi::c_char) {
+    use super::ViewerEvent;
+    let text = if text.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy().into_owned()
+    };
+    let event = match kind {
+        0 => ViewerEvent::Focused,
+        1 => ViewerEvent::Title(text),
+        2 => ViewerEvent::Url(text),
+        3 => ViewerEvent::Dirty(true),
+        4 => ViewerEvent::Dirty(false),
+        6 => ViewerEvent::Close,
+        _ => ViewerEvent::Failed(text),
+    };
+    if let Some(sender) = MENU_SENDER.lock().unwrap().as_ref() {
+        let _ = sender.send(Msg::Viewer(id, event));
+    }
+}
+
 pub fn open_url(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -719,6 +771,7 @@ impl ApplicationHandler<Request> for Handler {
                 unsafe {
                     temino_metal_attach(handle.ns_view.as_ptr());
                     temino_titlebar(handle.ns_view.as_ptr(), TITLEBAR as f64);
+                    temino_viewer_init(handle.ns_view.as_ptr(), viewer_event);
                 }
                 self.on_layer = true;
                 self.window = Some(window);
@@ -767,6 +820,23 @@ impl ApplicationHandler<Request> for Handler {
                     window.set_blur(on);
                 }
             }
+            #[cfg(target_os = "macos")]
+            Request::ViewerOpen(id, kind, target, style) => {
+                let target = std::ffi::CString::new(target.replace('\0', "")).unwrap_or_default();
+                unsafe { temino_viewer_open(id, kind as i32, target.as_ptr(), &style) };
+            }
+            #[cfg(target_os = "macos")]
+            Request::ViewerPlace(frames) => {
+                for (id, [x, y, w, h], visible) in frames {
+                    unsafe { temino_viewer_place(id, x as f64, y as f64, w as f64, h as f64, visible) };
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Request::ViewerClose(id) => unsafe { temino_viewer_close(id) },
+            #[cfg(target_os = "macos")]
+            Request::ViewerFocus(id) => unsafe { temino_viewer_focus(id.unwrap_or(0)) },
+            #[cfg(not(target_os = "macos"))]
+            Request::ViewerOpen(..) | Request::ViewerPlace(_) | Request::ViewerClose(_) | Request::ViewerFocus(_) => {}
             Request::Quit => event_loop.exit(),
             #[cfg(target_os = "macos")]
             Request::Hotkey(key) => {

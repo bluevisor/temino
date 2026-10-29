@@ -355,3 +355,9 @@ pub fn selection_set(_text: &str) {}
 pub fn selection_get() -> Option<String> {
     None
 }
+
+// Viewers are macOS-only for now (VIEWERS is false here).
+pub fn viewer_open(_id: u64, _kind: super::ViewerKind, _target: &str, _style: super::ViewerStyle) {}
+pub fn viewer_place(_frames: Vec<(u64, [f32; 4], bool)>) {}
+pub fn viewer_close(_id: u64) {}
+pub fn viewer_focus(_id: Option<u64>) {}

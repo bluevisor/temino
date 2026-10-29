@@ -591,7 +591,7 @@ fn parse_osc(body: &[u8]) -> Option<Segment> {
     }
 }
 
-fn percent_decode(text: &str) -> String {
+pub fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     let mut out = Vec::with_capacity(bytes.len());

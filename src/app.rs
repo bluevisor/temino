@@ -20,6 +20,7 @@ use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{self, Color, Palette, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
 use crate::ui;
 use crate::update::{self, Release};
+use crate::viewer::{self, Viewer};
 use crate::Msg;
 
 /// The terminal font size at zoom 1, which every UI size is designed at.
@@ -390,6 +391,10 @@ pub struct App {
     scene: Scene,
     ctx: Ctx,
     panes: Vec<Pane>,
+    /// The built-in viewers, which sit in tabs' trees beside the panes.
+    viewers: Vec<Viewer>,
+    /// Where the viewers were last put.
+    viewers_placed: Vec<(u64, [f32; 4], bool)>,
     tabs: Vec<Tab>,
     active: usize,
     /// The pane focused before this one, for Command+` with nothing waiting.
@@ -473,6 +478,9 @@ pub struct App {
     /// `TEMINO_RECAP_TEST=<seconds>`: show the focused pane's recap this
     /// long after launch, as Command+I would, for screenshots.
     recap_test: Option<Instant>,
+    /// `TEMINO_OPEN_TEST=<link>`: open it from the focused pane two
+    /// seconds after launch, as a click on it would, for screenshots.
+    open_test: Option<(Instant, String)>,
 }
 
 pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32) {
@@ -499,6 +507,7 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
                     Msg::Notice(..) => "loop: notice",
                     Msg::Update(..) => "loop: update",
                     Msg::Git(..) => "loop: git",
+                    Msg::Viewer(..) => "loop: viewer",
                 });
                 app.handle(message)
             }
@@ -662,6 +671,8 @@ impl App {
             scene: Scene::new(),
             ctx,
             panes: Vec::new(),
+            viewers: Vec::new(),
+            viewers_placed: Vec::new(),
             tabs: Vec::new(),
             active: 0,
             last_focus: None,
@@ -721,6 +732,9 @@ impl App {
             update: None,
             update_hits: Vec::new(),
             update_card: Rect::default(),
+            open_test: std::env::var("TEMINO_OPEN_TEST")
+                .ok()
+                .map(|link| (Instant::now() + Duration::from_secs(2), link)),
             recap_test: std::env::var("TEMINO_RECAP_TEST")
                 .ok()
                 .and_then(|seconds| seconds.parse::<f32>().ok())
@@ -894,8 +908,8 @@ impl App {
             .tabs
             .iter()
             .enumerate()
-            // The Settings tab isn't reopened.
-            .filter(|(_, tab)| tab.focus != SETTINGS)
+            // The Settings tab isn't reopened, nor viewers.
+            .filter(|(_, tab)| tab.focus != SETTINGS && self.has_shell(&tab.root))
             .map(|(index, tab)| {
                 let mut layout = Vec::new();
                 self.save_node(&tab.root, tab.focus, &mut layout);
@@ -919,12 +933,119 @@ impl App {
                 let cwd = self.panes.iter().find(|p| p.id == *id).map_or("", |p| p.session.cwd.as_str());
                 out.push(format!("{}{cwd}", if *id == focus { 'F' } else { 'P' }));
             }
+            Node::Split { first, second, .. } if !self.has_shell(first) => self.save_node(second, focus, out),
+            Node::Split { first, second, .. } if !self.has_shell(second) => self.save_node(first, focus, out),
             Node::Split { axis, ratio, first, second } => {
                 out.push(format!("{}{ratio}", if *axis == Axis::Row { 'R' } else { 'C' }));
                 self.save_node(first, focus, out);
                 self.save_node(second, focus, out);
             }
         }
+    }
+
+    fn is_viewer(&self, id: u64) -> bool {
+        self.viewers.iter().any(|v| v.id == id)
+    }
+
+    /// Whether a part of a tab has a shell pane in it, not only viewers.
+    fn has_shell(&self, node: &Node) -> bool {
+        let mut leaves = Vec::new();
+        node.leaves(&mut leaves);
+        leaves.iter().any(|&id| !self.is_viewer(id))
+    }
+
+    /// Opens a clicked link beside pane `from`: in a viewer, sliding in
+    /// from the right, or in the system's app for what no viewer shows.
+    /// The tab's viewer of the same kind shows it instead, if nothing in
+    /// it is unsaved.
+    fn open_link(&mut self, from: u64, url: String) {
+        let Some((kind, target)) = viewer::classify(&url).filter(|_| platform::VIEWERS) else {
+            platform::open_url(&url);
+            return;
+        };
+        let style = self.viewer_style();
+        let mut leaves = Vec::new();
+        self.tabs[self.active].root.leaves(&mut leaves);
+        if let Some(viewer) = self.viewers.iter_mut().find(|v| v.kind == kind && !v.dirty && leaves.contains(&v.id)) {
+            platform::viewer_open(viewer.id, kind, &target, style);
+            viewer.retarget(target);
+            let id = viewer.id;
+            self.set_focus(id);
+            return;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        platform::viewer_open(id, kind, &target, style);
+        self.viewers.push(Viewer::new(id, kind, target));
+        let tab = &mut self.tabs[self.active];
+        tab.root.split(from, id, Axis::Row, false);
+        tab.zoomed = false;
+        self.set_focus(id);
+    }
+
+    /// The theme, for a viewer's native view: its see-through colors
+    /// flattened onto the background.
+    fn viewer_style(&self) -> platform::ViewerStyle {
+        let theme = &self.ctx.theme;
+        let background = theme.background;
+        let rgb = |c: Color| {
+            let flat = background.mix(Color { a: 1.0, ..c }, c.a);
+            [flat.r, flat.g, flat.b]
+        };
+        let luma = 0.2126 * background.r + 0.7152 * background.g + 0.0722 * background.b;
+        platform::ViewerStyle {
+            background: [background.r, background.g, background.b],
+            text: rgb(theme.text),
+            accent: rgb(theme.accent),
+            selection: rgb(theme.selection),
+            header: rgb(theme.panel(SURFACE_LIFT)),
+            divider: rgb(theme.divider),
+            dim: rgb(theme.text_dim),
+            faint: rgb(theme.text_faint),
+            font_size: self.ctx.text.cell.size * self.zoom,
+            dark: luma < 0.5,
+        }
+    }
+
+    fn viewer_event(&mut self, id: u64, event: platform::ViewerEvent) {
+        use platform::ViewerEvent;
+        let Some(viewer) = self.viewers.iter_mut().find(|v| v.id == id) else { return };
+        match event {
+            ViewerEvent::Focused => {
+                let here = self.tabs.get(self.active).is_some_and(|tab| tab.root.contains(id));
+                if here && self.focused_id() != Some(id) {
+                    self.set_focus(id);
+                }
+            }
+            ViewerEvent::Title(title) => viewer.title = title,
+            ViewerEvent::Url(url) => viewer.target = url,
+            ViewerEvent::Dirty(dirty) => {
+                viewer.dirty = dirty;
+                viewer.close_armed = false;
+            }
+            ViewerEvent::Failed(error) => {
+                self.ctx.toast = Some((error, Instant::now() + Duration::from_secs(4)));
+            }
+            ViewerEvent::Close => self.close_pane(id),
+        }
+        self.dirty = true;
+    }
+
+    /// Whether anything in a viewer is unsaved, warning about it the first
+    /// time it's asked, so that the second Quit goes ahead.
+    fn unsaved_blocks_quit(&mut self) -> bool {
+        let unsaved: Vec<&mut Viewer> = self.viewers.iter_mut().filter(|v| v.dirty && !v.close_armed).collect();
+        if unsaved.is_empty() {
+            return false;
+        }
+        let names: Vec<String> = unsaved.iter().map(|v| v.title.clone()).collect();
+        for viewer in unsaved {
+            viewer.close_armed = true;
+        }
+        let message = format!("Unsaved: {}. Quit again to discard.", names.join(", "));
+        self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(5)));
+        self.dirty = true;
+        true
     }
 
     fn split(&mut self, axis: Axis, before: bool) {
@@ -943,6 +1064,19 @@ impl App {
 
     /// Closes a pane, its tab when it was the last, the window after that.
     fn close_pane(&mut self, id: u64) {
+        if let Some(index) = self.viewers.iter().position(|v| v.id == id) {
+            let viewer = &mut self.viewers[index];
+            if viewer.dirty && !viewer.close_armed {
+                viewer.close_armed = true;
+                let cmd = platform::COMMAND_NAME;
+                let message = format!("{} has unsaved changes: {cmd}S saves, {cmd}W again discards them", viewer.title);
+                self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(5)));
+                self.dirty = true;
+                return;
+            }
+            self.viewers.remove(index);
+            platform::viewer_close(id);
+        }
         if let Some(index) = self.panes.iter().position(|p| p.id == id) {
             let mut pane = self.panes.remove(index);
             pane.hangup();
@@ -1012,6 +1146,11 @@ impl App {
         }
         if before.is_some() {
             self.last_focus = before;
+        }
+        // The keyboard goes to a viewer's native view, or back from one.
+        let viewer = after.filter(|&id| self.is_viewer(id));
+        if viewer.is_some() || before.is_some_and(|id| self.is_viewer(id)) {
+            platform::viewer_focus(viewer);
         }
         let now = Instant::now();
         self.ctx.blink_epoch = now;
@@ -1273,6 +1412,7 @@ impl App {
                 }
                 self.dirty = true;
             }
+            Msg::Viewer(id, event) => self.viewer_event(id, event),
             Msg::Notice(message) => {
                 self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(6)));
                 self.dirty = true;
@@ -1314,6 +1454,13 @@ impl App {
         if self.animation_at.is_some_and(|at| now >= at) {
             self.dirty = true;
         }
+        if self.open_test.as_ref().is_some_and(|(at, _)| now >= *at) {
+            let (_, link) = self.open_test.take().unwrap();
+            if let Some(id) = self.focused_id() {
+                self.open_link(id, link);
+            }
+            self.dirty = true;
+        }
         if self.recap_test.is_some_and(|at| now >= at) {
             self.recap_test = None;
             if let Some(id) = self.focused_id() {
@@ -1335,6 +1482,7 @@ impl App {
         let mut times: Vec<Option<Instant>> = self.panes.iter().map(Pane::next_wakeup).collect();
         times.push(self.animation_at);
         times.push(self.recap_test);
+        times.push(self.open_test.as_ref().map(|(at, _)| *at));
         times.push(self.ctx.toast.as_ref().map(|(_, at)| *at));
         times.into_iter().flatten().min()
     }
@@ -1344,7 +1492,10 @@ impl App {
         let title = match self.panes.iter().find(|p| p.id == id) {
             Some(pane) => format!("{} — Temino", pane.title()),
             None if id == SETTINGS => "Settings — Temino".to_owned(),
-            None => return,
+            None => match self.viewers.iter().find(|v| v.id == id) {
+                Some(viewer) => format!("{} — Temino", viewer.title),
+                None => return,
+            },
         };
         if title != self.title {
             platform::set_title(&title);
@@ -1403,7 +1554,11 @@ impl App {
                 }
                 self.dirty = true;
             }
-            UiEvent::Close => self.quit(),
+            UiEvent::Close => {
+                if !self.unsaved_blocks_quit() {
+                    self.quit()
+                }
+            }
             UiEvent::Text(text) => {
                 self.preedit.clear();
                 self.ctx.blink_epoch = Instant::now();
@@ -1767,7 +1922,9 @@ impl App {
                     true
                 }
                 (_, Some('q')) => {
-                    self.quit();
+                    if !self.unsaved_blocks_quit() {
+                        self.quit();
+                    }
                     true
                 }
                 (_, Some(',')) => {
@@ -2489,9 +2646,14 @@ impl App {
         }
         if let Pointer::Pane(id) = pointer {
             let Self { panes, ctx, .. } = self;
+            let mut link = None;
             if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
                 let (ox, oy) = (pane.rect.x, pane.rect.y);
                 pane.mouse_up(ctx, x - ox, y - oy);
+                link = pane.clicked_link.take();
+            }
+            if let Some(url) = link {
+                self.open_link(id, url);
             }
         }
     }
@@ -2566,6 +2728,7 @@ impl App {
             }
         }
         self.animation_at = animation;
+        self.draw_viewers(&visible);
         self.wake_for_agents(&agents);
         self.pane_hits.clear();
         self.draw_agent_headers(&visible);
@@ -2610,7 +2773,10 @@ impl App {
         if tab.focus == SETTINGS {
             return "Settings".to_owned();
         }
-        tab.name.clone().unwrap_or_else(|| self.auto_title(index))
+        tab.name
+            .clone()
+            .or_else(|| self.viewers.iter().find(|v| v.id == tab.focus).map(|v| v.title.clone()))
+            .unwrap_or_else(|| self.auto_title(index))
     }
 
     /// A tab's title when it isn't named: its panes' folders, in layout
@@ -2720,6 +2886,28 @@ impl App {
                 (None, None) => {}
             }
             pane_hits.push((bar, self.active, id));
+        }
+    }
+
+    /// Where each viewer's native view goes (hidden when its tab isn't
+    /// showing). It slides itself in, header and all.
+    fn draw_viewers(&mut self, visible: &[(u64, Rect)]) {
+        let zoom = self.zoom;
+        let placed: Vec<_> = self
+            .viewers
+            .iter()
+            .map(|viewer| match visible.iter().find(|(id, _)| *id == viewer.id) {
+                Some(&(_, r)) => {
+                    // What shows around it while it slides in.
+                    self.scene.fill(r, self.ctx.theme.background);
+                    (viewer.id, [r.x * zoom, r.y * zoom, r.w * zoom, r.h * zoom], true)
+                }
+                None => (viewer.id, [0.0; 4], false),
+            })
+            .collect();
+        if placed != self.viewers_placed {
+            platform::viewer_place(placed.clone());
+            self.viewers_placed = placed;
         }
     }
 
