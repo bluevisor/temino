@@ -62,6 +62,8 @@ const GRAB: f32 = 4.0;
 const MIN_PANE: f32 = 120.0;
 /// How far a press on a tab moves before it becomes a drag.
 const DRAG_SLOP: f32 = 4.0;
+/// How long a reordered tab takes to slide into its new place.
+const TAB_SLIDE: Duration = Duration::from_millis(160);
 const MENU_WIDTH: f32 = 200.0;
 const MENU_ROW: f32 = 26.0;
 
@@ -212,6 +214,10 @@ struct Tab {
     name: Option<String>,
     /// An entry of TAB_COLORS.
     color: Option<usize>,
+    /// Where its row was last drawn, and where it slides from after the
+    /// tabs are reordered.
+    shown: Option<(f32, f32)>,
+    slide: Option<((f32, f32), Instant)>,
 }
 
 /// What a row of the tab menu does.
@@ -670,7 +676,7 @@ impl App {
 
     fn new_tab(&mut self) -> Result<(), String> {
         let id = self.make_pane()?;
-        self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoomed: false, name: None, color: None });
+        self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoomed: false, name: None, color: None, shown: None, slide: None });
         self.switch_tab(self.tabs.len() - 1);
         self.save_tabs();
         Ok(())
@@ -699,6 +705,8 @@ impl App {
                 zoomed: false,
                 name: name.filter(|n| !n.is_empty()).map(str::to_owned),
                 color: color.parse().ok().filter(|&c: &usize| c < TAB_COLORS.len()),
+                shown: None,
+                slide: None,
             });
             if current == "*" {
                 active = self.tabs.len() - 1;
@@ -1570,7 +1578,7 @@ impl App {
             self.switch_tab(index);
             return;
         }
-        self.tabs.push(Tab { root: Node::Leaf(SETTINGS), focus: SETTINGS, zoomed: false, name: None, color: None });
+        self.tabs.push(Tab { root: Node::Leaf(SETTINGS), focus: SETTINGS, zoomed: false, name: None, color: None, shown: None, slide: None });
         self.switch_tab(self.tabs.len() - 1);
     }
 
@@ -1739,6 +1747,12 @@ impl App {
     fn move_tab(&mut self, from: usize, to: usize) {
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
+        // Every tab between the two ends moved; each slides over from where
+        // it shows now.
+        let now = Instant::now();
+        for tab in &mut self.tabs[from.min(to)..=from.max(to)] {
+            tab.slide = tab.shown.map(|at| (at, now));
+        }
         self.active = if self.active == from {
             to
         } else if from < self.active && self.active <= to {
@@ -2323,7 +2337,7 @@ impl App {
         scene.fill(Rect::new(0.0, top - 1.0, bar.w, 1.0), theme.divider);
         // Clear of the traffic lights on the left, centered in what's left.
         // Fixed in points, like the bar: zoom leaves it alone.
-        let font = 15.0 / self.zoom;
+        let font = 18.0 / self.zoom;
         let room = (bar.w - 2.0 * 84.0 / self.zoom).max(0.0);
         let shown = text.elide(title, UI_BOLD, font, room);
         let w = text.measure(&shown, UI_BOLD, font);
@@ -2483,6 +2497,29 @@ impl App {
         close_hits.push((close, index));
     }
 
+    /// Where tab `index` draws, given the `rect` it belongs at: on its way
+    /// there while it slides after a reorder.
+    fn slid(&mut self, index: usize, rect: Rect) -> Rect {
+        let now = Instant::now();
+        let Some(tab) = self.tabs.get_mut(index) else { return rect };
+        let mut drawn = rect;
+        if let Some(((x, y), at)) = tab.slide {
+            let t = now.duration_since(at).as_secs_f32() / TAB_SLIDE.as_secs_f32();
+            if t >= 1.0 {
+                tab.slide = None;
+            } else {
+                // Ease out: quick to start, settling gently.
+                let left = (1.0 - t).powi(3);
+                drawn.x += (x - rect.x) * left;
+                drawn.y += (y - rect.y) * left;
+                let next = now + Duration::from_millis(16);
+                self.animation_at = Some(self.animation_at.map_or(next, |a| a.min(next)));
+            }
+        }
+        tab.shown = Some((drawn.x, drawn.y));
+        drawn
+    }
+
     /// The tabs as a strip across the top.
     fn draw_tab_strip(&mut self, tabs: &[TabView]) {
         let width = self.width;
@@ -2493,10 +2530,15 @@ impl App {
         let plus = 34.0;
         let tab_width = ((width - 12.0 - plus) / tabs.len() as f32).min(TAB_MAX_WIDTH);
         for (index, tab) in tabs.iter().enumerate() {
-            let rect = Rect::new(6.0 + index as f32 * tab_width, top + 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
+            let place = Rect::new(6.0 + index as f32 * tab_width, top + 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
+            let rect = self.slid(index, place);
             draw_tab_background(&mut self.scene, &self.ctx.theme, rect, tab.color, index == self.active, false);
             let badge = (tab.panes > 1).then(|| format!("{}", tab.panes));
             self.draw_tab(index, tab, rect, badge);
+            // Hits go by where it belongs, so a drag doesn't chase it.
+            if let Some(hit) = self.tab_hits.last_mut() {
+                hit.0 = place;
+            }
         }
         let Self { scene, ctx, new_tab_hit, .. } = self;
         let Ctx { text, theme, .. } = ctx;
@@ -2521,9 +2563,13 @@ impl App {
         };
         let mut y = area.y + 8.0;
         for (index, tab) in tabs.iter().enumerate() {
-            let rect = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
+            let place = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
+            let rect = self.slid(index, place);
             if self.compact {
                 self.draw_compact_tab(index, tab, rect, dragged == Some(index));
+                if let Some(hit) = self.tab_hits.last_mut() {
+                    hit.0 = place;
+                }
                 y += SIDEBAR_ROW + 4.0;
                 continue;
             }
@@ -2540,7 +2586,7 @@ impl App {
             let badge = (tab.panes > 1 && tab.lines.is_empty()).then(|| format!("{}", tab.panes));
             self.draw_tab(index, tab, rect, badge);
             if let Some(hit) = self.tab_hits.last_mut() {
-                hit.0 = row;
+                hit.0 = Rect::new(place.x, place.y, row.w, row.h);
             }
             self.draw_pane_lines(index, tab, Rect::new(rect.x, rect.bottom() - 4.0, rect.w, extra));
             y += row.h + 4.0;
