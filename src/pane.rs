@@ -189,6 +189,10 @@ pub struct Pane {
     /// The block an agent was last seen running in: it stays an agent
     /// whatever it titles itself next.
     agent_block: Option<u64>,
+    /// Which agent that is, once known: Claude Code run under an alias is
+    /// only named by its resting `✳` title, which its spinner replaces
+    /// while it works.
+    agent_program: Option<&'static str>,
     screen: Option<(Instant, Option<AgentState>)>,
     pub agent_unseen: bool,
     /// The agent's state this frame, read once by the window.
@@ -302,6 +306,7 @@ impl Pane {
             progress: false,
             agent_was: None,
             agent_block: None,
+            agent_program: None,
             screen: None,
             agent_unseen: false,
             program_now: None,
@@ -399,7 +404,11 @@ impl Pane {
                 || agent::is_agent_command(&block.command)
                 || agent::is_agent_title(&self.program_title)
         });
-        self.agent_block = running.filter(|_| is_agent).map(|block| block.id);
+        let block = running.filter(|_| is_agent).map(|block| block.id);
+        if block != self.agent_block {
+            self.agent_program = None;
+        }
+        self.agent_block = block;
         if !is_agent {
             self.agent_was = None;
             self.agent_unseen = false;
@@ -410,6 +419,11 @@ impl Pane {
             self.turn = None;
             self.last_turn = None;
             return None;
+        }
+        if self.agent_program.is_none() {
+            self.agent_program = running
+                .and_then(|block| agent::agent_program(&block.command))
+                .or_else(|| agent::title_program(&self.program_title));
         }
         if let Some(group) = self.session.foreground_group() {
             self.watcher.get_or_insert_with(agent::Watcher::new).set_group(group);
@@ -469,9 +483,8 @@ impl Pane {
         let state = self.agent_now?;
         let report = self.watcher.as_ref().and_then(agent::Watcher::report).unwrap_or_default();
         let started = self.session.active().map_or(now, |block| block.started);
-        let program = self.session.active().and_then(|block| agent::agent_program(&block.command));
         Some(AgentInfo {
-            program: program.or_else(|| agent::title_program(&self.program_title)),
+            program: self.agent_program,
             state,
             prompt: report.prompt.or_else(|| self.typed_prompt.clone()),
             subagents: report.subagents,
