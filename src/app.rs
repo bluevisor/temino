@@ -66,6 +66,8 @@ const GAP: f32 = 1.0;
 /// How far from a divider a press still grabs it.
 const GRAB: f32 = 4.0;
 const MIN_PANE: f32 = 120.0;
+/// A divider dragged this close to the middle of its split snaps to it.
+const MIDDLE_SNAP: f32 = 12.0;
 /// How far a press on a tab moves before it becomes a drag.
 const DRAG_SLOP: f32 = 4.0;
 /// How long a reordered tab takes to slide into its new place.
@@ -2604,6 +2606,7 @@ impl App {
                 let extent = if divider.axis == Axis::Row { parent.w } else { parent.h };
                 let low = (MIN_PANE / extent).min(0.5);
                 let ratio = ratio.clamp(low, 1.0 - low);
+                let ratio = if ((ratio - 0.5) * extent).abs() < MIDDLE_SNAP { 0.5 } else { ratio };
                 let tab = &mut self.tabs[self.active];
                 if let Some(Node::Split { ratio: r, .. }) = tab.root.at_path(&divider.path) {
                     *r = ratio;
