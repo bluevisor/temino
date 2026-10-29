@@ -176,6 +176,19 @@ impl Scene {
         [rect.x * s, rect.y * s, rect.w * s, rect.h * s]
     }
 
+    /// Pixel-aligned bounds for a plain fill. Two fills that meet at a
+    /// fractional pixel would each cover part of it, letting the background
+    /// show through as a one-pixel seam (between terminal rows, at
+    /// fractional zoom); rounded to the same pixel edge, they tile exactly.
+    fn fill_pixels(&self, rect: Rect) -> [f32; 4] {
+        let s = self.scale;
+        let left = (rect.x * s).round();
+        let top = (rect.y * s).round();
+        let right = ((rect.x + rect.w) * s).round();
+        let bottom = ((rect.y + rect.h) * s).round();
+        [left, top, right - left, bottom - top]
+    }
+
     pub fn pop_clip(&mut self) {
         self.clips.pop();
     }
@@ -196,8 +209,12 @@ impl Scene {
         }
         let clip = self.pixel_clip();
         let s = self.scale;
+        // A plain fill has no rounded edge to anti-alias, so snapping its
+        // bounds keeps adjacent fills seamless.
+        let plain = quad.radius == [0.0; 4] && quad.border == 0.0;
+        let bounds = if plain { self.fill_pixels(rect) } else { self.pixels(rect) };
         self.layers[self.layer].rects.push(RectInstance {
-            bounds: self.pixels(rect),
+            bounds,
             color: quad.color.to_array(),
             color2: quad.color2.unwrap_or(quad.color).to_array(),
             border_color: quad.border_color.to_array(),
@@ -244,5 +261,46 @@ impl Scene {
     pub fn color_glyph(&mut self, rect: Rect, uv: [f32; 4], alpha: f32) {
         // The shaders take a negative red as "sample the color atlas".
         self.glyph(rect, uv, Color { r: -1.0, g: 0.0, b: 0.0, a: alpha });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// At a fractional zoom, adjacent row fills must land on whole pixels
+    /// and share an edge, or a one-pixel seam shows the background through.
+    #[test]
+    fn plain_fills_snap_and_tile_at_fractional_scale() {
+        let mut scene = Scene::new();
+        scene.reset(800.0, 600.0, 1.21, Color::TRANSPARENT);
+        scene.set_origin(14.0, 60.0);
+        let height = 25.0 / 1.21;
+        let color = Color::hex(0xffffff);
+        scene.fill(Rect::new(0.0, 0.0, 500.0, height), color);
+        scene.fill(Rect::new(0.0, height, 500.0, height), color);
+
+        let rects = &scene.layers[LAYER_CONTENT].rects;
+        assert_eq!(rects.len(), 2);
+        for rect in rects {
+            for value in rect.bounds {
+                assert_eq!(value, value.round(), "fill bounds {value} is not on a pixel");
+            }
+        }
+        let first = rects[0].bounds;
+        let second = rects[1].bounds;
+        assert_eq!(first[1] + first[3], second[1], "rows do not share an edge");
+    }
+
+    /// Rounded or bordered quads keep their fractional bounds for the
+    /// shader to anti-alias.
+    #[test]
+    fn rounded_quads_are_not_snapped() {
+        let mut scene = Scene::new();
+        scene.reset(800.0, 600.0, 1.21, Color::TRANSPARENT);
+        scene.quad(Quad::new(Rect::new(0.0, 0.0, 10.5, 10.5), Color::hex(0xffffff)).radius(3.0));
+        let bounds = scene.layers[LAYER_CONTENT].rects[0].bounds;
+        assert_eq!(bounds[0], 0.0);
+        assert_ne!(bounds[2], (10.5f32 * 1.21).round());
     }
 }
