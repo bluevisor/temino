@@ -165,7 +165,7 @@ impl Ui<'_> {
             Row::Shell => ("Default shell", "For new tabs and panes; a missing one is installed".to_owned()),
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
-            Row::CheckForUpdates => ("Check now", "Downloads a newer version if there is one".to_owned()),
+            Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
         };
         let left = rect.x + 16.0;
         self.text.draw_text(self.scene, label, left, rect.y + 25.0, UI, 13.0, theme.text);

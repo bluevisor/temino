@@ -37,15 +37,26 @@ pub struct Completion {
     pub selected: usize,
 }
 
-/// Commands on $PATH, rescanned at most every 30 seconds.
+/// Commands on $PATH, rescanned at most every 30 seconds. The shell's
+/// $PATH once it reported one: Temino's own, launched from the Dock, lacks
+/// Homebrew and whatever the user's profile adds.
 pub struct Commands {
     names: BTreeSet<String>,
     scanned: Option<Instant>,
+    path: Option<String>,
 }
 
 impl Commands {
     pub fn new() -> Commands {
-        Commands { names: BTreeSet::new(), scanned: None }
+        Commands { names: BTreeSet::new(), scanned: None, path: None }
+    }
+
+    /// Searches `path` from now on, when the shell reported one.
+    pub fn use_path(&mut self, path: Option<&str>) {
+        if let Some(path) = path.filter(|path| self.path.as_deref() != Some(path)) {
+            self.path = Some(path.to_owned());
+            self.scanned = None;
+        }
     }
 
     fn refresh(&mut self) {
@@ -53,7 +64,7 @@ impl Commands {
             return;
         }
         self.names = BUILTINS.iter().map(|s| s.to_string()).collect();
-        let path = std::env::var("PATH").unwrap_or_default();
+        let path = self.path.clone().or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
         for dir in path.split(':').filter(|d| !d.is_empty() && *d != ".") {
             let Ok(entries) = std::fs::read_dir(dir) else { continue };
             for entry in entries.flatten() {
@@ -171,6 +182,18 @@ pub fn complete(text: &str, cursor: usize, cwd: &str, commands: &mut Commands) -
     Some(Completion { start, end: cursor, candidates, selected: 0 })
 }
 
+/// What Tab would add to the end of `text`, for showing in grey: the rest
+/// of the only match, or of what every match shares.
+pub fn hint(text: &str, cwd: &str, commands: &mut Commands) -> Option<String> {
+    let completion = complete(text, text.len(), cwd, commands)?;
+    let fill = match completion.candidates.as_slice() {
+        [only] => only.replacement.clone(),
+        many => common_prefix(many),
+    };
+    let rest = fill.strip_prefix(&text[completion.start..])?.trim_end_matches(' ');
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
 /// Longest common prefix of every candidate's replacement.
 pub fn common_prefix(candidates: &[Candidate]) -> String {
     let first = &candidates[0].replacement;
@@ -185,4 +208,27 @@ pub fn common_prefix(candidates: &[Candidate]) -> String {
             .min(length);
     }
     first[..length].to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hints_fill_in_what_tab_would() {
+        let dir = std::env::temp_dir().join(format!("temino-hint-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        std::fs::write(dir.join("notes-one.txt"), "").unwrap();
+        std::fs::write(dir.join("notes-two.txt"), "").unwrap();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/claude"), "").unwrap();
+        let cwd = dir.to_str().unwrap();
+        let mut commands = Commands::new();
+        commands.use_path(Some(&format!("{cwd}/bin")));
+        assert_eq!(hint("cd pro", cwd, &mut commands).as_deref(), Some("jects/"));
+        assert_eq!(hint("cat no", cwd, &mut commands).as_deref(), Some("tes-"));
+        assert_eq!(hint("cat notes-", cwd, &mut commands), None);
+        assert_eq!(hint("cla", cwd, &mut commands).as_deref(), Some("ude"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

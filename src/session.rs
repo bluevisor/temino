@@ -4,7 +4,7 @@
 //! never interleaves with prompts and each block can be styled, selected
 //! and copied on its own.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
@@ -204,6 +204,99 @@ impl Block {
         text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
     }
 
+    /// The link under output cell (`line`, `column`): an OSC 8 hyperlink,
+    /// or a URL in the text, followed across soft-wrapped lines.
+    pub fn link_at(&self, line: usize, column: usize) -> Option<Link> {
+        let grid = self.term.grid();
+        let columns = grid.columns();
+        let top = -(grid.history_size() as i32);
+        let bottom = grid.screen_lines() as i32 - 1;
+        let target = self.grid_line(line);
+        if target.0 < top || target.0 > bottom || column >= columns {
+            return None;
+        }
+        let output_line = |l: i32| (l - top) as usize;
+        let mut first = target.0;
+        let mut last = target.0;
+        if let Some(link) = grid[target][Column(column)].hyperlink() {
+            // Every cell carrying the same link, in reading order.
+            let same = |l: i32, c: usize| grid[Line(l)][Column(c)].hyperlink().as_ref() == Some(&link);
+            let (mut l0, mut c0) = (target.0, column);
+            loop {
+                let previous = if c0 > 0 { (l0, c0 - 1) } else { (l0 - 1, columns - 1) };
+                if previous.0 < top || !same(previous.0, previous.1) {
+                    break;
+                }
+                (l0, c0) = previous;
+            }
+            let (mut l1, mut c1) = (target.0, column);
+            loop {
+                let next = if c1 + 1 < columns { (l1, c1 + 1) } else { (l1 + 1, 0) };
+                if next.0 > bottom || !same(next.0, next.1) {
+                    break;
+                }
+                (l1, c1) = next;
+            }
+            let cells = (l0..=l1)
+                .map(|l| {
+                    let from = if l == l0 { c0 } else { 0 };
+                    let to = if l == l1 { c1 } else { columns - 1 };
+                    (output_line(l), from, to)
+                })
+                .collect();
+            return Some(Link { url: link.uri().to_owned(), cells });
+        }
+        let wraps = |l: i32| grid[Line(l)][Column(columns - 1)].flags.contains(Flags::WRAPLINE);
+        while first > top && wraps(first - 1) {
+            first -= 1;
+        }
+        while last < bottom && wraps(last) {
+            last += 1;
+        }
+        let mut chars = Vec::new();
+        let mut at = Vec::new();
+        for l in first..=last {
+            for c in 0..columns {
+                let cell = &grid[Line(l)][Column(c)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                chars.push(cell.c);
+                at.push((l, c));
+            }
+        }
+        let index = at.iter().position(|&(l, c)| l == target.0 && c == column)?;
+        let url = find_urls(&chars).into_iter().find(|(start, end)| (*start..*end).contains(&index));
+        let (start, end, url) = match url {
+            Some((start, end)) => (start, end, chars[start..end].iter().collect()),
+            None => {
+                // A file or folder that exists, named absolutely, from ~,
+                // or from where the command ran.
+                let (start, end) = find_path(&chars, index)?;
+                let name: String = chars[start..end].iter().collect();
+                let path = if let Some(rest) = name.strip_prefix("~/") {
+                    format!("{}/{rest}", std::env::var("HOME").ok()?)
+                } else if name.starts_with('/') {
+                    name
+                } else {
+                    format!("{}/{name}", self.cwd)
+                };
+                if !std::path::Path::new(&path).exists() {
+                    return None;
+                }
+                (start, end, path)
+            }
+        };
+        let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+        for &(l, c) in &at[start..end] {
+            match cells.last_mut() {
+                Some(run) if run.0 == output_line(l) => run.2 = c,
+                _ => cells.push((output_line(l), c, c)),
+            }
+        }
+        Some(Link { url, cells })
+    }
+
     pub fn output_text(&mut self) -> String {
         let lines = self.output_lines();
         if lines == 0 {
@@ -231,6 +324,12 @@ enum Segment {
     Done(Option<i32>),
     Cwd(String),
     Continuation,
+    /// A desktop notification (OSC 9, 777 or 99): the program wants you.
+    Notify,
+    /// A progress report (OSC 9;4): busy or not.
+    Progress(bool),
+    /// The shell's $PATH, reported at each prompt.
+    Path(String),
 }
 
 /// Pulls Temino's own OSC sequences out of the byte stream; everything else
@@ -344,6 +443,13 @@ fn parse_osc(body: &[u8]) -> Option<Segment> {
             Some(Segment::Cwd(percent_decode(path)))
         }
         "6973" if rest == "cont" => Some(Segment::Continuation),
+        "6973" => rest.strip_prefix("path;").map(|path| Segment::Path(path.to_owned())),
+        "9" => match rest.strip_prefix("4;") {
+            Some(progress) => Some(Segment::Progress(!matches!(progress.split(';').next(), Some("0" | "")))),
+            None => Some(Segment::Notify),
+        },
+        "777" if rest.starts_with("notify;") => Some(Segment::Notify),
+        "99" => Some(Segment::Notify),
         _ => None,
     }
 }
@@ -451,6 +557,8 @@ pub enum Notice {
     Title(String),
     Clipboard(String),
     Bell,
+    Notify,
+    Progress(bool),
     /// A command finished and wants the block list cleared (`clear`).
     Clear,
     Finished,
@@ -474,6 +582,11 @@ pub struct Session {
     continuation_since: Option<Instant>,
     pub exit_code: Option<i32>,
     pub boot_output: Vec<u8>,
+    /// When a running program last printed, and when we last wrote to it.
+    pub output_at: Option<Instant>,
+    input_at: Cell<Option<Instant>>,
+    /// The shell's own $PATH, which a Dock-launched Temino's lacks.
+    pub path: Option<String>,
 }
 
 impl Session {
@@ -495,6 +608,9 @@ impl Session {
             continuation_since: None,
             exit_code: None,
             boot_output: Vec::new(),
+            output_at: None,
+            input_at: Cell::new(None),
+            path: None,
         }
     }
 
@@ -519,6 +635,9 @@ impl Session {
             env.push("BASH_SILENCE_DEPRECATION_WARNING=1".into());
         }
         env.push(format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION")));
+        if let Some(lang) = utf8_lang(&env) {
+            env.push(format!("LANG={lang}"));
+        }
 
         let (pid, master) =
             crate::platform::spawn(&argv, &env, &self.cwd, self.size.columns as u16, self.size.lines as u16)?;
@@ -584,10 +703,21 @@ impl Session {
         }
     }
 
+    /// Sends what you typed (or did) to the program.
     pub fn write(&self, bytes: &[u8]) {
+        self.input_at.set(Some(Instant::now()));
+        self.reply(bytes);
+    }
+
+    /// Sends the terminal's own answers and reports, which aren't you acting.
+    pub fn reply(&self, bytes: &[u8]) {
         if let Some(shell) = &self.shell {
             let _ = shell.writer.send(bytes.to_vec());
         }
+    }
+
+    pub fn input_at(&self) -> Option<Instant> {
+        self.input_at.get()
     }
 
     fn new_block(&mut self, kind: BlockKind, command: String) -> &mut Block {
@@ -710,6 +840,9 @@ impl Session {
                         self.continuation_since = Some(Instant::now());
                     }
                 }
+                Segment::Notify => notices.push(Notice::Notify),
+                Segment::Path(path) => self.path = Some(path),
+                Segment::Progress(busy) => notices.push(Notice::Progress(busy)),
             }
         }
         self.drain_events(theme, &mut notices);
@@ -732,6 +865,7 @@ impl Session {
                 self.idle_since.get_or_insert_with(Instant::now);
             }
             Phase::Running => {
+                self.output_at = Some(Instant::now());
                 if let Some(block) = self.active_mut() {
                     block.feed(data);
                 }
@@ -782,7 +916,7 @@ impl Session {
             }
         }
         if !reply.is_empty() {
-            self.write(&reply);
+            self.reply(&reply);
         }
     }
 
@@ -845,7 +979,7 @@ impl Session {
         let events: Vec<Event> = self.events.borrow_mut().drain(..).collect();
         for event in events {
             match event {
-                Event::PtyWrite(text) => self.write(text.as_bytes()),
+                Event::PtyWrite(text) => self.reply(text.as_bytes()),
                 Event::Title(title) => notices.push(Notice::Title(title)),
                 Event::ResetTitle => notices.push(Notice::Title(String::new())),
                 Event::ClipboardStore(_, text) => notices.push(Notice::Clipboard(text)),
@@ -854,12 +988,12 @@ impl Session {
                     let colors = self.active().map(|b| *b.term.colors());
                     if let Some(colors) = colors {
                         let reply = format(theme.query_color(index, &colors));
-                        self.write(reply.as_bytes());
+                        self.reply(reply.as_bytes());
                     }
                 }
                 Event::TextAreaSizeRequest(format) => {
                     let reply = format(self.window_size());
-                    self.write(reply.as_bytes());
+                    self.reply(reply.as_bytes());
                 }
                 _ => {}
             }
@@ -949,6 +1083,96 @@ fn integrate(shell: &str, env: &mut Vec<String>) -> std::io::Result<Vec<String>>
 
 /// The checked-out branch of the repository containing `path`, read
 /// straight from .git/HEAD (no git process).
+/// A link in a block's output, and the cells it covers as
+/// (output line, first column, last column) runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    pub url: String,
+    pub cells: Vec<(usize, usize, usize)>,
+}
+
+/// The path-like word around `index` in `chars`, without quotes or
+/// brackets around it, a `:line:column` after it, or sentence punctuation.
+pub fn find_path(chars: &[char], index: usize) -> Option<(usize, usize)> {
+    let stop = |c: char| {
+        c.is_whitespace()
+            || matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '|' | ',' | ';')
+            || ('\u{2500}'..='\u{259f}').contains(&c)
+    };
+    if stop(*chars.get(index)?) {
+        return None;
+    }
+    let mut start = index;
+    while start > 0 && !stop(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < chars.len() && !stop(chars[end]) {
+        end += 1;
+    }
+    // `src/main.rs:12:5` → `src/main.rs`.
+    loop {
+        let digits = chars[start..end].iter().rev().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && end - digits > start && chars[end - digits - 1] == ':' {
+            end -= digits + 1;
+        } else if end > start && matches!(chars[end - 1], '.' | ':' | '!' | '?') {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    (end > start && index < end).then_some((start, end))
+}
+
+/// Where URLs sit in `chars`, as [start, end) character ranges.
+pub fn find_urls(chars: &[char]) -> Vec<(usize, usize)> {
+    const SCHEMES: [&str; 6] = ["https://", "http://", "file://", "ftp://", "ssh://", "mailto:"];
+    let allowed = |c: char| {
+        (c.is_ascii_graphic() && !matches!(c, '<' | '>' | '"' | '`' | '{' | '}' | '|' | '^' | '\\'))
+            || (!c.is_ascii() && c.is_alphanumeric())
+    };
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let boundary = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
+        let scheme = SCHEMES.iter().find(|scheme| {
+            let scheme: Vec<char> = scheme.chars().collect();
+            chars[i..].starts_with(&scheme)
+        });
+        let Some(scheme) = scheme.filter(|_| boundary) else {
+            i += 1;
+            continue;
+        };
+        let body = i + scheme.len();
+        let mut end = body;
+        while end < chars.len() && allowed(chars[end]) {
+            end += 1;
+        }
+        // Trailing punctuation belongs to the sentence, and a closing
+        // bracket to the text around it unless the URL opened one.
+        while end > body {
+            let last = chars[end - 1];
+            let opened = |open: char| chars[i..end].iter().filter(|&&c| c == open).count();
+            let closed = |close: char| chars[i..end].iter().filter(|&&c| c == close).count();
+            let unbalanced = match last {
+                ')' => closed(')') > opened('('),
+                ']' => closed(']') > opened('['),
+                _ => false,
+            };
+            if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*') || unbalanced {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+        if end > body {
+            found.push((i, end));
+        }
+        i = end.max(i + 1);
+    }
+    found
+}
+
 pub fn git_branch(path: &str) -> Option<String> {
     let mut dir = std::path::PathBuf::from(path);
     loop {
@@ -967,6 +1191,41 @@ pub fn git_branch(path: &str) -> Option<String> {
     }
 }
 
+/// A UTF-8 `LANG` for the shell when nothing in `env` picks a locale.
+/// Opened from the Dock or Finder, a macOS app gets no LANG at all, and the
+/// shell and its programs fall back to ASCII: pasted Chinese turns into
+/// escapes. Uses the system's region, as Terminal does.
+fn utf8_lang(env: &[String]) -> Option<String> {
+    let set = |key: &str| {
+        env.iter().any(|entry| entry.strip_prefix(key).is_some_and(|rest| rest.starts_with('=') && rest.len() > 1))
+    };
+    if set("LANG") || set("LC_ALL") || set("LC_CTYPE") {
+        return None;
+    }
+    if cfg!(target_os = "haiku") {
+        return None;
+    }
+    if cfg!(target_os = "macos") {
+        static MAC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        return Some(MAC.get_or_init(mac_lang).clone());
+    }
+    Some("C.UTF-8".to_owned())
+}
+
+/// The system region's UTF-8 locale.
+fn mac_lang() -> String {
+    let region = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    // "en_US@rg=gbzzzz" → "en_US.UTF-8", if the system has that locale.
+    let lang = region
+        .map(|region| format!("{}.UTF-8", region.split('@').next().unwrap_or("")))
+        .filter(|lang| lang.len() > 6 && std::path::Path::new("/usr/share/locale").join(lang).is_dir());
+    lang.unwrap_or_else(|| "en_US.UTF-8".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1233,86 @@ mod tests {
     /// fish 4.9 redrawing an unchanged prompt (here after SIGWINCH): its own
     /// start mark comes last, after the prompt's end.
     const FISH_REPAINT: &[u8] = b"\x1b[m\x1b[?2004h\r\r\x1b]133;A;click_events=1\x1b\\\x1b]133;B\x07\x1b]133;B\x1b\\\x1b[J\x1b]133;A;click_events=1\x1b\\";
+
+    #[test]
+    fn prompt_reports_the_shell_path_and_notifications() {
+        let theme = Theme::dark();
+        let mut session = Session::new(GridSize { columns: 80, lines: 24 });
+        session.feed(b"\x1b]6973;path;/opt/homebrew/bin:/usr/bin\x07\x1b]133;A\x07", &theme);
+        assert_eq!(session.path.as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
+        let notices = session.feed(b"\x1b]9;Claude needs you\x07\x1b]9;4;3;\x07\x1b]9;4;0;\x07", &theme);
+        let kinds: Vec<_> = notices
+            .iter()
+            .map(|n| match n {
+                Notice::Notify => "notify",
+                Notice::Progress(true) => "busy",
+                Notice::Progress(false) => "idle",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["notify", "busy", "idle"]);
+    }
+
+    #[test]
+    fn urls_are_found_without_trailing_punctuation() {
+        let find = |text: &str| -> Vec<String> {
+            let chars: Vec<char> = text.chars().collect();
+            find_urls(&chars).into_iter().map(|(a, b)| chars[a..b].iter().collect()).collect()
+        };
+        assert_eq!(find("see https://example.com/a?b=1."), ["https://example.com/a?b=1"]);
+        assert_eq!(
+            find("(at https://en.wikipedia.org/wiki/Rust_(language))"),
+            ["https://en.wikipedia.org/wiki/Rust_(language)"]
+        );
+        assert_eq!(find("[docs](http://x.io/y) │ file:///tmp/a b"), ["http://x.io/y", "file:///tmp/a"]);
+        assert_eq!(find("nothttps://x.io https:// "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn paths_are_cut_from_their_surroundings() {
+        let path = |text: &str, at: usize| -> Option<String> {
+            let chars: Vec<char> = text.chars().collect();
+            find_path(&chars, at).map(|(a, b)| chars[a..b].iter().collect())
+        };
+        assert_eq!(path("error at src/pane.rs:12:5: oops", 10).as_deref(), Some("src/pane.rs"));
+        assert_eq!(path("open '~/notes.md'.", 8).as_deref(), Some("~/notes.md"));
+        assert_eq!(path("│ /tmp/x │", 3).as_deref(), Some("/tmp/x"));
+        assert_eq!(path("a  b", 1), None);
+    }
+
+    #[test]
+    fn local_files_are_links() {
+        let theme = Theme::dark();
+        let mut session = Session::new(GridSize { columns: 40, lines: 10 });
+        session.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07", &theme);
+        session.submit("ls");
+        session.feed(b"\x1b]133;C\x07Cargo.toml  no-such-file  /tmp\r\n", &theme);
+        let block = session.blocks.last_mut().unwrap();
+        block.cwd = env!("CARGO_MANIFEST_DIR").to_owned();
+        let link = block.link_at(0, 2).expect("Cargo.toml exists");
+        assert_eq!(link.url, format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR")));
+        assert_eq!(link.cells, [(0, 0, 9)]);
+        assert_eq!(block.link_at(0, 14), None);
+        assert_eq!(block.link_at(0, 27).map(|l| l.url).as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn links_follow_soft_wraps() {
+        let theme = Theme::dark();
+        let mut session = Session::new(GridSize { columns: 20, lines: 10 });
+        session.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07", &theme);
+        session.submit("echo");
+        session.feed(b"\x1b]133;C\x07go to https://example.com/very/long/path now\r\n", &theme);
+        let block = session.blocks.last().unwrap();
+        let link = block.link_at(1, 3).expect("a link on the wrapped line");
+        assert_eq!(link.url, "https://example.com/very/long/path");
+        assert_eq!(link.cells, [(0, 6, 19), (1, 0, 19)]);
+        assert_eq!(block.link_at(0, 1), None);
+        session.feed(b"\x1b]8;;https://anthropic.com\x07here\x1b]8;;\x07\r\n", &theme);
+        let block = session.blocks.last().unwrap();
+        let link = block.link_at(3, 2).expect("an OSC 8 link");
+        assert_eq!((link.url.as_str(), link.cells.as_slice()), ("https://anthropic.com", &[(3, 0, 3)][..]));
+    }
 
     #[test]
     fn repaint_keeps_the_prompt() {

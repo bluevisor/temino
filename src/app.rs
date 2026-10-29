@@ -5,6 +5,7 @@
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use crate::agent::AgentState;
 use crate::complete::Commands;
 use crate::editor::History;
 use crate::gpu::Gpu;
@@ -16,6 +17,7 @@ use crate::settings::{self, Action};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{Color, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
+use crate::update::{self, Release};
 use crate::Msg;
 
 /// The terminal font size at zoom 1, which every UI size is designed at.
@@ -26,7 +28,18 @@ const DEFAULT_FONT_SIZE: f32 = 15.4;
 const TAB_BAR_HEIGHT: f32 = 34.0;
 const TAB_MAX_WIDTH: f32 = 220.0;
 const SIDEBAR_WIDTH: f32 = 200.0;
-const SIDEBAR_ROW: f32 = 30.0;
+const SIDEBAR_MIN: f32 = 140.0;
+const SIDEBAR_MAX: f32 = 420.0;
+/// Dragged narrower than this, the sidebar snaps to compact.
+const SIDEBAR_SNAP: f32 = 100.0;
+/// The compact sidebar: tab numbers only.
+const SIDEBAR_COMPACT: f32 = 54.0;
+const SIDEBAR_ROW: f32 = 40.0;
+/// Sidebar rows read a little larger than the strip's tabs.
+const SIDEBAR_FONT: f32 = 13.5;
+/// An agent waiting on you, and one that finished a turn you haven't seen.
+const AGENT_WAITING: u32 = 0xf0a35e;
+const AGENT_DONE: u32 = 0x8ccf7e;
 
 /// Where the tabs are listed: down the left side (the default) or across
 /// the top (`TEMINO_TABS=top`).
@@ -201,13 +214,40 @@ enum MenuAction {
     Color(Option<usize>),
     Close,
     CloseOthers,
+    // A pane's menu: these act on the focused pane.
+    Copy,
+    Paste,
+    Clear,
+    SplitRight,
+    SplitDown,
+    ClosePane,
 }
 
-/// A tab's menu, open at a point.
+/// A tab's menu, or with `pane` the focused pane's (a right click in
+/// it), open at a point.
 struct TabMenu {
     tab: usize,
     x: f32,
     y: f32,
+    pane: bool,
+}
+
+/// The release the update check found, and its card.
+struct UpdateOffer {
+    release: Release,
+    /// The card is showing; "Later" hides it and leaves the pill.
+    open: bool,
+    installing: bool,
+}
+
+/// What a click on the update pill or card does.
+#[derive(Clone, Copy)]
+enum UpdateAction {
+    Toggle,
+    Skip,
+    Later,
+    Install,
+    Notes,
 }
 
 /// A tab being renamed in place.
@@ -225,6 +265,8 @@ struct TabView {
     color: Option<Color>,
     /// The name being typed, and whether it is all selected, while renaming.
     editing: Option<(String, bool)>,
+    /// The most urgent state of the agents in the tab's panes.
+    agent: Option<AgentState>,
 }
 
 enum Pointer {
@@ -233,6 +275,8 @@ enum Pointer {
     Pane(u64),
     /// Resizing the split at this path.
     Divider(Divider),
+    /// Dragging the sidebar's edge.
+    Sidebar,
     /// Pressed on a tab: a click, or a drag that moves it in the list.
     Tab {
         index: usize,
@@ -250,6 +294,9 @@ pub struct App {
     tabs: Vec<Tab>,
     active: usize,
     strip: TabStrip,
+    /// The sidebar's width when not compact, and whether it is compact.
+    sidebar_width: f32,
+    compact: bool,
     /// Command+B's choice to show or hide the tab list; until then it shows
     /// once there is a second tab. Hidden, tabs still switch by key.
     tab_list: Option<bool>,
@@ -274,6 +321,7 @@ pub struct App {
     tab_hits: Vec<(Rect, usize)>,
     close_hits: Vec<(Rect, usize)>,
     new_tab_hit: Rect,
+    collapse_hit: Rect,
     more_hits: Vec<(Rect, usize)>,
     menu_hits: Vec<(Rect, MenuAction)>,
     menu_rect: Rect,
@@ -295,6 +343,12 @@ pub struct App {
     blur: bool,
     /// Which of KINDS are installed, as of the Settings tab opening.
     installed: [bool; KINDS.len()],
+    update: Option<UpdateOffer>,
+    /// Per frame: the update pill and card's hit areas, and the card.
+    update_hits: Vec<(Rect, UpdateAction)>,
+    update_card: Rect,
+    /// Quitting to start the installed update.
+    relaunch: bool,
 }
 
 pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32) {
@@ -319,6 +373,7 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
                     Msg::Pty(..) => "loop: pty data",
                     Msg::ShellExited(..) => "loop: shell exited",
                     Msg::Notice(..) => "loop: notice",
+                    Msg::Update(..) => "loop: update",
                 });
                 app.handle(message)
             }
@@ -471,6 +526,11 @@ impl App {
                 Some("top") => TabStrip::Top,
                 _ => TabStrip::Left,
             },
+            sidebar_width: crate::setting("sidebar_width")
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(SIDEBAR_WIDTH)
+                .clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            compact: crate::setting("sidebar").as_deref() == Some("compact"),
             tab_list: None,
             next_id: 1,
             window: (width as f32, height as f32),
@@ -488,6 +548,7 @@ impl App {
             tab_hits: Vec::new(),
             close_hits: Vec::new(),
             new_tab_hit: Rect::default(),
+            collapse_hit: Rect::default(),
             more_hits: Vec::new(),
             menu_hits: Vec::new(),
             menu_rect: Rect::default(),
@@ -504,6 +565,10 @@ impl App {
             opacity,
             blur: crate::setting("blur").as_deref() == Some("on"),
             installed: [false; KINDS.len()],
+            update: None,
+            update_hits: Vec::new(),
+            update_card: Rect::default(),
+            relaunch: false,
         };
         app.apply_blur();
         app.set_zoom(
@@ -800,9 +865,30 @@ impl App {
             return Rect::default();
         }
         match self.strip {
-            TabStrip::Left => Rect::new(0.0, 0.0, SIDEBAR_WIDTH.min(self.width / 2.0), self.height),
+            TabStrip::Left if self.compact => Rect::new(0.0, 0.0, SIDEBAR_COMPACT, self.height),
+            TabStrip::Left => Rect::new(0.0, 0.0, self.sidebar_width.min(self.width / 2.0), self.height),
             TabStrip::Top => Rect::new(0.0, 0.0, self.width, TAB_BAR_HEIGHT),
         }
+    }
+
+    /// Where a press grabs the sidebar's edge; empty without a sidebar.
+    fn sidebar_edge(&self) -> Rect {
+        let area = self.tab_area();
+        if self.strip != TabStrip::Left || area.w == 0.0 {
+            return Rect::default();
+        }
+        Rect::new(area.right() - GRAB, 0.0, 2.0 * GRAB, area.h)
+    }
+
+    fn set_compact(&mut self, compact: bool) {
+        self.compact = compact;
+        self.relayout();
+        self.save_sidebar();
+    }
+
+    fn save_sidebar(&self) {
+        crate::save_setting("sidebar", if self.compact { "compact" } else { "full" });
+        crate::save_setting("sidebar_width", &format!("{}", self.sidebar_width.round()));
     }
 
     fn content_rect(&self) -> Rect {
@@ -887,6 +973,25 @@ impl App {
                 self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(6)));
                 self.dirty = true;
             }
+            Msg::Update(event) => {
+                match event {
+                    update::Event::Available(release) => {
+                        self.update = Some(UpdateOffer { release, open: true, installing: false })
+                    }
+                    update::Event::Installed => {
+                        self.relaunch = true;
+                        self.quit();
+                    }
+                    update::Event::Failed(error) => {
+                        if let Some(offer) = &mut self.update {
+                            offer.installing = false;
+                        }
+                        self.ctx.toast =
+                            Some((format!("Update failed: {error}"), Instant::now() + Duration::from_secs(6)));
+                    }
+                }
+                self.dirty = true;
+            }
         }
         self.update_title();
     }
@@ -939,7 +1044,7 @@ impl App {
         for pane in &mut self.panes {
             pane.hangup();
         }
-        crate::update::apply_at_quit();
+        update::finish(self.relaunch);
         self.quitting = true;
         platform::quit();
     }
@@ -1124,6 +1229,12 @@ impl App {
         if self.tab_menu.take().is_some() && key.named == Some(Named::Escape) {
             return;
         }
+        if key.named == Some(Named::Escape) {
+            if let Some(offer) = self.update.as_mut().filter(|offer| offer.open) {
+                offer.open = false;
+                return;
+            }
+        }
         if self.rename_key(&key) {
             return;
         }
@@ -1212,8 +1323,7 @@ impl App {
                     true
                 }
                 (_, Some('u')) => {
-                    self.ctx.show_toast("Checking for updates…");
-                    crate::update::check(self.ctx.sender.clone(), true);
+                    self.check_for_updates();
                     true
                 }
                 // Command+Shift+[ ] (macOS-style) moves between tabs.
@@ -1311,8 +1421,37 @@ impl App {
             Action::Zoom(step) => self.step_font_size(step as f32),
             Action::Updates(on) => crate::save_setting("updates", if on { "on" } else { "off" }),
             Action::CheckForUpdates => {
-                self.ctx.show_toast("Checking for updates…");
-                crate::update::check(self.ctx.sender.clone(), true);
+                self.check_for_updates();
+            }
+        }
+    }
+
+    /// Command+U, the menu and Settings: the card again if an update is
+    /// already offered, else a fresh check.
+    fn check_for_updates(&mut self) {
+        if let Some(offer) = &mut self.update {
+            offer.open = true;
+            return;
+        }
+        self.ctx.show_toast("Checking for updates…");
+        update::check(self.ctx.sender.clone(), true);
+    }
+
+    fn update_action(&mut self, action: UpdateAction) {
+        let Some(offer) = &mut self.update else { return };
+        match action {
+            UpdateAction::Toggle => offer.open = !offer.open,
+            UpdateAction::Notes => platform::open_url(&offer.release.notes_url()),
+            // The download can't be called back once started.
+            _ if offer.installing => {}
+            UpdateAction::Later => offer.open = false,
+            UpdateAction::Skip => {
+                update::skip(&offer.release.version);
+                self.update = None;
+            }
+            UpdateAction::Install => {
+                offer.installing = true;
+                update::install(self.ctx.sender.clone(), offer.release.clone());
             }
         }
     }
@@ -1405,7 +1544,7 @@ impl App {
     fn open_tab_menu(&mut self, tab: usize, x: f32, y: f32) {
         self.finish_rename();
         self.switch_tab(tab);
-        self.tab_menu = Some(TabMenu { tab, x, y });
+        self.tab_menu = Some(TabMenu { tab, x, y, pane: false });
     }
 
     fn menu_action(&mut self, tab: usize, action: MenuAction) {
@@ -1422,6 +1561,23 @@ impl App {
             MenuAction::CloseOthers => {
                 for index in (0..self.tabs.len()).rev().filter(|&i| i != tab) {
                     self.close_tab(index);
+                }
+            }
+            MenuAction::SplitRight => self.split(Axis::Row),
+            MenuAction::SplitDown => self.split(Axis::Column),
+            MenuAction::ClosePane => {
+                if let Some(id) = self.focused_id() {
+                    self.close_pane(id);
+                }
+            }
+            MenuAction::Copy | MenuAction::Paste | MenuAction::Clear => {
+                let Some(id) = self.focused_id() else { return };
+                let Self { panes, ctx, .. } = self;
+                let Some(pane) = panes.iter_mut().find(|p| p.id == id) else { return };
+                match action {
+                    MenuAction::Copy => pane.copy_selection(ctx),
+                    MenuAction::Paste => pane.paste_clipboard(),
+                    _ => pane.clear(),
                 }
             }
         }
@@ -1452,6 +1608,17 @@ impl App {
             }
             return;
         }
+        if let Some(&(_, action)) = self.update_hits.iter().find(|(r, _)| r.contains(x, y)) {
+            self.update_action(action);
+            return;
+        }
+        if self.update_card.contains(x, y) {
+            return;
+        }
+        // A click elsewhere puts the card away, and goes on to what it hit.
+        if let Some(offer) = self.update.as_mut().filter(|offer| offer.open && !offer.installing) {
+            offer.open = false;
+        }
         let on_renamed = self
             .renaming
             .as_ref()
@@ -1459,7 +1626,15 @@ impl App {
         if !on_renamed {
             self.finish_rename();
         }
+        if self.sidebar_edge().contains(x, y) {
+            self.pointer = Pointer::Sidebar;
+            return;
+        }
         if self.tab_area().contains(x, y) {
+            if self.collapse_hit.contains(x, y) {
+                self.set_compact(!self.compact);
+                return;
+            }
             // Control+click is the secondary click on macOS.
             let secondary =
                 pressed & buttons::SECONDARY != 0 || (cfg!(target_os = "macos") && mods & platform::mods::CONTROL != 0);
@@ -1499,6 +1674,16 @@ impl App {
         if self.focused_id() != Some(id) {
             self.set_focus(id);
         }
+        // A right click (Control+click on macOS) opens the pane's menu,
+        // unless the program takes the mouse itself.
+        let secondary =
+            pressed & buttons::SECONDARY != 0 || (cfg!(target_os = "macos") && mods & platform::mods::CONTROL != 0);
+        let reports = self.panes.iter().find(|p| p.id == id).is_some_and(|p| p.reports_mouse());
+        if secondary && !(reports && mods & platform::mods::SHIFT == 0) {
+            self.finish_rename();
+            self.tab_menu = Some(TabMenu { tab: self.active, x, y, pane: true });
+            return;
+        }
         self.pointer = Pointer::Pane(id);
         let Self { panes, ctx, .. } = self;
         if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
@@ -1508,6 +1693,14 @@ impl App {
 
     fn mouse_moved(&mut self, x: f32, y: f32, pressed: i32) {
         self.mouse = (x, y);
+        if !self.update_hits.is_empty() {
+            // The pill and the card's buttons light up under the pointer.
+            self.dirty = true;
+            if self.update_card.contains(x, y) || self.update_hits.iter().any(|(r, _)| r.contains(x, y)) {
+                self.set_cursor(Cursor::Arrow);
+                return;
+            }
+        }
         if let Pointer::Tab { index, x: x0, y: y0, dragging } = self.pointer {
             if pressed == 0 {
                 self.pointer = Pointer::Idle;
@@ -1525,7 +1718,9 @@ impl App {
                 return;
             }
         }
-        self.hover_tab = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, index)| index);
+        let hover = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, index)| index);
+        self.dirty |= hover != self.hover_tab;
+        self.hover_tab = hover;
         match &self.pointer {
             Pointer::Divider(divider) if pressed != 0 => {
                 let divider = divider.clone();
@@ -1544,6 +1739,15 @@ impl App {
                 self.relayout();
                 return;
             }
+            Pointer::Sidebar if pressed != 0 => {
+                self.compact = x < SIDEBAR_SNAP;
+                if !self.compact {
+                    self.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX.min(self.width / 2.0));
+                }
+                self.set_cursor(Cursor::ResizeColumn);
+                self.relayout();
+                return;
+            }
             Pointer::Pane(id) if pressed != 0 => {
                 let id = *id;
                 let Self { panes, ctx, .. } = self;
@@ -1555,8 +1759,22 @@ impl App {
             }
             _ => {}
         }
+        // Only the pane under the pointer underlines a link.
+        let over_chrome = self.sidebar_edge().contains(x, y)
+            || self.tab_area().contains(x, y)
+            || self.dividers.iter().any(|d| d.grab_area().contains(x, y));
+        let hovered = self.pane_at(x, y).map(|(id, _)| id).filter(|_| !over_chrome);
+        for pane in self.panes.iter_mut().filter(|pane| Some(pane.id) != hovered) {
+            pane.pointer_left();
+        }
+        if self.sidebar_edge().contains(x, y) {
+            self.set_cursor(Cursor::ResizeColumn);
+            return;
+        }
         if self.tab_area().contains(x, y) {
             self.set_cursor(Cursor::Arrow);
+            // The collapse button and compact rows' titles follow the pointer.
+            self.dirty = true;
             return;
         }
         if let Some(divider) = self.dividers.iter().find(|d| d.grab_area().contains(x, y)) {
@@ -1582,6 +1800,9 @@ impl App {
         let pointer = std::mem::replace(&mut self.pointer, Pointer::Idle);
         if matches!(pointer, Pointer::Tab { dragging: true, .. } | Pointer::Divider(_)) {
             self.save_tabs();
+        }
+        if matches!(pointer, Pointer::Sidebar) {
+            self.save_sidebar();
         }
         if let Pointer::Pane(id) = pointer {
             let Self { panes, ctx, .. } = self;
@@ -1667,6 +1888,7 @@ impl App {
             self.scene.set_layer(LAYER_CONTENT);
         }
         self.draw_tab_bar();
+        self.draw_update();
         self.draw_tab_menu();
         self.draw_toast();
         self.draw_preedit();
@@ -1709,14 +1931,42 @@ impl App {
         self.close_hits.clear();
         self.more_hits.clear();
         self.new_tab_hit = Rect::default();
+        self.collapse_hit = Rect::default();
         if !self.tab_list_visible() {
             return;
+        }
+        let now = Instant::now();
+        let agents: Vec<Option<AgentState>> = (0..self.tabs.len())
+            .map(|index| {
+                let mut leaves = Vec::new();
+                self.tabs[index].root.leaves(&mut leaves);
+                let seen = index == self.active && self.focused;
+                let panes = self.panes.iter_mut().filter(|pane| leaves.contains(&pane.id));
+                panes
+                    .filter_map(|pane| {
+                        if seen {
+                            pane.agent_unseen = false;
+                        }
+                        pane.agent(now)
+                    })
+                    .max()
+            })
+            .collect();
+        // A working agent's ring turns; any agent is read again soon.
+        let wake = match agents.iter().flatten().max() {
+            Some(AgentState::Running | AgentState::Waiting) => Some(now + Duration::from_millis(50)),
+            Some(_) => Some(now + Duration::from_millis(400)),
+            None => None,
+        };
+        if let Some(at) = wake {
+            self.animation_at = Some(self.animation_at.map_or(at, |a| a.min(at)));
         }
         let tabs: Vec<TabView> = (0..self.tabs.len())
             .map(|index| {
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
                 TabView {
+                    agent: agents[index],
                     title: self.tab_title(index),
                     panes: leaves.len(),
                     color: self.tabs[index].color.map(|c| Color::hex(TAB_COLORS[c])),
@@ -1740,15 +1990,20 @@ impl App {
     fn draw_tab(&mut self, index: usize, tab: &TabView, rect: Rect, badge: Option<String>) {
         let current = index == self.active;
         let hovered = self.hover_tab == Some(index);
-        // The sidebar marks colors with its bar; the strip with a dot.
+        // The sidebar tints the whole row; the strip marks colors with a dot.
         let dot = tab.color.filter(|_| self.strip == TabStrip::Top);
+        let left = self.strip == TabStrip::Left;
+        let (font, number) = if left { (SIDEBAR_FONT, 22.0) } else { (12.0, 18.0) };
+        let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
         let Self { scene, ctx, tab_hits, close_hits, more_hits, .. } = self;
         let Ctx { text, theme, .. } = ctx;
-        let ascent = text.ui_ascent(12.0);
+        let ascent = text.ui_ascent(font);
         let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
-        let mut x = rect.x + 12.0;
-        if index < 9 {
-            x += text.draw_text(scene, &format!("{}", index + 1), x, baseline, UI, 11.0, theme.text_faint) + 8.0;
+        let mut x = rect.x + if left { 10.0 } else { 8.0 };
+        if index < 9 || tab.agent.is_some() {
+            let center = (x + number / 2.0, rect.y + rect.h / 2.0);
+            draw_tab_number(scene, text, theme, index, center, number, tab.agent, t);
+            x += number + 8.0;
         }
         if let Some(color) = dot {
             scene.quad(Quad::new(Rect::new(x, rect.y + (rect.h - 8.0) / 2.0, 8.0, 8.0), color).radius(4.0));
@@ -1777,22 +2032,22 @@ impl App {
             let field = Rect::new(x - 4.0, rect.y + 4.0, (close.x - x).max(0.0), rect.h - 8.0);
             scene.quad(Quad::new(field, theme.background).radius(4.0).border(1.0, theme.accent));
             scene.push_clip(field.inset(2.0, 0.0));
-            let w = text.measure(name, UI, 12.0);
+            let w = text.measure(name, UI, font);
             if *selected && !name.is_empty() {
                 scene.quad(
                     Quad::new(Rect::new(x - 1.0, field.y + 3.0, w + 2.0, field.h - 6.0), theme.selection).radius(2.0),
                 );
             }
-            text.draw_text(scene, name, x, baseline, UI, 12.0, theme.text);
+            text.draw_text(scene, name, x, baseline, UI, font, theme.text);
             scene.fill(Rect::new(x + w + 1.0, field.y + 4.0, 1.0, field.h - 8.0), theme.cursor);
             scene.pop_clip();
         } else {
             scene.push_clip(Rect::new(x, rect.y, (right - x).max(0.0), rect.h));
             let color = if current { theme.text } else { theme.text_dim };
-            text.draw_text(scene, &tab.title, x, baseline, UI, 12.0, color);
+            text.draw_text(scene, &tab.title, x, baseline, UI, font, color);
             scene.pop_clip();
         }
-        text.draw_text(scene, "×", close.x + 4.0, baseline, UI, 13.0, theme.text_faint);
+        text.draw_text(scene, "×", close.x + 4.0, baseline, UI, font + 1.0, theme.text_faint);
         tab_hits.push((rect, index));
         close_hits.push((close, index));
     }
@@ -1842,15 +2097,19 @@ impl App {
         let mut y = 8.0;
         for (index, tab) in tabs.iter().enumerate() {
             let rect = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
-            let theme = &self.ctx.theme;
-            if index == self.active {
-                let fill = if dragged == Some(index) { theme.raised.mix(theme.text, 0.06) } else { theme.raised };
-                self.scene.quad(Quad::new(rect, fill).radius(6.0).border(1.0, theme.divider));
+            if self.compact {
+                self.draw_compact_tab(index, tab, rect, dragged == Some(index));
+                y += SIDEBAR_ROW + 4.0;
+                continue;
             }
-            if index == self.active || tab.color.is_some() {
-                let bar = Rect::new(rect.x, rect.y + 7.0, 3.0, rect.h - 14.0);
-                self.scene.quad(Quad::new(bar, tab.color.unwrap_or(theme.accent)).radius(1.5));
-            }
+            draw_sidebar_row(
+                &mut self.scene,
+                &self.ctx.theme,
+                rect,
+                tab.color,
+                index == self.active,
+                dragged == Some(index),
+            );
             let badge = (tab.panes > 1).then(|| format!("{}", tab.panes));
             self.draw_tab(index, tab, rect, badge);
             y += SIDEBAR_ROW + 4.0;
@@ -1858,12 +2117,70 @@ impl App {
         let Self { scene, ctx, new_tab_hit, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         let plus = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
-        let ascent = text.ui_ascent(12.0);
+        let ascent = text.ui_ascent(SIDEBAR_FONT);
         let baseline = (plus.y + (plus.h + ascent * 0.72) / 2.0).round();
-        let label = format!("+  New tab   {}+T", platform::COMMAND_NAME);
-        text.draw_text(scene, &label, plus.x + 12.0, baseline, UI, 12.0, theme.text_faint);
+        if self.compact {
+            let w = text.measure("+", UI, 15.0);
+            text.draw_text(scene, "+", plus.x + (plus.w - w) / 2.0, baseline, UI, 15.0, theme.text_faint);
+        } else {
+            let label = format!("+  New tab   {}+T", platform::COMMAND_NAME);
+            text.draw_text(scene, &label, plus.x + 16.0, baseline, UI, SIDEBAR_FONT, theme.text_faint);
+        }
         *new_tab_hit = plus;
+        // Collapse to compact, or expand back, from the bottom corner.
+        let collapse = Rect::new(6.0, area.h - 34.0, 28.0, 26.0);
+        let collapse =
+            if self.compact { Rect::new((area.w - 1.0 - 28.0) / 2.0, collapse.y, 28.0, 26.0) } else { collapse };
+        if collapse.contains(self.mouse.0, self.mouse.1) {
+            scene.quad(Quad::new(collapse, theme.raised).radius(5.0));
+        }
+        let glyph = if self.compact { "»" } else { "«" };
+        let w = text.measure(glyph, UI, 14.0);
+        let baseline = (collapse.y + (collapse.h + ascent * 0.72) / 2.0).round();
+        text.draw_text(scene, glyph, collapse.x + (collapse.w - w) / 2.0, baseline, UI, 14.0, theme.text_faint);
+        self.collapse_hit = collapse;
         scene.pop_clip();
+        if self.compact {
+            self.draw_compact_hint(tabs);
+        }
+    }
+
+    /// A compact sidebar row: the tab's number on its background.
+    fn draw_compact_tab(&mut self, index: usize, tab: &TabView, rect: Rect, dragged: bool) {
+        let Self { scene, ctx, tab_hits, .. } = self;
+        let Ctx { text, theme, blink_epoch, .. } = ctx;
+        let current = index == self.active;
+        draw_sidebar_row(scene, theme, rect, tab.color, current, dragged);
+        let center = (rect.x + rect.w / 2.0 + 1.0, rect.y + rect.h / 2.0);
+        let t = blink_epoch.elapsed().as_secs_f32();
+        draw_tab_number(scene, text, theme, index, center, 24.0, tab.agent, t);
+        tab_hits.push((rect, index));
+    }
+
+    /// The hovered compact row's title, in a label beside it.
+    fn draw_compact_hint(&mut self, tabs: &[TabView]) {
+        if !matches!(self.pointer, Pointer::Idle) {
+            return;
+        }
+        let (mx, my) = self.mouse;
+        let Some(&(row, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(mx, my)) else { return };
+        let Some(tab) = tabs.get(index) else { return };
+        let title = match tab.agent {
+            Some(agent) => format!("{} · {}", agent.label(), tab.title),
+            None => tab.title.clone(),
+        };
+        let Self { scene, ctx, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        scene.set_layer(LAYER_OVERLAY);
+        let w = (text.measure(&title, UI, 12.0) + 20.0).min(TAB_MAX_WIDTH * 1.5);
+        let label = Rect::new(row.right() + 8.0, row.y + 2.0, w, row.h - 4.0);
+        scene.shadow(label, Color::hex(0x000000).alpha(0.5), 8.0, 6.0);
+        scene.quad(Quad::new(label, theme.raised).radius(6.0).border(1.0, theme.divider));
+        scene.push_clip(label.inset(8.0, 0.0));
+        let baseline = (label.y + (label.h + text.ui_ascent(12.0) * 0.72) / 2.0).round();
+        text.draw_text(scene, &title, label.x + 10.0, baseline, UI, 12.0, theme.text);
+        scene.pop_clip();
+        scene.set_layer(LAYER_CONTENT);
     }
 
     /// The open tab menu: Rename, a row of colors, Close.
@@ -1871,6 +2188,9 @@ impl App {
         self.menu_hits.clear();
         self.menu_rect = Rect::default();
         let Some(menu) = &self.tab_menu else { return };
+        if menu.pane {
+            return self.draw_pane_menu();
+        }
         let Some(tab) = self.tabs.get(menu.tab) else { return };
         let selected = tab.color;
         let several = self.tabs.len() > 1;
@@ -1937,6 +2257,190 @@ impl App {
         *menu_rect = rect;
     }
 
+    /// The focused pane's menu: Copy, Paste, Clear, the splits, Close.
+    fn draw_pane_menu(&mut self) {
+        let Some(menu) = &self.tab_menu else { return };
+        let cmd = platform::COMMAND_NAME;
+        let rows: [(&str, String, MenuAction); 6] = [
+            ("Copy", format!("{cmd}C"), MenuAction::Copy),
+            ("Paste", format!("{cmd}V"), MenuAction::Paste),
+            ("Clear", format!("{cmd}K"), MenuAction::Clear),
+            ("Split Right", format!("{cmd}D"), MenuAction::SplitRight),
+            ("Split Down", format!("{cmd}E"), MenuAction::SplitDown),
+            ("Close Pane", format!("{cmd}W"), MenuAction::ClosePane),
+        ];
+        let h = rows.len() as f32 * MENU_ROW + 12.0 + 2.0 * 9.0;
+        let x = menu.x.min(self.width - MENU_WIDTH - 8.0).max(4.0);
+        let y = menu.y.min(self.height - h - 8.0).max(4.0);
+        let rect = Rect::new(x, y, MENU_WIDTH, h);
+        let (mx, my) = self.mouse;
+        let Self { scene, ctx, menu_hits, menu_rect, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        scene.set_layer(LAYER_OVERLAY);
+        scene.shadow(rect, Color::hex(0x000000).alpha(0.5), 8.0, 10.0);
+        scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
+        let ascent = text.ui_ascent(12.0);
+        let mut row_y = y + 6.0;
+        for (i, (label, shortcut, action)) in rows.into_iter().enumerate() {
+            if i == 3 || i == 5 {
+                scene.fill(Rect::new(x + 10.0, row_y + 4.0, MENU_WIDTH - 20.0, 1.0), theme.divider);
+                row_y += 9.0;
+            }
+            let row = Rect::new(x + 5.0, row_y, MENU_WIDTH - 10.0, MENU_ROW);
+            if row.contains(mx, my) {
+                scene.quad(Quad::new(row, theme.accent.alpha(0.22)).radius(5.0));
+            }
+            let baseline = (row.y + (row.h + ascent * 0.72) / 2.0).round();
+            text.draw_text(scene, label, row.x + 9.0, baseline, UI, 12.0, theme.text);
+            let w = text.measure(&shortcut, UI, 11.0);
+            text.draw_text(scene, &shortcut, row.right() - 9.0 - w, baseline, UI, 11.0, theme.text_faint);
+            menu_hits.push((row, action));
+            row_y += MENU_ROW;
+        }
+        scene.set_layer(LAYER_CONTENT);
+        *menu_rect = rect;
+    }
+
+    /// An offered update: a pill at the foot of the sidebar, and above it
+    /// the card with the release's version, size and date.
+    fn draw_update(&mut self) {
+        self.update_hits.clear();
+        self.update_card = Rect::default();
+        let Some(offer) = &self.update else { return };
+        let sidebar = self.tab_list_visible() && self.strip == TabStrip::Left;
+        let area = self.tab_area();
+        let (mx, my) = self.mouse;
+        let height = self.height;
+        let Self { scene, ctx, update_hits, update_card, compact, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        let ascent = text.ui_ascent(12.0);
+        // The baseline that centers `size` text in `rect`.
+        let centered = |rect: Rect, size: f32| (rect.y + (rect.h + ascent * size / 12.0 * 0.72) / 2.0).round();
+        // A deeper blue than the accent, so white text reads on it.
+        let blue = theme.accent.mix(Color::hex(0x0a4fd6), 0.65);
+        let blue_hover = |rect: Rect| if rect.contains(mx, my) { blue.mix(Color::hex(0xffffff), 0.12) } else { blue };
+
+        // The pill, beside the sidebar's collapse button (above it when compact).
+        let pill = if !sidebar {
+            None
+        } else if *compact {
+            Some(Rect::new((area.w - 1.0 - 28.0) / 2.0, area.h - 64.0, 28.0, 26.0))
+        } else {
+            let label = "Update Available…";
+            let w = (text.measure(label, UI_BOLD, 12.0) + 38.0).min(area.w - 48.0);
+            Some(Rect::new(40.0, area.h - 34.0, w, 26.0))
+        };
+        if let Some(pill) = pill {
+            scene.quad(Quad::new(pill, blue_hover(pill)).radius(pill.h / 2.0));
+            let baseline = centered(pill, 12.0);
+            if *compact {
+                let w = text.measure("↑", UI_BOLD, 13.0);
+                text.draw_text(scene, "↑", pill.x + (pill.w - w) / 2.0, baseline, UI_BOLD, 13.0, Color::hex(0xffffff));
+            } else {
+                scene.push_clip(pill.inset(10.0, 0.0));
+                text.draw_text(scene, "↑", pill.x + 12.0, baseline, UI_BOLD, 12.0, Color::hex(0xffffff));
+                text.draw_text(
+                    scene,
+                    "Update Available…",
+                    pill.x + 26.0,
+                    baseline,
+                    UI_BOLD,
+                    12.0,
+                    Color::hex(0xffffff),
+                );
+                scene.pop_clip();
+            }
+            update_hits.push((pill, UpdateAction::Toggle));
+        }
+        if !offer.open {
+            return;
+        }
+
+        const W: f32 = 290.0;
+        const PAD: f32 = 14.0;
+        const ROW: f32 = 18.0;
+        const BUTTON: f32 = 24.0;
+        const FOOTER: f32 = 34.0;
+        let h = 40.0 + 3.0 * ROW + 12.0 + BUTTON + 14.0 + FOOTER;
+        let (x, bottom) = match pill {
+            Some(pill) if *compact => (pill.right() + 10.0, pill.bottom() + 8.0),
+            Some(pill) => (8.0, pill.y - 9.0),
+            None => (12.0, height - 12.0),
+        };
+        let card = Rect::new(x, bottom - h, W, h);
+        scene.set_layer(LAYER_OVERLAY);
+        scene.shadow(card, Color::hex(0x000000).alpha(0.55), 10.0, 14.0);
+        scene.quad(Quad::new(card, theme.raised).radius(10.0).border(1.0, theme.divider));
+        // The card's tail, pointing at the pill.
+        if let Some(pill) = pill.filter(|_| !*compact) {
+            let cx = pill.x + pill.w / 2.0;
+            for i in 0..7 {
+                let half = 7.0 - i as f32;
+                scene.fill(Rect::new(cx - half, card.bottom() - 1.0 + i as f32, half * 2.0, 1.0), theme.raised);
+            }
+        }
+
+        text.draw_text(scene, "Update Available", card.x + PAD, card.y + 26.0, UI_BOLD, 13.0, theme.text);
+        let release = &offer.release;
+        let rows = [
+            ("Version:", release.version.clone()),
+            ("Size:", release.size_label()),
+            ("Released:", release.date_label()),
+        ];
+        let column = card.x + PAD + text.measure("Released:", UI, 11.5) + 8.0;
+        let mut y = card.y + 40.0;
+        for (label, value) in rows {
+            let baseline = y + 13.0;
+            let w = text.measure(label, UI, 11.5);
+            text.draw_text(scene, label, column - 6.0 - w, baseline, UI, 11.5, theme.text_dim);
+            text.draw_text(scene, &value, column, baseline, UI, 11.5, theme.text);
+            y += ROW;
+        }
+
+        // Skip and Later on the left, the install on the right.
+        y += 12.0;
+        let busy = offer.installing;
+        let mut button = |scene: &mut Scene, x: f32, label: &str, action: UpdateAction| -> f32 {
+            let w = text.measure(label, UI, 11.5) + 22.0;
+            let rect = Rect::new(x, y, w, BUTTON);
+            let hover = rect.contains(mx, my) && !busy;
+            let fill = if hover {
+                theme.raised.mix(Color::hex(0xffffff), 0.1)
+            } else {
+                theme.raised.mix(Color::hex(0xffffff), 0.05)
+            };
+            scene.quad(Quad::new(rect, fill).radius(6.0).border(1.0, theme.divider));
+            let color = if busy { theme.text_faint } else { theme.text };
+            text.draw_text(scene, label, rect.x + 11.0, centered(rect, 11.5), UI, 11.5, color);
+            update_hits.push((rect, action));
+            w
+        };
+        let skip = button(scene, card.x + PAD, "Skip", UpdateAction::Skip);
+        button(scene, card.x + PAD + skip + 8.0, "Later", UpdateAction::Later);
+        let label = if busy { "Installing…" } else { "Install and Relaunch" };
+        let w = text.measure(label, UI_BOLD, 11.5) + 24.0;
+        let install = Rect::new(card.right() - PAD - w, y, w, BUTTON);
+        let fill = if busy { blue.alpha(0.6) } else { blue_hover(install) };
+        scene.quad(Quad::new(install, fill).radius(6.0));
+        text.draw_text(scene, label, install.x + 12.0, centered(install, 11.5), UI_BOLD, 11.5, Color::hex(0xffffff));
+        update_hits.push((install, UpdateAction::Install));
+
+        // View Release Notes, under a rule.
+        y += BUTTON + 14.0;
+        scene.fill(Rect::new(card.x, y, card.w, 1.0), theme.divider);
+        let footer = Rect::new(card.x + 1.0, y + 1.0, card.w - 2.0, FOOTER - 2.0);
+        if footer.contains(mx, my) {
+            scene.quad(Quad::new(footer, theme.text.alpha(0.05)).radius(9.0));
+        }
+        let baseline = centered(footer, 11.5);
+        text.draw_text(scene, "View Release Notes", footer.x + PAD - 1.0, baseline, UI_BOLD, 11.5, theme.text);
+        let w = text.measure("↗", UI, 12.0);
+        text.draw_text(scene, "↗", footer.right() - PAD - w, baseline, UI, 12.0, theme.text_dim);
+        update_hits.push((footer, UpdateAction::Notes));
+        scene.set_layer(LAYER_CONTENT);
+        *update_card = card;
+    }
+
     fn draw_toast(&mut self) {
         let Some((message, _)) = &self.ctx.toast else { return };
         let message = message.clone();
@@ -1962,6 +2466,76 @@ fn tabs_path() -> String {
 
 /// TEMINO_CAPTURE: saves each frame, straight from the GPU readback, for
 /// screenshots that no other window or the pointer can get into.
+/// A sidebar row's background: a tab with a color is tinted with it all
+/// over, more strongly and outlined in it while active; an uncolored tab
+/// is raised only while active.
+fn draw_sidebar_row(scene: &mut Scene, theme: &Theme, rect: Rect, color: Option<Color>, current: bool, dragged: bool) {
+    let (fill, border) = match (color, current) {
+        (Some(color), true) => (theme.raised.mix(color, 0.42), color.mix(theme.text, 0.15)),
+        (Some(color), false) => (theme.panel(SURFACE_LIFT / 2.0).mix(color, 0.22), color.alpha(0.0)),
+        (None, true) => (theme.raised, theme.divider),
+        (None, false) => return,
+    };
+    let fill = if dragged { fill.mix(theme.text, 0.06) } else { fill };
+    scene.quad(Quad::new(rect, fill).radius(6.0).border(1.0, border));
+}
+
+/// A tab's number in a circle `size` across, ringed and colored by what its
+/// agent is doing: a faint ring at rest, a turning dot while it works, amber
+/// while it waits on you, green when it finished a turn you haven't seen.
+/// Past 9 there is no number, only the circle. `t` drives the motion.
+#[allow(clippy::too_many_arguments)]
+fn draw_tab_number(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    index: usize,
+    (cx, cy): (f32, f32),
+    size: f32,
+    agent: Option<AgentState>,
+    t: f32,
+) {
+    let r = size / 2.0;
+    let circle = Rect::new(cx - r, cy - r, size, size);
+    let clear = Color::hex(0x000000).alpha(0.0);
+    let ink = Color::hex(0x1b1d22);
+    let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU / 1.4).sin();
+    let color = match agent {
+        None => theme.text_faint,
+        Some(AgentState::Idle) => {
+            scene.quad(Quad::new(circle, clear).radius(r).border(1.0, theme.text_faint.alpha(0.7)));
+            theme.text_dim
+        }
+        Some(AgentState::Running) => {
+            scene.quad(Quad::new(circle, theme.accent.alpha(0.12)).radius(r).border(1.5, theme.accent.alpha(0.3)));
+            let angle = t * std::f32::consts::TAU / 1.1;
+            let (dx, dy) = ((r - 0.75) * angle.cos(), (r - 0.75) * angle.sin());
+            scene.quad(Quad::new(Rect::new(cx + dx - 2.5, cy + dy - 2.5, 5.0, 5.0), theme.accent).radius(2.5));
+            theme.text
+        }
+        Some(AgentState::Waiting) => {
+            let amber = Color::hex(AGENT_WAITING);
+            let halo = circle.inset(-1.0 - 3.0 * pulse, -1.0 - 3.0 * pulse);
+            scene.quad(Quad::new(halo, clear).radius(halo.w / 2.0).border(1.5, amber.alpha(0.5 * (1.0 - pulse))));
+            scene.quad(Quad::new(circle, amber.alpha(0.8 + 0.2 * pulse)).radius(r));
+            ink
+        }
+        Some(AgentState::Done) => {
+            scene.quad(Quad::new(circle, Color::hex(AGENT_DONE)).radius(r));
+            ink
+        }
+    };
+    if index < 9 {
+        let label = format!("{}", index + 1);
+        let font = (size * 0.5 + 2.0).round();
+        let w = text.measure(&label, UI, font);
+        let baseline = (cy + text.ui_ascent(font) * 0.36).round();
+        text.draw_text(scene, &label, cx - w / 2.0, baseline, UI, font, color);
+    } else if agent.is_some() {
+        scene.quad(Quad::new(Rect::new(cx - 2.0, cy - 2.0, 4.0, 4.0), color).radius(2.0));
+    }
+}
+
 fn write_ppm(path: &std::ffi::OsStr, bgra: &[u8], width: u32, height: u32) {
     let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
     ppm.reserve(bgra.len() / 4 * 3);

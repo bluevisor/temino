@@ -264,6 +264,18 @@ pub fn set_text_caret(_x: i32, _y: i32, _height: i32) {}
 
 pub fn beep() {}
 
+/// Opens a link in the default browser (or whatever handles its scheme).
+pub fn open_url(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener).arg(url).spawn();
+}
+
 fn with_clipboard<T>(f: impl FnOnce(&mut arboard::Clipboard) -> Option<T>) -> Option<T> {
     let mut slot = CLIPBOARD.lock().unwrap();
     if slot.is_none() {
@@ -617,6 +629,7 @@ impl ApplicationHandler<Request> for Handler {
                         Cursor::Arrow => CursorIcon::Default,
                         Cursor::ResizeColumn => CursorIcon::ColResize,
                         Cursor::ResizeRow => CursorIcon::RowResize,
+                        Cursor::Link => CursorIcon::Pointer,
                     });
                 }
             }

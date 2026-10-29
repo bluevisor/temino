@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::TermMode;
 
+use crate::agent::{self, AgentState};
 use crate::complete::{self, Candidate, Commands, Completion, Kind};
 use crate::editor::{Editor, History};
 use crate::keys::{self, Named};
 use crate::platform::{self, buttons, Cursor, KeyEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
-use crate::session::{BlockKind, Credits, GridSize, Notice, Phase, Session};
+use crate::session::{BlockKind, Credits, GridSize, Link, Notice, Phase, Session};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{Color, Theme, SURFACE_LIFT};
 use crate::ui::{self, GridView, Span};
@@ -23,6 +24,8 @@ use crate::Msg;
 
 pub const PAD_X: f32 = 14.0;
 const ALT_PAD_Y: f32 = 8.0;
+/// How wide the scroll bar's grab area is, at the pane's right edge.
+const SCROLLBAR_HIT: f32 = 14.0;
 const BLOCK_PAD_TOP: f32 = 10.0;
 const META_HEIGHT: f32 = 18.0;
 const OUTPUT_GAP: f32 = 4.0;
@@ -33,6 +36,15 @@ pub const BLINK: Duration = Duration::from_millis(530);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const MAX_EDITOR_LINES: usize = 10;
 const MENU_ROWS: usize = 8;
+/// How many commands a pane's title lists.
+const TITLE_COMMANDS: usize = 3;
+/// How often an agent's screen is read, how many of its last lines, how
+/// long its output counts as working, and how soon after a keystroke
+/// output is only its echo.
+const AGENT_SCAN: Duration = Duration::from_millis(300);
+const AGENT_SCAN_LINES: usize = 10;
+const AGENT_QUIET: Duration = Duration::from_millis(1500);
+const AGENT_ECHO: Duration = Duration::from_millis(400);
 /// The launch banner, in figlet's "ANSI Shadow" style.
 const BANNER: [&str; 6] = [
     "████████╗███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ",
@@ -111,6 +123,8 @@ struct Layout {
     /// (block index, grid origin) when a full-screen program is shown.
     alt: Option<(usize, f32, f32)>,
     content_height: f32,
+    /// The scroll bar's track, and its thumb's height, when output overflows.
+    scrollbar: Option<(Rect, f32)>,
 }
 
 pub struct Pane {
@@ -118,6 +132,15 @@ pub struct Pane {
     pub session: Session,
     editor: Editor,
     completion: Option<Completion>,
+    /// The last completion hint worked out, keyed by cwd and editor text.
+    hint: Option<(String, Option<String>)>,
+    /// Where the pointer is over this pane, for underlining the link under it.
+    pointer: Option<(f32, f32)>,
+    /// A link pressed with a plain click: it opens if the button comes up
+    /// without a drag.
+    link_click: Option<String>,
+    /// While dragging the scroll bar: where in the thumb it was grabbed.
+    bar_grab: Option<f32>,
     credits: Arc<Credits>,
     /// Where the pane sits in the window, in logical pixels.
     pub rect: Rect,
@@ -140,6 +163,20 @@ pub struct Pane {
     /// A command to run once the shell is at its prompt, then its block.
     queued: Option<String>,
     queued_block: Option<u64>,
+    /// What the running program last titled itself, whether it asked for
+    /// you (a notification or bell) and when, and whether it reports
+    /// progress: the clues to an agent's state.
+    program_title: String,
+    notified_at: Option<Instant>,
+    progress: bool,
+    /// The agent's state as last read, the bottom of its screen as last
+    /// read and when, and whether it finished a turn you haven't seen.
+    agent_was: Option<AgentState>,
+    /// The block an agent was last seen running in: it stays an agent
+    /// whatever it titles itself next.
+    agent_block: Option<u64>,
+    screen: Option<(Instant, Option<AgentState>)>,
+    pub agent_unseen: bool,
 }
 
 impl Pane {
@@ -159,6 +196,10 @@ impl Pane {
             session,
             editor: Editor::new(),
             completion: None,
+            hint: None,
+            pointer: None,
+            link_click: None,
+            bar_grab: None,
             credits,
             rect,
             welcome,
@@ -174,6 +215,13 @@ impl Pane {
             wheel_rest: 0.0,
             queued: None,
             queued_block: None,
+            program_title: String::new(),
+            notified_at: None,
+            progress: false,
+            agent_was: None,
+            agent_block: None,
+            screen: None,
+            agent_unseen: false,
         })
     }
 
@@ -213,17 +261,93 @@ impl Pane {
         match notice {
             Notice::Title(title) => {
                 if let Some(block) = self.session.active_mut() {
-                    block.command = if block.command.is_empty() { title } else { block.command.clone() };
+                    if block.command.is_empty() {
+                        block.command = title.clone();
+                    }
                 }
+                self.program_title = title;
             }
             Notice::Clipboard(text) => {
                 platform::clipboard_set(&text);
                 ctx.show_toast("Copied to the clipboard by the program");
             }
-            Notice::Bell => self.bell = Some(Instant::now()),
-            Notice::Clear => self.clear_blocks(),
-            Notice::Finished => {}
+            Notice::Bell => {
+                self.bell = Some(Instant::now());
+                self.notified_at = self.bell;
+            }
+            Notice::Notify => self.notified_at = Some(Instant::now()),
+            Notice::Progress(busy) => self.progress = busy,
+            Notice::Clear => {
+                self.forget_program();
+                self.clear_blocks();
+            }
+            Notice::Finished => self.forget_program(),
         }
+    }
+
+    fn forget_program(&mut self) {
+        self.program_title.clear();
+        self.notified_at = None;
+        self.progress = false;
+    }
+
+    /// What the coding agent running here is doing, if one is.
+    pub fn agent(&mut self, now: Instant) -> Option<AgentState> {
+        let running = self.session.active().filter(|block| block.kind == BlockKind::Command);
+        let is_agent = running.is_some_and(|block| {
+            self.agent_block == Some(block.id)
+                || agent::is_agent_command(&block.command)
+                || agent::is_agent_title(&self.program_title)
+        });
+        self.agent_block = running.filter(|_| is_agent).map(|block| block.id);
+        if !is_agent {
+            self.agent_was = None;
+            self.agent_unseen = false;
+            self.screen = None;
+            return None;
+        }
+        if self.screen.is_none_or(|(at, _)| now.duration_since(at) >= AGENT_SCAN) {
+            self.screen = Some((now, self.screen_tail().as_deref().and_then(agent::screen_state)));
+        }
+        let screen = self.screen.and_then(|(_, state)| state);
+        let title = agent::title_state(&self.program_title);
+        let input = self.session.input_at();
+        let notified = self.notified_at.is_some_and(|at| input.is_none_or(|input| at > input));
+        // Output that isn't just the echo of your typing.
+        let printing = self.session.output_at.is_some_and(|at| {
+            now.duration_since(at) < AGENT_QUIET && input.is_none_or(|input| at.duration_since(input) > AGENT_ECHO)
+        });
+        let state = if notified
+            || title == Some(AgentState::Waiting)
+            || (screen == Some(AgentState::Waiting) && title != Some(AgentState::Running))
+        {
+            AgentState::Waiting
+        } else if title == Some(AgentState::Running) || self.progress || screen == Some(AgentState::Running) || printing
+        {
+            AgentState::Running
+        } else {
+            AgentState::Idle
+        };
+        match state {
+            AgentState::Idle if self.agent_was == Some(AgentState::Running) => self.agent_unseen = true,
+            AgentState::Idle => {}
+            _ => self.agent_unseen = false,
+        }
+        if input.is_some_and(|input| now.duration_since(input) < AGENT_ECHO) {
+            self.agent_unseen = false;
+        }
+        self.agent_was = Some(state);
+        Some(if state == AgentState::Idle && self.agent_unseen { AgentState::Done } else { state })
+    }
+
+    /// The last few lines the running program left on screen.
+    fn screen_tail(&mut self) -> Option<String> {
+        let block = self.session.active_mut()?;
+        let lines = block.output_lines();
+        if lines == 0 {
+            return None;
+        }
+        Some(block.text_between((lines.saturating_sub(AGENT_SCAN_LINES), 0), (lines - 1, usize::MAX)))
     }
 
     /// Advances animations; true when the pane needs a new frame.
@@ -273,12 +397,28 @@ impl Pane {
         times.into_iter().flatten().min()
     }
 
-    /// What's running, or where the shell is.
+    /// A short summary: the folder, then what's running and the last few
+    /// distinct commands, newest first. Just the path in a fresh pane.
     pub fn title(&self) -> String {
-        match self.session.active() {
-            Some(block) if !block.command.is_empty() => block.command.lines().next().unwrap_or("").to_owned(),
-            _ => ui::short_path(&self.session.cwd),
+        let mut recent: Vec<String> = Vec::new();
+        if let Some(block) = self.session.active() {
+            recent.extend(block.command.lines().next().filter(|line| !line.trim().is_empty()).map(str::to_owned));
         }
+        let active = self.session.active().map(|block| block.id);
+        let finished =
+            self.session.blocks.iter().rev().filter(|b| b.kind == BlockKind::Command && Some(b.id) != active);
+        for gist in finished.filter_map(|block| command_gist(&block.command)) {
+            if recent.len() == TITLE_COMMANDS {
+                break;
+            }
+            if !recent.iter().any(|seen| seen.starts_with(&gist)) {
+                recent.push(gist);
+            }
+        }
+        if recent.is_empty() {
+            return ui::short_path(&self.session.cwd);
+        }
+        format!("{} · {}", folder_name(&self.session.cwd), recent.join(", "))
     }
 
     /// Moves the pane; the grid follows now, finished blocks rewrap shortly.
@@ -301,7 +441,7 @@ impl Pane {
     pub fn focus_changed(&self, focused: bool) {
         if let Some(block) = self.session.active() {
             if block.term.mode().contains(TermMode::FOCUS_IN_OUT) {
-                self.session.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+                self.session.reply(if focused { b"\x1b[I" } else { b"\x1b[O" });
             }
         }
     }
@@ -430,7 +570,7 @@ impl Pane {
         }
         // Which menu was open before this key, so typing can refilter it.
         let open_menu = self.completion.as_ref().and_then(|c| c.candidates.first()).map(|f| f.kind == Kind::History);
-        let suggestion = self.editor.suggestion(&ctx.history).map(str::to_owned);
+        let suggestion = self.suggestion(ctx);
         let word = key.ctrl() || key.word_mod();
         let line = key.line_mod();
         match named {
@@ -480,7 +620,11 @@ impl Pane {
                     self.editor.browse(&ctx.history, false);
                 }
             }
-            Some(Named::Tab) => self.tab(ctx),
+            // Tab takes a grey history suggestion whole; otherwise it completes.
+            Some(Named::Tab) => match self.editor.suggestion(&ctx.history).map(str::to_owned) {
+                Some(rest) if !shift => self.editor.insert(&rest),
+                _ => self.tab(ctx),
+            },
             Some(Named::Escape) => {
                 self.selected = None;
                 self.selection = None;
@@ -535,11 +679,38 @@ impl Pane {
             if history {
                 self.open_history_menu(ctx);
             } else {
+                ctx.commands.use_path(self.session.path.as_deref());
                 self.completion =
                     complete::complete(&self.editor.text, self.editor.cursor, &self.session.cwd, &mut ctx.commands)
                         .filter(|c| c.candidates.len() > 1);
             }
         }
+    }
+
+    /// The grey text after the caret: the newest history entry that starts
+    /// with what's typed, or else what Tab would fill in for the last word.
+    fn suggestion(&mut self, ctx: &mut Ctx) -> Option<String> {
+        if let Some(rest) = self.editor.suggestion(&ctx.history) {
+            return Some(rest.to_owned());
+        }
+        let text = &self.editor.text;
+        if text.trim().is_empty()
+            || text.ends_with(char::is_whitespace)
+            || self.editor.cursor != text.len()
+            || text.contains('\n')
+        {
+            return None;
+        }
+        let key = format!("{}\0{text}", self.session.cwd);
+        if let Some((cached, hint)) = &self.hint {
+            if *cached == key {
+                return hint.clone();
+            }
+        }
+        ctx.commands.use_path(self.session.path.as_deref());
+        let hint = complete::hint(text, &self.session.cwd, &mut ctx.commands);
+        self.hint = Some((key, hint.clone()));
+        hint
     }
 
     fn submit(&mut self, ctx: &mut Ctx) {
@@ -549,6 +720,7 @@ impl Pane {
             return;
         }
         ctx.history.push(&command);
+        self.hint = None;
         self.editor.take();
         self.session.submit(&command);
         self.selected = None;
@@ -557,6 +729,7 @@ impl Pane {
     }
 
     fn tab(&mut self, ctx: &mut Ctx) {
+        ctx.commands.use_path(self.session.path.as_deref());
         let Some(mut completion) =
             complete::complete(&self.editor.text, self.editor.cursor, &self.session.cwd, &mut ctx.commands)
         else {
@@ -713,6 +886,26 @@ impl Pane {
         }
     }
 
+    /// The pane menu's Copy, Paste and Clear.
+    pub fn copy_selection(&mut self, ctx: &mut Ctx) {
+        self.copy(ctx, false);
+    }
+
+    pub fn paste_clipboard(&mut self) {
+        self.paste(platform::clipboard_get());
+    }
+
+    pub fn clear(&mut self) {
+        self.clear_blocks();
+    }
+
+    /// Whether the full-screen program here takes mouse clicks itself.
+    pub fn reports_mouse(&self) -> bool {
+        self.layout.alt.is_some_and(|(index, _, _)| {
+            self.session.blocks.get(index).is_some_and(|block| block.term.mode().intersects(TermMode::MOUSE_MODE))
+        })
+    }
+
     /// Text an input method committed: typed, not pasted.
     pub fn text_input(&mut self, text: &str) {
         if let Some(block) = self.session.active() {
@@ -727,6 +920,16 @@ impl Pane {
     }
 
     fn paste(&mut self, text: Option<String>) {
+        if let Some(block) = self.session.active() {
+            let bracketed = block.term.mode().contains(TermMode::BRACKETED_PASTE);
+            if bracketed && text.as_deref().is_none_or(str::is_empty) {
+                // No text: likely an image. An empty paste still tells the
+                // program to look, and Claude Code then reads the image
+                // from the clipboard itself.
+                self.session.write(b"\x1b[200~\x1b[201~");
+                return;
+            }
+        }
         let Some(text) = text else { return };
         let text = text.replace("\r\n", "\n");
         if let Some(block) = self.session.active() {
@@ -811,6 +1014,27 @@ impl Pane {
         } else {
             0
         };
+        self.link_click = None;
+        if let Some((track, thumb)) = self.layout.scrollbar.filter(|(track, _)| button == 0 && track.contains(x, y)) {
+            // Grab the thumb where it was pressed; a press beside it jumps
+            // there and grabs it by the middle.
+            let top = self.thumb_top(track, thumb);
+            let grab = if (top..top + thumb).contains(&y) { y - top } else { thumb / 2.0 };
+            self.bar_grab = Some(grab);
+            self.drag_scrollbar(y);
+            return;
+        }
+        if button == 0 && clicks == 1 {
+            if let Some((_, link)) = self.link_under(ctx, x, y) {
+                // Cmd+click opens at once, even over programs that take the
+                // mouse; a plain click waits to see it isn't a drag.
+                if mods & platform::mods::COMMAND != 0 {
+                    platform::open_url(&link.url);
+                    return;
+                }
+                self.link_click = Some(link.url);
+            }
+        }
         if let Some((index, _, _)) = self.layout.alt {
             let block = &self.session.blocks[index];
             let mode = *block.term.mode();
@@ -892,7 +1116,21 @@ impl Pane {
         let over_text = self.layout.alt.is_some()
             || self.layout.input.contains(x, y)
             || self.layout.blocks.iter().any(|b| b.rect.contains(x, y) && y >= b.command_y);
-        let cursor = if over_text { Cursor::IBeam } else { Cursor::Arrow };
+        self.pointer = Some((x, y));
+        if self.bar_grab.is_some() && buttons != 0 {
+            self.drag_scrollbar(y);
+            return Cursor::Arrow;
+        }
+        if self.layout.scrollbar.is_some_and(|(track, _)| track.contains(x, y)) {
+            return Cursor::Arrow;
+        }
+        let cursor = if buttons == 0 && self.link_under(ctx, x, y).is_some() {
+            Cursor::Link
+        } else if over_text {
+            Cursor::IBeam
+        } else {
+            Cursor::Arrow
+        };
 
         if let Some((index, _, _)) = self.layout.alt {
             let mode = *self.session.blocks[index].term.mode();
@@ -940,15 +1178,95 @@ impl Pane {
                 }
             }
         }
+        self.bar_grab = None;
         let was_dragging = std::mem::take(&mut self.dragging);
+        let link = self.link_click.take();
         if let Some(selection) = self.selection {
             if selection.mode == SelectMode::Char && selection.anchor == selection.head {
                 self.selection = None;
+                if let Some(url) = link {
+                    platform::open_url(&url);
+                }
             } else if was_dragging {
                 if let Some(text) = self.selection_text() {
                     platform::selection_set(&text);
                 }
             }
+        }
+    }
+
+    /// Where the scroll bar's thumb starts, for the current scroll.
+    fn thumb_top(&self, track: Rect, thumb: f32) -> f32 {
+        track.y + (1.0 - self.scroll / self.max_scroll().max(1.0)) * (track.h - thumb)
+    }
+
+    /// Scrolls so the grabbed point of the thumb sits at `y`.
+    fn drag_scrollbar(&mut self, y: f32) {
+        let (Some((track, thumb)), Some(grab)) = (self.layout.scrollbar, self.bar_grab) else { return };
+        let travel = (track.h - thumb).max(1.0);
+        let fraction = ((y - grab - track.y) / travel).clamp(0.0, 1.0);
+        self.scroll_target = (1.0 - fraction) * self.max_scroll();
+        self.scroll = self.scroll_target;
+    }
+
+    /// The pointer left this pane.
+    pub fn pointer_left(&mut self) {
+        self.pointer = None;
+    }
+
+    /// The link under pane point (`x`, `y`), with the index of its block.
+    fn link_under(&self, ctx: &Ctx, x: f32, y: f32) -> Option<(usize, Link)> {
+        let cell = ctx.text.cell;
+        let (index, ox, oy, lines) = if let Some((index, ox, oy)) = self.layout.alt {
+            (index, ox, oy, self.session.size.lines)
+        } else {
+            let hit = self.layout.blocks.iter().find(|b| b.rect.contains(x, y))?;
+            let index = self.session.blocks.iter().position(|b| b.id == hit.id)?;
+            (index, hit.output_x, hit.output_y, hit.lines)
+        };
+        if x < ox || y < oy || self.layout.input.contains(x, y) {
+            return None;
+        }
+        if self.layout.scrollbar.is_some_and(|(track, _)| track.contains(x, y)) {
+            return None;
+        }
+        let column = ((x - ox) / cell.width) as usize;
+        let line = ((y - oy) / cell.height) as usize;
+        if column >= self.session.size.columns || line >= lines {
+            return None;
+        }
+        let block = &self.session.blocks[index];
+        // The alternate screen is drawn from its top, not its scrollback.
+        let line = if self.layout.alt.is_some() { line + block.term.grid().history_size() } else { line };
+        block.link_at(line, column).map(|link| (index, link))
+    }
+
+    /// Underlines the link under the pointer.
+    fn draw_link(&self, scene: &mut Scene, ctx: &Ctx) {
+        let Some((x, y)) = self.pointer else { return };
+        let Some((index, link)) = self.link_under(ctx, x, y) else { return };
+        let cell = ctx.text.cell;
+        let block = &self.session.blocks[index];
+        let (ox, oy, skip) = if let Some((_, ox, oy)) = self.layout.alt {
+            (ox, oy, block.term.grid().history_size())
+        } else {
+            let Some(layout) = self.layout.blocks.iter().find(|b| b.id == block.id) else { return };
+            (layout.output_x, layout.output_y, 0)
+        };
+        let input_top = if self.layout.input.h > 0.0 { self.layout.input.y } else { f32::MAX };
+        for &(line, from, to) in &link.cells {
+            let Some(line) = line.checked_sub(skip) else { continue };
+            let row = oy + line as f32 * cell.height;
+            if row + cell.height > input_top {
+                continue;
+            }
+            let rect = Rect::new(
+                ox + from as f32 * cell.width,
+                row + cell.height - 2.0,
+                (to + 1 - from) as f32 * cell.width,
+                1.0,
+            );
+            scene.fill(rect, ctx.theme.accent);
         }
     }
 
@@ -991,6 +1309,7 @@ impl Pane {
         } else {
             self.draw_main(scene, ctx, focused);
         }
+        self.draw_link(scene, ctx);
         if self.bell.is_some() {
             scene.set_layer(LAYER_OVERLAY);
             let edge = Rect::new(0.0, 0.0, self.rect.w, self.rect.h);
@@ -1150,8 +1469,19 @@ impl Pane {
         if total > list_max && list_max > 40.0 {
             let thumb = (list_max / total * list_max).max(24.0);
             let position = (1.0 - self.scroll / max_scroll.max(1.0)) * (list_max - thumb);
-            let bar = Rect::new(width - 6.0, position + 2.0, 3.0, thumb - 4.0);
-            scene.quad(Quad::new(bar, ctx.theme.text_faint.alpha(0.45)).radius(1.5));
+            let track = Rect::new(width - SCROLLBAR_HIT, 0.0, SCROLLBAR_HIT, list_max);
+            self.layout.scrollbar = Some((track, thumb));
+            // Wider and easier to grab under the pointer.
+            let hovered = self.bar_grab.is_some() || self.pointer.is_some_and(|(x, y)| track.contains(x, y));
+            if hovered {
+                scene.fill(track, ctx.theme.text_faint.alpha(0.06));
+                let bar = Rect::new(width - 10.0, position + 2.0, 7.0, thumb - 4.0);
+                let alpha = if self.bar_grab.is_some() { 0.85 } else { 0.65 };
+                scene.quad(Quad::new(bar, ctx.theme.text_faint.alpha(alpha)).radius(3.5));
+            } else {
+                let bar = Rect::new(width - 6.0, position + 2.0, 3.0, thumb - 4.0);
+                scene.quad(Quad::new(bar, ctx.theme.text_faint.alpha(0.45)).radius(1.5));
+            }
         }
         self.draw_input(scene, ctx, focused, input_y, input_height);
     }
@@ -1209,7 +1539,7 @@ impl Pane {
             vec![
                 ("Enter".into(), "run"),
                 ("Shift+Enter".into(), "new line"),
-                ("Tab".into(), "complete"),
+                ("Tab".into(), "accept · complete"),
                 ("↑ ↓".into(), "history"),
                 ("Ctrl+R".into(), "search history"),
             ],
@@ -1354,7 +1684,8 @@ impl Pane {
         let cell = ctx.text.cell;
         let blink = ctx.blink_on() && focused;
         let phase = self.session.phase;
-        let Ctx { text, theme, history, commands, user_host, .. } = ctx;
+        let hint = if self.completion.is_none() { self.suggestion(ctx) } else { None };
+        let Ctx { text, theme, commands, user_host, .. } = ctx;
         let Pane { session, editor, layout, completion, .. } = self;
         let panel = Rect::new(0.0, y, width, height);
         layout.input = panel;
@@ -1442,6 +1773,7 @@ impl Pane {
                     }
                 }
                 // Text with syntax colors.
+                commands.use_path(self.session.path.as_deref());
                 let spans = ui::highlight(&editor.text, editor.cursor, commands, theme);
                 let mut colors = vec![theme.text; editor.text.len()];
                 for (start, end, color) in spans {
@@ -1464,7 +1796,7 @@ impl Pane {
                     }
                     column += span;
                 }
-                if let Some(rest) = editor.suggestion(history) {
+                if let Some(rest) = hint.as_deref() {
                     let (sl, sc) = editor.position(editor.text.len());
                     if sl >= first_line {
                         let sy = editor_y + (sl - first_line) as f32 * cell.height;
@@ -1606,9 +1938,62 @@ pub fn grid_size(rect: Rect, text: &TextSystem) -> GridSize {
     }
 }
 
+/// A command boiled down for a title: the program and its first argument,
+/// `cargo test` for `RUST_LOG=debug cargo test --release`. None for the
+/// housekeeping (`cd`, `ls`, `clear`) that says nothing about the work.
+fn command_gist(command: &str) -> Option<String> {
+    const WRAPPERS: [&str; 6] = ["sudo", "time", "env", "nohup", "exec", "command"];
+    const QUIET: [&str; 12] = ["cd", "ls", "ll", "la", "pwd", "clear", "reset", "cls", "exit", "z", "history", "echo"];
+    let assignment = |word: &str| {
+        word.split_once('=')
+            .is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    };
+    let mut words = command
+        .lines()
+        .next()?
+        .split_whitespace()
+        .skip_while(|word| assignment(word) || WRAPPERS.contains(word))
+        .take_while(|word| !matches!(*word, "|" | "||" | "&&" | ";" | "&"));
+    let program = words.next()?.rsplit('/').next()?;
+    if program.is_empty() || QUIET.contains(&program) {
+        return None;
+    }
+    let argument = words
+        .find(|word| !word.starts_with('-'))
+        .map(|word| word.trim_matches(|c| c == '"' || c == '\'').trim_end_matches('/'))
+        .and_then(|word| word.rsplit('/').next())
+        .filter(|word| !word.is_empty());
+    Some(match argument {
+        Some(argument) if argument.chars().count() > 20 => {
+            format!("{program} {}…", argument.chars().take(19).collect::<String>())
+        }
+        Some(argument) => format!("{program} {argument}"),
+        None => program.to_owned(),
+    })
+}
+
+/// The last part of a path, `~` at home.
+fn folder_name(path: &str) -> String {
+    let short = ui::short_path(path);
+    match short.trim_end_matches('/').rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => short,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::command_rows;
+    use super::{command_gist, command_rows};
+
+    #[test]
+    fn command_gist_keeps_program_and_first_argument() {
+        assert_eq!(command_gist("RUST_LOG=debug cargo test --release").as_deref(), Some("cargo test"));
+        assert_eq!(command_gist("sudo /usr/bin/vim src/app.rs").as_deref(), Some("vim app.rs"));
+        assert_eq!(command_gist("make").as_deref(), Some("make"));
+        assert_eq!(command_gist("git log | head").as_deref(), Some("git log"));
+        assert_eq!(command_gist("cd ~/Developer"), None);
+        assert_eq!(command_gist("   "), None);
+    }
 
     #[test]
     fn command_rows_wrap_and_mark_line_ends() {

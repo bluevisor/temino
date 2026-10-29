@@ -157,4 +157,5 @@ pub enum Cursor {
     Arrow = 1,
     ResizeColumn = 2,
     ResizeRow = 3,
+    Link = 4,
 }

@@ -4,6 +4,7 @@
 // Drawing helpers take a scene, the text system, a position and a style.
 #![allow(clippy::too_many_arguments)]
 
+mod agent;
 mod app;
 mod complete;
 mod editor;
@@ -34,6 +35,7 @@ pub enum Msg {
     ShellExited(u64, i32),
     /// A message for the user from another thread (the updater).
     Notice(String),
+    Update(update::Event),
 }
 
 /// History, the shell integration script and logs: ~/config/settings/Temino

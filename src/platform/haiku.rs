@@ -234,6 +234,11 @@ pub fn set_text_caret(x: i32, y: i32, height: i32) {
     unsafe { temino_set_text_caret(x, y, height) }
 }
 
+/// Opens a link in the default browser (or whatever handles its scheme).
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
 pub fn beep() {
     unsafe { temino_beep() }
 }
