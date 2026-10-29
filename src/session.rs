@@ -918,7 +918,7 @@ impl Session {
             out.extend_from_slice(&output);
             out.push(b'\n');
         }
-        let _ = std::fs::write(path, out);
+        crate::write_private(path, out);
     }
 
     /// The blocks `save_blocks` wrote, finished as they were.

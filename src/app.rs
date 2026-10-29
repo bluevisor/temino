@@ -849,7 +849,8 @@ impl App {
         if crate::setting("restore_output").as_deref() == Some("off") {
             return;
         }
-        let _ = std::fs::create_dir_all(&dir);
+        crate::create_private_dir(&crate::settings_dir());
+        crate::create_private_dir(&dir);
         for (index, id) in self.saved_panes().into_iter().enumerate() {
             if let Some(pane) = self.pane(id) {
                 pane.session.save_blocks(&format!("{dir}/{index}"));
@@ -907,7 +908,7 @@ impl App {
                 format!("{current}\t{color}\t{layout}\t{name}\t{mark}\n")
             })
             .collect();
-        let _ = std::fs::create_dir_all(crate::settings_dir());
+        crate::create_private_dir(&crate::settings_dir());
         let _ = std::fs::write(tabs_path(), lines);
     }
 
@@ -1898,7 +1899,7 @@ impl App {
             Action::EditKeys => {
                 let path = bindings::path();
                 if !std::path::Path::new(&path).exists() {
-                    let _ = std::fs::create_dir_all(crate::settings_dir());
+                    crate::create_private_dir(&crate::settings_dir());
                     let _ = std::fs::write(&path, bindings::template());
                 }
                 platform::open_url(&path);
