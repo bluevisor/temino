@@ -721,15 +721,15 @@ impl ApplicationHandler<Request> for Handler {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Positive dy scrolls down, in lines, as on Haiku.
-                let (dx, dy) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (-x, -y),
+                let (dx, dy, precise) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (-x, -y, false),
                     MouseScrollDelta::PixelDelta(PhysicalPosition { x, y }) => {
                         let line = 16.0 * self.scale;
-                        ((-x / line) as f32 / 3.0, (-y / line) as f32 / 3.0)
+                        ((-x / line) as f32 / 3.0, (-y / line) as f32 / 3.0, true)
                     }
                 };
                 let (x, y) = self.pointer;
-                self.send(UiEvent::Wheel { dx, dy, x, y, mods: self.mods() });
+                self.send(UiEvent::Wheel { dx, dy, x, y, mods: self.mods(), precise });
             }
             _ => {}
         }

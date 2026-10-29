@@ -113,12 +113,15 @@ pub enum UiEvent {
         y: f32,
         buttons: i32,
     },
+    /// In wheel notches (3 lines each), positive down; `precise` for a
+    /// trackpad's continuous, fractional deltas.
     Wheel {
         dx: f32,
         dy: f32,
         x: f32,
         y: f32,
         mods: u32,
+        precise: bool,
     },
     /// The window's size in logical pixels, and physical pixels per logical one.
     Resize {

@@ -947,12 +947,19 @@ impl Pane {
 
     // ---- mouse (pane coordinates) -------------------------------------
 
-    pub fn wheel(&mut self, ctx: &Ctx, dy: f32, x: f32, y: f32) {
+    pub fn wheel(&mut self, ctx: &Ctx, dy: f32, precise: bool, x: f32, y: f32) {
         if let Some(block) = self.session.active() {
             if block.alt_screen() {
                 let mode = *block.term.mode();
-                // Whole lines only; trackpads send fractions.
-                self.wheel_rest += dy;
+                // A trackpad steps the program once a line of travel (a
+                // notch is three), so it starts moving at once; a wheel
+                // steps once a notch. Whole steps only: trackpads send
+                // fractions, and a turn back drops what was left over.
+                let steps = if precise { dy * 3.0 } else { dy };
+                if steps * self.wheel_rest < 0.0 {
+                    self.wheel_rest = 0.0;
+                }
+                self.wheel_rest += steps;
                 let lines = self.wheel_rest.trunc();
                 self.wheel_rest -= lines;
                 if lines == 0.0 {
@@ -977,12 +984,18 @@ impl Pane {
                     } else {
                         b"\x1b[B"
                     };
-                    self.session.write(&arrow.repeat(lines.abs() as usize * 3));
+                    let per_step = if precise { 1 } else { 3 };
+                    self.session.write(&arrow.repeat(lines.abs() as usize * per_step));
                 }
                 return;
             }
         }
         self.scroll_by(-dy * 3.0 * ctx.text.cell.height);
+        // A trackpad's deltas are already smooth: follow the fingers
+        // exactly instead of easing after them.
+        if precise {
+            self.scroll = self.scroll_target;
+        }
     }
 
     fn alt_cell(&self, ctx: &Ctx, x: f32, y: f32) -> Option<(usize, usize)> {
