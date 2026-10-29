@@ -239,4 +239,10 @@ impl Scene {
             clip,
         });
     }
+
+    /// A color emoji from the color atlas (macOS), faded by `alpha`.
+    pub fn color_glyph(&mut self, rect: Rect, uv: [f32; 4], alpha: f32) {
+        // The shaders take a negative red as "sample the color atlas".
+        self.glyph(rect, uv, Color { r: -1.0, g: 0.0, b: 0.0, a: alpha });
+    }
 }

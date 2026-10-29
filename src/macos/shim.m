@@ -4,6 +4,7 @@
 // TEMINO_CAPTURE) they also come back as BGRA rows.
 
 #import <AppKit/AppKit.h>
+#import <CoreText/CoreText.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -22,6 +23,7 @@
 	id<MTLRenderPipelineState> rectPipeline;
 	id<MTLRenderPipelineState> glyphPipeline;
 	id<MTLTexture> atlas;
+	id<MTLTexture> colorAtlas;
 	id<MTLTexture> target;
 	id<MTLBuffer> readback;
 	id<MTLBuffer> rects;
@@ -32,6 +34,65 @@
 
 @implementation TeminoMetal
 @end
+
+
+// Draws `text` (an emoji, with any modifiers and joiners) in Apple Color
+// Emoji at `size` pixels, shrunk to fit max_width x max_height, into `out`
+// as premultiplied RGBA rows (up to `capacity` bytes). False when the font
+// has no emoji for it.
+bool
+temino_emoji(const char* text, float size, float max_width, float max_height,
+	uint8_t* out, size_t capacity, uint32_t* width, uint32_t* height)
+{
+	@autoreleasepool {
+		NSString* string = @(text);
+		if (string.length == 0)
+			return false;
+		CTLineRef line = NULL;
+		double ascent = 0, descent = 0, advance = 0;
+		for (int attempt = 0; attempt < 2; attempt++) {
+			CTFontRef font = CTFontCreateWithName(CFSTR("AppleColorEmoji"), size, NULL);
+			NSAttributedString* attributed = [[NSAttributedString alloc] initWithString:string
+				attributes:@{ (__bridge NSString*)kCTFontAttributeName: (__bridge id)font }];
+			CFRelease(font);
+			if (line != NULL)
+				CFRelease(line);
+			line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)attributed);
+			advance = CTLineGetTypographicBounds(line, &ascent, &descent, NULL);
+			double fit = fmin(max_width / fmax(advance, 1), max_height / fmax(ascent + descent, 1));
+			if (fit >= 1)
+				break;
+			size = floor(size * fit);
+		}
+		// Every run must have come from the emoji font, not a substitute.
+		bool emoji = advance > 0;
+		NSArray* runs = (__bridge NSArray*)CTLineGetGlyphRuns(line);
+		for (id run in runs) {
+			CTFontRef used = (CTFontRef)CFDictionaryGetValue(
+				CTRunGetAttributes((__bridge CTRunRef)run), kCTFontAttributeName);
+			NSString* name = CFBridgingRelease(CTFontCopyPostScriptName(used));
+			if (![name isEqualToString:@"AppleColorEmoji"])
+				emoji = false;
+		}
+		size_t w = (size_t)ceil(advance), h = (size_t)ceil(ascent + descent);
+		if (!emoji || w == 0 || h == 0 || w * h * 4 > capacity) {
+			CFRelease(line);
+			return false;
+		}
+		memset(out, 0, w * h * 4);
+		CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+		CGContextRef context = CGBitmapContextCreate(out, w, h, 8, w * 4, space,
+			kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+		CGColorSpaceRelease(space);
+		CGContextSetTextPosition(context, (w - advance) / 2, descent);
+		CTLineDraw(line, context);
+		CGContextRelease(context);
+		CFRelease(line);
+		*width = (uint32_t)w;
+		*height = (uint32_t)h;
+		return true;
+	}
+}
 
 
 // The window's layer, attached on the main thread and drawn into from the
@@ -67,8 +128,8 @@ make_pipeline(id<MTLDevice> device, id<MTLLibrary> library, NSString* vertex,
 
 
 void*
-temino_metal_new(const char* shaders, uint32_t atlas_size, char* name, size_t name_length,
-	char* error, size_t error_length)
+temino_metal_new(const char* shaders, uint32_t atlas_size, uint32_t color_atlas_size,
+	char* name, size_t name_length, char* error, size_t error_length)
 {
 	@autoreleasepool {
 		TeminoMetal* gpu = [TeminoMetal new];
@@ -95,6 +156,10 @@ temino_metal_new(const char* shaders, uint32_t atlas_size, char* name, size_t na
 			width:atlas_size height:atlas_size mipmapped:NO];
 		desc.usage = MTLTextureUsageShaderRead;
 		gpu->atlas = [gpu->device newTextureWithDescriptor:desc];
+		desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+			width:color_atlas_size height:color_atlas_size mipmapped:NO];
+		desc.usage = MTLTextureUsageShaderRead;
+		gpu->colorAtlas = [gpu->device newTextureWithDescriptor:desc];
 		set_error(name, name_length, gpu->device.name);
 		return (__bridge_retained void*)gpu;
 	}
@@ -133,6 +198,7 @@ bool
 temino_metal_render(void* handle, uint32_t width, uint32_t height,
 	const float* clear, const uint8_t* atlas_pixels, uint32_t atlas_size,
 	int64_t dirty_lo, int64_t dirty_hi,
+	const uint8_t* color_pixels, uint32_t color_size, int64_t color_lo, int64_t color_hi,
 	const void* rects, size_t rect_size, size_t rect_count,
 	const void* glyphs, size_t glyph_size, size_t glyph_count,
 	const uint32_t* ranges, size_t layer_count, bool readback,
@@ -149,6 +215,12 @@ temino_metal_render(void* handle, uint32_t width, uint32_t height,
 			[gpu->atlas replaceRegion:region mipmapLevel:0
 				withBytes:atlas_pixels + dirty_lo * atlas_size bytesPerRow:atlas_size];
 			gpu->atlasReady = YES;
+		}
+		if (color_lo >= 0 && color_hi > color_lo) {
+			MTLRegion region = MTLRegionMake2D(0, (NSUInteger)color_lo, color_size,
+				(NSUInteger)(color_hi - color_lo));
+			[gpu->colorAtlas replaceRegion:region mipmapLevel:0
+				withBytes:color_pixels + color_lo * color_size * 4 bytesPerRow:color_size * 4];
 		}
 
 		CAMetalLayer* layer = (__bridge CAMetalLayer*)atomic_load(&sLayer);
@@ -212,6 +284,7 @@ temino_metal_render(void* handle, uint32_t width, uint32_t height,
 				[encoder setVertexBuffer:gpu->glyphs offset:range[2] * glyph_size atIndex:0];
 				[encoder setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
 				[encoder setFragmentTexture:gpu->atlas atIndex:0];
+				[encoder setFragmentTexture:gpu->colorAtlas atIndex:1];
 				[encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4
 					instanceCount:range[3]];
 			}

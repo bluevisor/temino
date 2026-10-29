@@ -7,7 +7,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::mem::size_of;
 
 use crate::scene::{GlyphInstance, RectInstance, Scene};
-use crate::text::{Atlas, ATLAS_SIZE};
+use crate::text::{Atlas, ATLAS_SIZE, COLOR_ATLAS_SIZE};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -15,6 +15,7 @@ extern "C" {
     fn temino_metal_new(
         shaders: *const c_char,
         atlas_size: u32,
+        color_atlas_size: u32,
         name: *mut c_char,
         name_length: usize,
         error: *mut c_char,
@@ -30,6 +31,10 @@ extern "C" {
         atlas_size: u32,
         dirty_lo: i64,
         dirty_hi: i64,
+        color_pixels: *const u8,
+        color_size: u32,
+        color_lo: i64,
+        color_hi: i64,
         rects: *const c_void,
         rect_size: usize,
         rect_count: usize,
@@ -67,6 +72,7 @@ impl Gpu {
             temino_metal_new(
                 shaders.as_ptr(),
                 ATLAS_SIZE as u32,
+                COLOR_ATLAS_SIZE as u32,
                 name.as_mut_ptr().cast(),
                 name.len(),
                 error.as_mut_ptr().cast(),
@@ -89,7 +95,13 @@ impl Gpu {
     /// Renders `scene` into the window. The frame comes back as tightly
     /// packed BGRA rows when `readback` asks, or when there is no window to
     /// show it in yet.
-    pub fn render(&mut self, scene: &Scene, atlas: &mut Atlas, readback: bool) -> Result<Option<&[u8]>> {
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        atlas: &mut Atlas,
+        color: &mut Atlas,
+        readback: bool,
+    ) -> Result<Option<&[u8]>> {
         let (width, height) = scene.pixel_size();
         self.rects.clear();
         self.glyphs.clear();
@@ -101,6 +113,7 @@ impl Gpu {
             self.glyphs.extend_from_slice(&layer.glyphs);
         }
         let (lo, hi) = atlas.dirty.take().map_or((-1, -1), |(lo, hi)| (lo as i64, hi as i64));
+        let (color_lo, color_hi) = color.dirty.take().map_or((-1, -1), |(lo, hi)| (lo as i64, hi as i64));
         // The pipelines blend premultiplied colors; clear with one too.
         let [r, g, b, a] = scene.clear.to_array();
         let clear = [r * a, g * a, b * a, a];
@@ -116,6 +129,10 @@ impl Gpu {
                 ATLAS_SIZE as u32,
                 lo,
                 hi,
+                color.pixels.as_ptr(),
+                COLOR_ATLAS_SIZE as u32,
+                color_lo,
+                color_hi,
                 self.rects.as_ptr().cast(),
                 size_of::<RectInstance>(),
                 self.rects.len(),

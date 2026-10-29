@@ -101,6 +101,8 @@ pub struct Block {
     pub exit: Option<i32>,
     pub term: Term<Listener>,
     parser: Processor,
+    /// The last character printed, for `Graphemes`.
+    last: Option<char>,
     lines: Option<usize>,
     size: GridSize,
     /// `clear`: runs like any command, then wipes the block list.
@@ -130,6 +132,7 @@ impl Block {
             exit: None,
             term: Term::new(config, &size, listener),
             parser: Processor::new(),
+            last: None,
             lines: None,
             size,
             clears,
@@ -137,7 +140,8 @@ impl Block {
     }
 
     fn feed(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        let mut handler = crate::graphemes::Graphemes { term: &mut self.term, last: &mut self.last };
+        self.parser.advance(&mut handler, bytes);
         self.lines = None;
     }
 

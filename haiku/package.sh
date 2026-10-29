@@ -32,7 +32,7 @@ mimeset -f "$app"
 ln -s ../apps/Temino "$stage/bin/temino"
 ln -s ../../../../apps/Temino "$stage/data/deskbar/menu/Applications/Temino"
 
-cp README.md LICENSE assets/fonts/JetBrainsMono-OFL.txt "$stage/documentation/packages/temino/"
+cp README.md LICENSE assets/fonts/JetBrainsMono-OFL.txt assets/fonts/NotoEmoji-OFL.txt "$stage/documentation/packages/temino/"
 
 # 32-bit Haiku (x86_gcc2h) runs a modern-gcc binary against its secondary
 # x86 libraries, so require those (haiku_x86, lib:…_x86) as HaikuPorts does.

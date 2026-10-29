@@ -12,6 +12,7 @@ mod gpu;
 #[cfg(target_os = "macos")]
 #[path = "metal.rs"]
 mod gpu;
+mod graphemes;
 mod keys;
 mod pane;
 mod platform;

@@ -10,6 +10,8 @@ use crate::scene::{Rect, Scene};
 use crate::theme::Color;
 
 pub const ATLAS_SIZE: usize = 2048;
+/// The RGBA atlas for color emoji, drawn by CoreText on macOS.
+pub const COLOR_ATLAS_SIZE: usize = 1024;
 
 const MONO_FONTS: [&[u8]; 4] = [
     include_bytes!("../assets/fonts/JetBrainsMonoNL-Regular.ttf"),
@@ -17,6 +19,9 @@ const MONO_FONTS: [&[u8]; 4] = [
     include_bytes!("../assets/fonts/JetBrainsMonoNL-Italic.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMonoNL-BoldItalic.ttf"),
 ];
+
+const EMOJI: &str = "NotoEmoji-Regular.ttf";
+const EMOJI_FONT: &[u8] = include_bytes!("../assets/fonts/NotoEmoji-Regular.ttf");
 
 /// Where each system keeps the UI and fallback faces, searched in order.
 /// `~` is $HOME.
@@ -118,10 +123,17 @@ struct GlyphKey {
     size: u32,
 }
 
-/// The CPU copy of the atlas; the renderer uploads `dirty` rows.
+/// A color emoji's place in the color atlas, and its width and height in
+/// logical pixels.
+type Emoji = ([f32; 4], f32, f32);
+
+/// The CPU copy of an atlas, `channels` bytes a texel (1 for coverage, 4
+/// for color); the renderer uploads `dirty` rows.
 pub struct Atlas {
     pub pixels: Vec<u8>,
     pub dirty: Option<(usize, usize)>,
+    size: usize,
+    channels: usize,
     shelf_x: usize,
     shelf_y: usize,
     shelf_height: usize,
@@ -129,10 +141,12 @@ pub struct Atlas {
 }
 
 impl Atlas {
-    fn new() -> Atlas {
+    fn new(size: usize, channels: usize) -> Atlas {
         Atlas {
-            pixels: vec![0; ATLAS_SIZE * ATLAS_SIZE],
-            dirty: Some((0, ATLAS_SIZE)),
+            pixels: vec![0; size * size * channels],
+            dirty: Some((0, size)),
+            size,
+            channels,
             shelf_x: 1,
             shelf_y: 1,
             shelf_height: 0,
@@ -142,7 +156,7 @@ impl Atlas {
 
     fn clear(&mut self) {
         self.pixels.fill(0);
-        self.dirty = Some((0, ATLAS_SIZE));
+        self.dirty = Some((0, self.size));
         self.shelf_x = 1;
         self.shelf_y = 1;
         self.shelf_height = 0;
@@ -151,15 +165,15 @@ impl Atlas {
 
     /// Reserves a `w`x`h` slot (1 px apart); `None` when the atlas is full.
     fn allocate(&mut self, w: usize, h: usize) -> Option<(usize, usize)> {
-        if w + 2 > ATLAS_SIZE || h + 2 > ATLAS_SIZE {
+        if w + 2 > self.size || h + 2 > self.size {
             return None;
         }
-        if self.shelf_x + w + 1 > ATLAS_SIZE {
+        if self.shelf_x + w + 1 > self.size {
             self.shelf_y += self.shelf_height + 1;
             self.shelf_x = 1;
             self.shelf_height = 0;
         }
-        if self.shelf_y + h + 1 > ATLAS_SIZE {
+        if self.shelf_y + h + 1 > self.size {
             return None;
         }
         let slot = (self.shelf_x, self.shelf_y);
@@ -168,10 +182,11 @@ impl Atlas {
         Some(slot)
     }
 
-    fn write(&mut self, x: usize, y: usize, w: usize, h: usize, coverage: &[u8]) {
+    fn write(&mut self, x: usize, y: usize, w: usize, h: usize, texels: &[u8]) {
+        let (row_bytes, c) = (w * self.channels, self.channels);
         for row in 0..h {
-            let start = (y + row) * ATLAS_SIZE + x;
-            self.pixels[start..start + w].copy_from_slice(&coverage[row * w..row * w + w]);
+            let start = ((y + row) * self.size + x) * c;
+            self.pixels[start..start + row_bytes].copy_from_slice(&texels[row * row_bytes..(row + 1) * row_bytes]);
         }
         let (lo, hi) = self.dirty.unwrap_or((y, y + h));
         self.dirty = Some((lo.min(y), hi.max(y + h)));
@@ -187,6 +202,11 @@ pub struct TextSystem {
     /// The CJK font, still parsing until the first CJK character asks.
     cjk_loading: Option<std::sync::mpsc::Receiver<Option<Font>>>,
     pub atlas: Atlas,
+    /// Color emoji (macOS): by text and physical size, where they are in
+    /// `color_atlas` and their size in logical pixels; `None` when Apple
+    /// Color Emoji has no glyph for the text.
+    pub color_atlas: Atlas,
+    emoji: HashMap<(String, u32), Option<Emoji>>,
     /// In logical pixels, though each is a whole number of physical ones.
     pub cell: CellMetrics,
     /// Physical pixels per logical one: glyphs rasterize at this density.
@@ -224,13 +244,18 @@ impl TextSystem {
             "NotoMono-Regular.ttf",
             "DejaVuSans.ttf",
             "DejaVuSansMono.ttf",
-            // Monochrome: fontdue can't draw color emoji fonts.
-            "NotoEmoji.ttf",
-            "NotoEmoji-Regular.ttf",
+            EMOJI,
             "Apple Symbols.ttf",
             "Arial Unicode.ttf",
         ] {
-            if let Some(font) = load_system_font(name) {
+            // Monochrome Noto Emoji is bundled: fontdue can't draw color
+            // emoji fonts, and macOS has only Apple Color Emoji.
+            let font = if name == EMOJI {
+                Font::from_bytes(EMOJI_FONT, FontSettings::default()).ok()
+            } else {
+                load_system_font(name)
+            };
+            if let Some(font) = font {
                 fallbacks.push(fonts.len() as FontId);
                 fonts.push(font);
             }
@@ -247,7 +272,9 @@ impl TextSystem {
                 });
                 Some(receiver)
             },
-            atlas: Atlas::new(),
+            atlas: Atlas::new(ATLAS_SIZE, 1),
+            color_atlas: Atlas::new(if cfg!(target_os = "macos") { COLOR_ATLAS_SIZE } else { 0 }, 4),
+            emoji: HashMap::new(),
             cell: CellMetrics { width: 0.0, height: 0.0, baseline: 0.0, size, underline: 0.0, stroke: 1.0 },
             scale: 1.0,
         };
@@ -288,6 +315,8 @@ impl TextSystem {
         };
         self.cache.clear();
         self.atlas.clear();
+        self.emoji.clear();
+        self.color_atlas.clear();
     }
 
     /// Which font draws `c` for a request in `primary`.
@@ -412,6 +441,74 @@ impl TextSystem {
         scene.glyph(Rect::new(self.snap(gx), self.snap(gy), glyph.width, glyph.height), glyph.uv, color);
     }
 
+    /// A character and the zero-width marks on it (variation selectors,
+    /// skin tones, joined emoji): a color emoji where there is one, else
+    /// each drawn in its cell.
+    pub fn draw_cluster(
+        &mut self,
+        scene: &mut Scene,
+        c: char,
+        marks: &[char],
+        x: f32,
+        y: f32,
+        style: Style,
+        color: Color,
+        span: usize,
+    ) {
+        let slot = self.cell.width * span as f32;
+        if let Some((uv, w, h)) = self.color_emoji(c, marks, self.cell.size, slot, self.cell.height) {
+            let rect = Rect::new(self.snap(x + (slot - w) / 2.0), self.snap(y + (self.cell.height - h) / 2.0), w, h);
+            scene.color_glyph(rect, uv, color.a);
+            return;
+        }
+        self.draw_cell(scene, c, x, y, style, color, span);
+        for &mark in marks {
+            self.draw_cell(scene, mark, x, y, style, color, span);
+        }
+    }
+
+    /// `c` (with `marks`) in Apple Color Emoji at `size`, fit in `max_w` x
+    /// `max_h`: its place in the color atlas and its size. Only on macOS,
+    /// and only for wide (emoji-presentation) characters or ones asking for
+    /// emoji with U+FE0F.
+    fn color_emoji(&mut self, c: char, marks: &[char], size: f32, max_w: f32, max_h: f32) -> Option<Emoji> {
+        #[cfg(target_os = "macos")]
+        {
+            let wide = crate::editor::width(c) == 2 && !is_cjk(c);
+            if !wide && !marks.contains(&'\u{fe0f}') {
+                return None;
+            }
+            let s = self.scale;
+            let text: String = std::iter::once(c).chain(marks.iter().copied()).collect();
+            let key = (text, (size * s * 8.0) as u32);
+            if let Some(found) = self.emoji.get(&key) {
+                return *found;
+            }
+            let found = crate::platform::emoji(&key.0, size * s, max_w * s, max_h * s).and_then(|(w, h, rgba)| {
+                let (x, y) = match self.color_atlas.allocate(w, h) {
+                    Some(slot) => slot,
+                    None => {
+                        // Full: start over; emoji come back as they are drawn.
+                        self.emoji.clear();
+                        self.color_atlas.clear();
+                        self.color_atlas.allocate(w, h)?
+                    }
+                };
+                self.color_atlas.write(x, y, w, h, &rgba);
+                let n = COLOR_ATLAS_SIZE as f32;
+                let uv = [x as f32 / n, y as f32 / n, (x + w) as f32 / n, (y + h) as f32 / n];
+                Some((uv, w as f32 / s, h as f32 / s))
+            });
+            self.emoji.insert(key, found);
+            found
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (c, marks, size, max_w, max_h);
+            None
+        }
+    }
+
     /// Lays out proportional text on a baseline; returns the advance.
     pub fn draw_text(
         &mut self,
@@ -425,6 +522,12 @@ impl TextSystem {
     ) -> f32 {
         let mut pen = x;
         for c in text.chars() {
+            if let Some((uv, w, h)) = self.color_emoji(c, &[], size, size * 1.4, size * 1.4) {
+                let top = baseline - self.ui_ascent(size) * 0.72 / 2.0 - h / 2.0;
+                scene.color_glyph(Rect::new(self.snap(pen), self.snap(top), w, h), uv, color.a);
+                pen += w;
+                continue;
+            }
             let (face, index) = self.resolve(c, font);
             let Some(glyph) = self.glyph(face, index, size) else { continue };
             if glyph.width > 0.0 {
@@ -440,6 +543,10 @@ impl TextSystem {
     pub fn measure(&mut self, text: &str, font: FontId, size: f32) -> f32 {
         let mut width = 0.0;
         for c in text.chars() {
+            if let Some((_, w, _)) = self.color_emoji(c, &[], size, size * 1.4, size * 1.4) {
+                width += w;
+                continue;
+            }
             let (face, index) = self.resolve(c, font);
             if let Some(glyph) = self.glyph(face, index, size) {
                 width += glyph.advance;
@@ -455,7 +562,7 @@ impl TextSystem {
             // CJK takes two cells.
             let span = crate::editor::width(c);
             if span > 0 {
-                self.draw_cell(scene, c, pen, y, style, color, span);
+                self.draw_cluster(scene, c, &[], pen, y, style, color, span);
             }
             pen += span as f32 * self.cell.width;
         }

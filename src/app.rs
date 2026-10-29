@@ -366,9 +366,16 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
         scene.shadow(card, Color::hex(0x000000).alpha(0.6), 10.0, 8.0);
         scene.quad(Quad::new(card, theme.surface).radius(10.0).border(1.0, theme.divider));
         text.draw_text(&mut scene, "Temino self-test", 32.0, 52.0, UI_BOLD, 20.0, theme.text);
-        text.draw_mono(&mut scene, "ls -la ~/config ─┼─ ✓ 中文 🌞🐱", 32.0, 70.0, Style::default(), theme.success);
+        text.draw_mono(
+            &mut scene,
+            "ls -la ~/config ─┼─ ✓ 中文 🌞🐱👌🚀🔥🎉",
+            32.0,
+            70.0,
+            Style::default(),
+            theme.success,
+        );
         scene.fill(Rect::new(32.0, 110.0, 120.0, 18.0), theme.accent);
-        match gpu.render(&scene, &mut text.atlas, true) {
+        match gpu.render(&scene, &mut text.atlas, &mut text.color_atlas, true) {
             Ok(Some(pixels)) => {
                 let ms = frame.elapsed().as_secs_f64() * 1000.0;
                 slowest = if round > 0 { slowest.max(ms) } else { slowest };
@@ -1674,7 +1681,8 @@ impl App {
         crate::trace("render: scene built");
         let capture = std::env::var_os("TEMINO_CAPTURE");
         let on_screen = self.gpu.on_screen();
-        match self.gpu.render(&self.scene, &mut self.ctx.text.atlas, capture.is_some()) {
+        match self.gpu.render(&self.scene, &mut self.ctx.text.atlas, &mut self.ctx.text.color_atlas, capture.is_some())
+        {
             Ok(Some(pixels)) => {
                 let (pw, ph) = self.scene.pixel_size();
                 if let Some(path) = &capture {

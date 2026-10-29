@@ -185,7 +185,8 @@ Settings (or put `updates=off` in the `settings` file). Updates need `curl`.
   [fontdue](https://github.com/mooman219/fontdue), [ash](https://github.com/ash-rs/ash),
   and on Linux and macOS winit, softbuffer and
   [arboard](https://github.com/1Password/arboard).
-- [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL OFL 1.1), bundled;
+- [JetBrains Mono](https://www.jetbrains.com/lp/mono/) and
+  [Noto Emoji](https://fonts.google.com/noto/specimen/Noto+Emoji) (SIL OFL 1.1), bundled;
   UI text uses the system's Noto Sans (Haiku), Ubuntu or DejaVu Sans (Linux)
   or Arial (macOS).
 
