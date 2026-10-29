@@ -2896,17 +2896,20 @@ impl App {
             right = chip.x - 6.0;
         }
         if let Some((name, selected)) = &tab.editing {
-            let field = Rect::new(x - 4.0, rect.y + 4.0, (close.x - x).max(0.0), rect.h - 8.0);
-            scene.quad(Quad::new(field, theme.background).radius(4.0).border(1.0, theme.accent));
-            scene.push_clip(field.inset(2.0, 0.0));
+            // Just taller than the text, centered on it.
+            let h = (font + 6.0).round();
+            let top = (baseline - ascent * 0.36 - h / 2.0).round();
+            let field = Rect::new(x - 3.0, top, (close.x - x - 1.0).max(0.0), h);
+            scene.quad(Quad::new(field, theme.background).radius(3.0).border(1.0, theme.accent));
+            scene.push_clip(field.inset(1.0, 0.0));
             let w = text.measure(name, UI, font);
             if *selected && !name.is_empty() {
                 scene.quad(
-                    Quad::new(Rect::new(x - 1.0, field.y + 3.0, w + 2.0, field.h - 6.0), theme.selection).radius(2.0),
+                    Quad::new(Rect::new(x - 1.0, field.y + 2.0, w + 2.0, field.h - 4.0), theme.selection).radius(2.0),
                 );
             }
             text.draw_text(scene, name, x, baseline, UI, font, theme.text);
-            scene.fill(Rect::new(x + w + 1.0, field.y + 4.0, 1.0, field.h - 8.0), theme.cursor);
+            scene.fill(Rect::new(x + w + 1.0, field.y + 3.0, 1.0, field.h - 6.0), theme.cursor);
             scene.pop_clip();
         } else {
             scene.push_clip(Rect::new(x, rect.y, (right - x).max(0.0), rect.h));
