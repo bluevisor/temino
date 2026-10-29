@@ -2124,8 +2124,14 @@ impl App {
     fn finish_rename(&mut self) {
         let Some(rename) = self.renaming.take() else { return };
         if let Some(tab) = self.tabs.get_mut(rename.tab) {
-            let name = rename.name.trim();
-            tab.name = (!name.is_empty()).then(|| name.to_owned());
+            let name = rename.name.trim().to_owned();
+            // Left as it was, the title keeps following the panes.
+            let typed = !name.is_empty() && tab.name.as_deref() != Some(&name);
+            if typed || name.is_empty() {
+                let auto = self.auto_title(rename.tab);
+                let tab = &mut self.tabs[rename.tab];
+                tab.name = (typed && name != auto).then_some(name);
+            }
         }
         self.save_tabs();
     }
@@ -2604,9 +2610,29 @@ impl App {
         if tab.focus == SETTINGS {
             return "Settings".to_owned();
         }
-        tab.name
-            .clone()
-            .unwrap_or_else(|| self.panes.iter().find(|p| p.id == tab.focus).map(Pane::title).unwrap_or_default())
+        tab.name.clone().unwrap_or_else(|| self.auto_title(index))
+    }
+
+    /// A tab's title when it isn't named: its panes' folders, in layout
+    /// order and each once, then what the focused pane has been running.
+    fn auto_title(&self, index: usize) -> String {
+        let tab = &self.tabs[index];
+        let mut leaves = Vec::new();
+        tab.root.leaves(&mut leaves);
+        let mut folders: Vec<String> = Vec::new();
+        for pane in leaves.iter().filter_map(|id| self.panes.iter().find(|p| p.id == *id)) {
+            let folder = pane.folder();
+            if !folders.contains(&folder) {
+                folders.push(folder);
+            }
+        }
+        let recent = self.panes.iter().find(|p| p.id == tab.focus).map(Pane::recent_commands).unwrap_or_default();
+        let folders = folders.join(" + ");
+        if recent.is_empty() {
+            folders
+        } else {
+            format!("{folders} · {}", recent.join(", "))
+        }
     }
 
     /// Reads what every pane's agent is doing, once a frame; a pane whose
