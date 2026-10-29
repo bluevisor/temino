@@ -34,7 +34,9 @@ pub enum Reply {
 /// What the model is told besides the request: where the user is and what
 /// they just ran, so "this file" and "my downloads" mean something.
 pub fn prompt(request: &str, shell: &str, cwd: &str, recent: &[String]) -> String {
-    let shell = shell.rsplit('/').next().unwrap_or(shell);
+    // The full path too: without it a script gets `#!/bin/fish` where fish
+    // lives in /opt/homebrew/bin.
+    let name = shell.rsplit('/').next().unwrap_or(shell);
     let mut names: Vec<String> = std::fs::read_dir(cwd)
         .map(|entries| entries.flatten().filter_map(|e| e.file_name().to_str().map(str::to_owned)).collect())
         .unwrap_or_default();
@@ -43,7 +45,7 @@ pub fn prompt(request: &str, shell: &str, cwd: &str, recent: &[String]) -> Strin
     names.truncate(80);
     let home = std::env::var("HOME").unwrap_or_default();
     let mut out = format!(
-        "System: {}\nShell: {shell}\nHome: {home}\nWorking directory: {cwd}\nFiles here: {}\n",
+        "System: {}\nShell: {name} ({shell})\nHome: {home}\nWorking directory: {cwd}\nFiles here: {}\n",
         crate::platform::OS_NAME,
         if names.is_empty() { "(none)".to_owned() } else { names.join(", ") },
     );
