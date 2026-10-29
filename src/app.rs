@@ -2480,7 +2480,7 @@ fn tabs_path() -> String {
 fn draw_sidebar_row(scene: &mut Scene, theme: &Theme, rect: Rect, color: Option<Color>, current: bool, dragged: bool) {
     let (fill, border) = match (color, current) {
         (Some(color), true) => (theme.raised.mix(color, 0.42), color.mix(theme.text, 0.15)),
-        (Some(color), false) => (theme.panel(SURFACE_LIFT / 2.0).mix(color, 0.22), color.alpha(0.0)),
+        (Some(color), false) => (color.alpha(0.22), color.alpha(0.0)),
         (None, true) => (theme.raised, theme.divider),
         (None, false) => return,
     };
