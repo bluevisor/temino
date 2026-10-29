@@ -903,15 +903,21 @@ impl App {
         self.tab_list.unwrap_or(self.tabs.len() > 1)
     }
 
-    /// The tab list's area; empty while it is hidden.
+    /// How much of the window's top the title bar takes, in zoomed pixels.
+    fn top(&self) -> f32 {
+        platform::TITLEBAR / self.zoom
+    }
+
+    /// The tab list's area, under the title bar; empty while it is hidden.
     fn tab_area(&self) -> Rect {
         if !self.tab_list_visible() {
             return Rect::default();
         }
+        let (top, height) = (self.top(), (self.height - self.top()).max(1.0));
         match self.strip {
-            TabStrip::Left if self.compact => Rect::new(0.0, 0.0, SIDEBAR_COMPACT, self.height),
-            TabStrip::Left => Rect::new(0.0, 0.0, self.sidebar_width.min(self.width / 2.0), self.height),
-            TabStrip::Top => Rect::new(0.0, 0.0, self.width, TAB_BAR_HEIGHT),
+            TabStrip::Left if self.compact => Rect::new(0.0, top, SIDEBAR_COMPACT, height),
+            TabStrip::Left => Rect::new(0.0, top, self.sidebar_width.min(self.width / 2.0), height),
+            TabStrip::Top => Rect::new(0.0, top, self.width, TAB_BAR_HEIGHT),
         }
     }
 
@@ -921,7 +927,7 @@ impl App {
         if self.strip != TabStrip::Left || area.w == 0.0 {
             return Rect::default();
         }
-        Rect::new(area.right() - GRAB, 0.0, 2.0 * GRAB, area.h)
+        Rect::new(area.right() - GRAB, area.y, 2.0 * GRAB, area.h)
     }
 
     fn set_compact(&mut self, compact: bool) {
@@ -955,11 +961,12 @@ impl App {
     }
 
     fn content_rect(&self) -> Rect {
-        let (width, height) = (self.width, self.height);
+        let (width, top) = (self.width, self.top());
+        let height = (self.height - top).max(1.0);
         let area = self.tab_area();
         match self.strip {
-            TabStrip::Left => Rect::new(area.w, 0.0, (width - area.w).max(1.0), height),
-            TabStrip::Top => Rect::new(0.0, area.h, width, (height - area.h).max(1.0)),
+            TabStrip::Left => Rect::new(area.w, top, (width - area.w).max(1.0), height),
+            TabStrip::Top => Rect::new(0.0, top + area.h, width, (height - area.h).max(1.0)),
         }
     }
 
@@ -2012,6 +2019,7 @@ impl App {
             self.scene.set_layer(LAYER_CONTENT);
         }
         self.draw_tab_bar(&agents);
+        self.draw_titlebar();
         self.draw_update();
         self.draw_tab_menu();
         self.draw_toast();
@@ -2114,6 +2122,29 @@ impl App {
             draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, t);
             pane_hits.push((bar, self.active, id));
         }
+    }
+
+    /// The title bar over the window's top, where the system's would be:
+    /// the sidebar's color across, the title centered. AppKit keeps the
+    /// traffic lights and the dragging; this is only the look.
+    fn draw_titlebar(&mut self) {
+        let top = self.top();
+        if top <= 0.0 {
+            return;
+        }
+        let bar = Rect::new(0.0, 0.0, self.width, top);
+        let Self { scene, ctx, title, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        scene.fill(bar, theme.panel(SURFACE_LIFT / 2.0));
+        scene.fill(Rect::new(0.0, top - 1.0, bar.w, 1.0), theme.divider);
+        // Clear of the traffic lights on the left, centered in what's left.
+        // Fixed in points, like the bar: zoom leaves it alone.
+        let font = 13.0 / self.zoom;
+        let room = (bar.w - 2.0 * 84.0 / self.zoom).max(0.0);
+        let shown = text.elide(title, UI_BOLD, font, room);
+        let w = text.measure(&shown, UI_BOLD, font);
+        let baseline = (top / 2.0 + text.ui_ascent(font) * 0.36).round();
+        text.draw_text(scene, &shown, (bar.w - w) / 2.0, baseline, UI_BOLD, font, theme.text_dim);
     }
 
     fn draw_tab_bar(&mut self, agents: &[Option<AgentState>]) {
@@ -2248,12 +2279,13 @@ impl App {
     fn draw_tab_strip(&mut self, tabs: &[TabView]) {
         let width = self.width;
         let theme = &self.ctx.theme;
-        self.scene.fill(Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), theme.panel(SURFACE_LIFT / 2.0));
-        self.scene.fill(Rect::new(0.0, TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
+        let top = self.top();
+        self.scene.fill(Rect::new(0.0, top, width, TAB_BAR_HEIGHT), theme.panel(SURFACE_LIFT / 2.0));
+        self.scene.fill(Rect::new(0.0, top + TAB_BAR_HEIGHT - 1.0, width, 1.0), theme.divider);
         let plus = 34.0;
         let tab_width = ((width - 12.0 - plus) / tabs.len() as f32).min(TAB_MAX_WIDTH);
         for (index, tab) in tabs.iter().enumerate() {
-            let rect = Rect::new(6.0 + index as f32 * tab_width, 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
+            let rect = Rect::new(6.0 + index as f32 * tab_width, top + 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
             if index == self.active {
                 let theme = &self.ctx.theme;
                 self.scene.quad(Quad::new(rect, theme.raised).radius(6.0).border(1.0, theme.divider));
@@ -2268,7 +2300,7 @@ impl App {
         let Self { scene, ctx, new_tab_hit, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         let px = 6.0 + tabs.len() as f32 * tab_width;
-        let plus_rect = Rect::new(px, 5.0, 26.0, TAB_BAR_HEIGHT - 9.0);
+        let plus_rect = Rect::new(px, top + 5.0, 26.0, TAB_BAR_HEIGHT - 9.0);
         let ascent = text.ui_ascent(12.0);
         let baseline = (plus_rect.y + (plus_rect.h + ascent) / 2.0).round();
         text.draw_text(scene, "+", px + 8.0, baseline, UI, 15.0, theme.text_dim);
@@ -2280,13 +2312,13 @@ impl App {
         let area = self.tab_area();
         let theme = &self.ctx.theme;
         self.scene.fill(area, theme.panel(SURFACE_LIFT / 2.0));
-        self.scene.fill(Rect::new(area.right() - 1.0, 0.0, 1.0, area.h), theme.divider);
-        self.scene.push_clip(Rect::new(0.0, 0.0, area.w - 1.0, area.h));
+        self.scene.fill(Rect::new(area.right() - 1.0, area.y, 1.0, area.h), theme.divider);
+        self.scene.push_clip(Rect::new(0.0, area.y, area.w - 1.0, area.h));
         let dragged = match self.pointer {
             Pointer::Tab { index, dragging: true, .. } => Some(index),
             _ => None,
         };
-        let mut y = 8.0;
+        let mut y = area.y + 8.0;
         for (index, tab) in tabs.iter().enumerate() {
             let rect = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
             if self.compact {
@@ -2326,7 +2358,7 @@ impl App {
         }
         *new_tab_hit = plus;
         // Collapse to compact, or expand back, from the bottom corner.
-        let collapse = Rect::new(6.0, area.h - 34.0, 28.0, 26.0);
+        let collapse = Rect::new(6.0, area.bottom() - 34.0, 28.0, 26.0);
         let collapse =
             if self.compact { Rect::new((area.w - 1.0 - 28.0) / 2.0, collapse.y, 28.0, 26.0) } else { collapse };
         if collapse.contains(self.mouse.0, self.mouse.1) {
@@ -2568,11 +2600,11 @@ impl App {
         let pill = if !sidebar {
             None
         } else if *compact {
-            Some(Rect::new((area.w - 1.0 - 28.0) / 2.0, area.h - 64.0, 28.0, 26.0))
+            Some(Rect::new((area.w - 1.0 - 28.0) / 2.0, area.bottom() - 64.0, 28.0, 26.0))
         } else {
             let label = "Update Available…";
             let w = (text.measure(label, UI_BOLD, 12.0) + 38.0).min(area.w - 48.0);
-            Some(Rect::new(40.0, area.h - 34.0, w, 26.0))
+            Some(Rect::new(40.0, area.bottom() - 34.0, w, 26.0))
         };
         if let Some(pill) = pill {
             scene.quad(Quad::new(pill, blue_hover(pill)).radius(pill.h / 2.0));

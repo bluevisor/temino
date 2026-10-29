@@ -339,6 +339,9 @@ pub fn process_group(pid: i32) -> i32 {
     unsafe { getpgid(pid) }
 }
 
+/// The title bar Temino draws itself, in points: none, Haiku draws it.
+pub const TITLEBAR: f32 = 0.0;
+
 /// Haiku has no primary selection.
 pub fn selection_set(_text: &str) {}
 
