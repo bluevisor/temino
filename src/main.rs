@@ -173,9 +173,16 @@ fn main() {
     let (sender, receiver) = mpsc::channel();
     platform::app_new("application/x-vnd.bluevisor-Temino");
     platform::window_new("Temino", WIDTH, HEIGHT, sender.clone());
+    // Command+N: another window with a core thread of its own, fresh.
+    platform::on_new_window(|receiver, sender, cwd| app::run(receiver, sender, WIDTH, HEIGHT, app::Start::Fresh(cwd)));
+    // On Haiku another window is another team, started `--new-window [dir]`.
+    let start = match args.get(1).map(String::as_str) {
+        Some("--new-window") => app::Start::Fresh(args.get(2).cloned()),
+        _ => app::Start::Restore,
+    };
     thread::Builder::new()
         .name("temino core".into())
-        .spawn(move || app::run(receiver, sender, WIDTH, HEIGHT))
+        .spawn(move || app::run(receiver, sender, WIDTH, HEIGHT, start))
         .expect("core thread");
     platform::app_run();
     std::process::exit(0);

@@ -63,7 +63,9 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
   (Linux, Haiku) they're drawn as a fine mosaic.
 - **Output comes back.** Quitting keeps each pane's last 50 blocks, colors
   and all, and relaunching shows them above the new prompt
-  (`restore_output=off` in the settings file turns that off).
+  (`restore_output=off` in the settings file turns that off). With several
+  windows (Cmd+N), the first one's tabs come back; close it and the oldest
+  one left keeps its tabs instead.
 - **Settings in a tab.** Cmd+, opens them: theme, background color, text size,
   default shell, tab list position and updates; on macOS also how
   see-through the background is and whether the desktop behind it is
@@ -84,10 +86,10 @@ macOS, Ctrl+Shift (or Super) on Linux.
 | Tab on an empty line | switch between the shell and AI mode |
 | Tab, Ctrl+Shift+Space, Ctrl+R, ↑ ↓ | complete, list every command, search history, browse history |
 | → or End at the end of the line | accept the suggestion (Ctrl+→ one word) |
-| Cmd+T | new tab |
+| Cmd+N, Cmd+T | new window (its tab opens where you are), new tab |
 | Cmd+D / Cmd+E / Cmd+Shift+E | split the pane right / down / up |
 | Option while dragging a divider | turn the split: side by side ↔ stacked |
-| Cmd+W, Cmd+Q | close the pane (its tab with its last pane), quit |
+| Cmd+W, Cmd+Q | close the pane (its tab with its last pane, the window with its last tab), quit |
 | Cmd+[ / Cmd+], Cmd+Option+arrows | previous / next pane, the pane in that direction |
 | Cmd+\` / Cmd+Shift+\` | the agent waiting on you longest / most recently; with none, the pane you were in before |
 | Cmd+Enter | zoom the pane to the whole tab, and back |

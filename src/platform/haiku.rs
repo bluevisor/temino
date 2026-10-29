@@ -192,6 +192,30 @@ pub fn quit() {
     unsafe { temino_quit() }
 }
 
+/// One window per team here: another window is another Temino, started
+/// fresh (as Haiku's Terminal does), its first tab in `cwd`.
+pub fn new_window(cwd: Option<String>) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let mut command = std::process::Command::new(exe);
+    command.arg("--new-window");
+    if let Some(cwd) = cwd.filter(|dir| std::path::Path::new(dir).is_dir()) {
+        command.arg(&cwd).current_dir(cwd);
+    }
+    let _ = command.spawn();
+}
+
+/// This team's one window: closing it quits.
+pub fn close_window() {
+    quit();
+}
+
+pub fn window_count() -> usize {
+    1
+}
+
+/// Other windows are other teams; nothing to start here.
+pub fn on_new_window(_start: fn(std::sync::mpsc::Receiver<Msg>, Sender<Msg>, Option<String>)) {}
+
 pub fn set_background(rgb: [u8; 3]) {
     unsafe { temino_set_background(rgb[0], rgb[1], rgb[2]) }
 }

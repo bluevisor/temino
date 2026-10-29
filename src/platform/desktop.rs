@@ -6,15 +6,18 @@
 //! winit wants the main thread, so the core thread talks to it through an
 //! event-loop proxy: `present` parks the newest frame and wakes the loop,
 //! which copies it into the window. Events go the other way as `UiEvent`s.
+//!
+//! Each window has a core thread of its own (an `App`), numbered from 1:
+//! what a core thread asks for goes to its window, by `window_no`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::num::NonZeroU32;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -32,8 +35,10 @@ use crate::Msg;
 
 #[cfg(target_os = "macos")]
 extern "C" {
-    /// Gives the view the Metal layer that src/metal.rs renders into.
-    fn temino_metal_attach(view: *mut std::ffi::c_void);
+    /// Gives window `window`'s view the Metal layer that src/metal.rs
+    /// renders into; detach lets it go with the window.
+    fn temino_metal_attach(view: *mut std::ffi::c_void, window: u32);
+    fn temino_metal_detach(window: u32);
     /// Makes the title bar `height` points tall, traffic lights centered.
     fn temino_titlebar(view: *mut std::ffi::c_void, height: f64);
     /// Blurs what shows through the background, within the rounded corners.
@@ -50,8 +55,14 @@ extern "C" {
         width: *mut u32,
         height: *mut u32,
     ) -> bool;
-    /// Puts a host for viewers over the view; their events go to `callback`.
-    fn temino_viewer_init(view: *mut std::ffi::c_void, callback: extern "C" fn(u64, i32, *const std::ffi::c_char));
+    /// Puts a host for window `window`'s viewers over the view; their events
+    /// go to `callback`. Viewer ids carry their window in the top 32 bits.
+    fn temino_viewer_init(
+        view: *mut std::ffi::c_void,
+        window: u32,
+        callback: extern "C" fn(u64, i32, *const std::ffi::c_char),
+    );
+    fn temino_viewer_detach(window: u32);
     fn temino_viewer_open(id: u64, kind: i32, target: *const std::ffi::c_char, style: *const ViewerStyle);
     fn temino_viewer_place(id: u64, x: f64, y: f64, width: f64, height: f64, visible: bool);
     fn temino_viewer_close(id: u64);
@@ -92,6 +103,11 @@ enum Request {
     ViewerPlace(Vec<(u64, [f32; 4], bool)>),
     ViewerClose(u64),
     ViewerFocus(Option<u64>),
+    /// A new window, its first tab in this directory.
+    NewWindow(Option<String>),
+    /// This window's core is done: close it (and quit with the last one).
+    CloseWindow,
+    /// Close every window: this one's core is done, the others are asked.
     Quit,
 }
 
@@ -101,32 +117,70 @@ struct Frame {
     height: u32,
 }
 
-static PROXY: OnceLock<Mutex<EventLoopProxy<Request>>> = OnceLock::new();
-static FRAME: Mutex<Option<Frame>> = Mutex::new(None);
-/// Set while a Present request is queued, so frames don't pile up.
-static PRESENT_PENDING: AtomicBool = AtomicBool::new(false);
+static PROXY: OnceLock<Mutex<EventLoopProxy<(u32, Request)>>> = OnceLock::new();
+/// Each window's newest frame, and whether a Present for it is queued (so
+/// frames don't pile up).
+static FRAMES: Mutex<Vec<(u32, Frame, bool)>> = Mutex::new(Vec::new());
 static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 /// Whether the window blurs what's behind it, kept for when it opens.
 static BLUR: AtomicBool = AtomicBool::new(false);
-/// Where menu picks go; the menu calls back on the main thread.
+/// Where menu picks go, the core of the window in front; the menu calls
+/// back on the main thread.
 static MENU_SENDER: Mutex<Option<Sender<Msg>>> = Mutex::new(None);
+/// Each window's core, by window number, for its viewers' events.
+static SENDERS: Mutex<Vec<(u32, Sender<Msg>)>> = Mutex::new(Vec::new());
+/// How many windows are open.
+static WINDOWS: AtomicUsize = AtomicUsize::new(0);
+/// Starts a new window's core thread: given its events and the sender for
+/// them, and the directory its first tab opens in.
+type CoreStart = fn(Receiver<Msg>, Sender<Msg>, Option<String>);
+/// `on_new_window` sets it.
+static NEW_CORE: OnceLock<CoreStart> = OnceLock::new();
 
 /// The window `window_new` asked for: title, size, where events go.
 type Setup = (String, u32, u32, Sender<Msg>);
 
 thread_local! {
-    static EVENT_LOOP: RefCell<Option<EventLoop<Request>>> = const { RefCell::new(None) };
+    static EVENT_LOOP: RefCell<Option<EventLoop<(u32, Request)>>> = const { RefCell::new(None) };
     static SETUP: RefCell<Option<Setup>> = const { RefCell::new(None) };
+    /// Which window this thread is the core of: the first, unless it was
+    /// started for another.
+    static WINDOW: Cell<u32> = const { Cell::new(1) };
 }
 
 fn request(request: Request) {
     if let Some(proxy) = PROXY.get() {
-        let _ = proxy.lock().unwrap().send_event(request);
+        let _ = proxy.lock().unwrap().send_event((window_no(), request));
     }
 }
 
+/// The window the calling core thread draws (1 for the first).
+pub fn window_no() -> u32 {
+    WINDOW.with(Cell::get)
+}
+
+/// How many windows are open.
+pub fn window_count() -> usize {
+    WINDOWS.load(Ordering::Acquire)
+}
+
+/// How a new window's core thread starts.
+pub fn on_new_window(start: CoreStart) {
+    let _ = NEW_CORE.set(start);
+}
+
+/// Opens another window, its first tab in `cwd`.
+pub fn new_window(cwd: Option<String>) {
+    request(Request::NewWindow(cwd));
+}
+
+/// Closes the calling core's window, once it's done; the last one quits.
+pub fn close_window() {
+    request(Request::CloseWindow);
+}
+
 pub fn app_new(_signature: &str) {
-    let mut builder = EventLoop::<Request>::with_user_event();
+    let mut builder = EventLoop::<(u32, Request)>::with_user_event();
     #[cfg(target_os = "macos")]
     {
         // Temino installs its own menu bar.
@@ -157,21 +211,7 @@ pub fn app_run() {
     let event_loop = EVENT_LOOP.with(|slot| slot.borrow_mut().take()).expect("app_new first");
     let (title, width, height, sender) = SETUP.with(|slot| slot.borrow_mut().take()).expect("window_new first");
     *MENU_SENDER.lock().unwrap() = Some(sender.clone());
-    let mut handler = Handler {
-        title,
-        size: (width, height),
-        sender,
-        window: None,
-        surface: None,
-        #[cfg(target_os = "macos")]
-        on_layer: false,
-        scale: 1.0,
-        modifiers: ModifiersState::empty(),
-        pointer: (0.0, 0.0),
-        buttons: 0,
-        last_click: None,
-        clicks: 0,
-    };
+    let mut handler = Handler { title, size: (width, height), first: Some(sender), windows: Vec::new(), next: 1, primary: 1 };
     let _ = event_loop.run_app(&mut handler);
 }
 
@@ -284,6 +324,7 @@ mod menu {
         ("Temino", Some("Settings…"), ",", 0, None, ','),
         ("Temino", None, "", 0, None, '\0'),
         ("Temino", Some("Quit Temino"), "q", 0, None, 'q'),
+        ("Shell", Some("New Window"), "n", 0, None, 'n'),
         ("Shell", Some("New Tab"), "t", 0, None, 't'),
         ("Shell", Some("Split Right"), "d", 0, None, 'd'),
         ("Shell", Some("Split Down"), "e", 0, None, 'e'),
@@ -354,9 +395,14 @@ mod menu {
 /// Takes a BGRA frame (physical pixels) and has the window show it.
 pub fn present(pixels: &[u8], width: u32, height: u32) {
     debug_assert!(pixels.len() >= (width * height * 4) as usize);
-    {
-        let mut slot = FRAME.lock().unwrap();
-        let frame = slot.get_or_insert_with(|| Frame { pixels: Vec::new(), width: 0, height: 0 });
+    let no = window_no();
+    let queued = {
+        let mut frames = FRAMES.lock().unwrap();
+        let index = frames.iter().position(|(n, ..)| *n == no).unwrap_or_else(|| {
+            frames.push((no, Frame { pixels: Vec::new(), width: 0, height: 0 }, false));
+            frames.len() - 1
+        });
+        let (_, frame, pending) = &mut frames[index];
         frame.pixels.clear();
         // Little-endian BGRA is 0xAARRGGBB; softbuffer wants the top byte clear.
         frame.pixels.extend(
@@ -364,8 +410,9 @@ pub fn present(pixels: &[u8], width: u32, height: u32) {
         );
         frame.width = width;
         frame.height = height;
-    }
-    if !PRESENT_PENDING.swap(true, Ordering::AcqRel) {
+        std::mem::replace(pending, true)
+    };
+    if !queued {
         request(Request::Present);
     }
 }
@@ -386,23 +433,30 @@ pub fn set_text_caret(_x: i32, _y: i32, _height: i32) {}
 
 pub fn beep() {}
 
+/// A viewer's id as the shim knows it: its pane id, which is only unique
+/// within a window, with the window's number above it.
+fn viewer_id(id: u64) -> u64 {
+    (window_no() as u64) << 32 | (id & 0xffff_ffff)
+}
+
 /// Opens a link in the default browser (or whatever handles its scheme).
 pub fn viewer_open(id: u64, kind: ViewerKind, target: &str, style: ViewerStyle) {
-    request(Request::ViewerOpen(id, kind, target.to_owned(), style));
+    request(Request::ViewerOpen(viewer_id(id), kind, target.to_owned(), style));
 }
 
 /// Where each viewer goes, in points from the window's top left, and
 /// whether it shows.
 pub fn viewer_place(frames: Vec<(u64, [f32; 4], bool)>) {
-    request(Request::ViewerPlace(frames));
+    request(Request::ViewerPlace(frames.into_iter().map(|(id, frame, shown)| (viewer_id(id), frame, shown)).collect()));
 }
 
 pub fn viewer_close(id: u64) {
-    request(Request::ViewerClose(id));
+    request(Request::ViewerClose(viewer_id(id)));
 }
 
+/// Gives the keyboard to viewer `id`, or with None back to the window's terminal.
 pub fn viewer_focus(id: Option<u64>) {
-    request(Request::ViewerFocus(id));
+    request(Request::ViewerFocus(Some(viewer_id(id.unwrap_or(0)))));
 }
 
 /// A viewer's news, on the main thread, to the core thread.
@@ -423,8 +477,10 @@ extern "C" fn viewer_event(id: u64, kind: i32, text: *const std::ffi::c_char) {
         6 => ViewerEvent::Close,
         _ => ViewerEvent::Failed(text),
     };
-    if let Some(sender) = MENU_SENDER.lock().unwrap().as_ref() {
-        let _ = sender.send(Msg::Viewer(id, event));
+    // To the core of the viewer's window, by the pane id it knows.
+    let window = (id >> 32) as u32;
+    if let Some((_, sender)) = SENDERS.lock().unwrap().iter().find(|(no, _)| *no == window) {
+        let _ = sender.send(Msg::Viewer(id & 0xffff_ffff, event));
     }
 }
 
@@ -573,15 +629,16 @@ pub fn process_group(pid: i32) -> i32 {
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
-struct Handler {
-    title: String,
-    size: (u32, u32),
-    sender: Sender<Msg>,
-    window: Option<Arc<Window>>,
+/// One open window: its winit window, how frames reach it, its core, and
+/// the pointer and keyboard state its events are made from.
+struct Win {
+    no: u32,
+    window: Arc<Window>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     /// Frames go straight to the window's Metal layer, not through softbuffer.
     #[cfg(target_os = "macos")]
     on_layer: bool,
+    sender: Sender<Msg>,
     scale: f64,
     modifiers: ModifiersState,
     /// The pointer, in logical pixels.
@@ -591,14 +648,27 @@ struct Handler {
     clicks: i32,
 }
 
-impl Handler {
+struct Handler {
+    title: String,
+    size: (u32, u32),
+    /// The first window's core, which main started, until its window opens.
+    first: Option<Sender<Msg>>,
+    windows: Vec<Win>,
+    /// The next window's number.
+    next: u32,
+    /// The window that keeps the tabs for the next launch: the first, then
+    /// the oldest left once it closes.
+    primary: u32,
+}
+
+impl Win {
     fn send(&self, event: UiEvent) {
         let _ = self.sender.send(Msg::Ui(event));
     }
 
     /// Remembers where the window is and how big, for the next launch.
     fn save_frame(&self) {
-        let Some(window) = &self.window else { return };
+        let window = &self.window;
         if window.is_minimized() == Some(true) || window.fullscreen().is_some() {
             return;
         }
@@ -614,8 +684,7 @@ impl Handler {
     }
 
     fn send_size(&self) {
-        let Some(window) = &self.window else { return };
-        let size = window.inner_size();
+        let size = self.window.inner_size();
         let scale = self.scale;
         self.send(UiEvent::Resize {
             width: ((size.width as f64 / scale).round() as u32).max(1),
@@ -643,13 +712,14 @@ impl Handler {
     }
 
     fn draw(&mut self) {
+        let mut frames = FRAMES.lock().unwrap();
+        let Some((_, frame, pending)) = frames.iter_mut().find(|(no, ..)| *no == self.no) else { return };
+        *pending = false;
         #[cfg(target_os = "macos")]
         if self.on_layer {
             return;
         }
         let Some(surface) = &mut self.surface else { return };
-        let slot = FRAME.lock().unwrap();
-        let Some(frame) = slot.as_ref() else { return };
         let (Some(width), Some(height)) = (NonZeroU32::new(frame.width), NonZeroU32::new(frame.height)) else {
             return;
         };
@@ -731,11 +801,16 @@ impl Handler {
     }
 }
 
-impl ApplicationHandler<Request> for Handler {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
+impl Handler {
+    fn win(&mut self, no: u32) -> Option<&mut Win> {
+        self.windows.iter_mut().find(|win| win.no == no)
+    }
+
+    /// Opens a window: the first one where the last launch left it, with the
+    /// core main started; another cascading from window `from`, with a new
+    /// core whose first tab opens in `cwd`.
+    fn open_window(&mut self, event_loop: &ActiveEventLoop, from: Option<u32>, cwd: Option<String>) {
+        let no = self.next;
         let mut attributes = Window::default_attributes()
             .with_title(self.title.clone())
             .with_inner_size(LogicalSize::new(self.size.0, self.size.1))
@@ -749,7 +824,22 @@ impl ApplicationHandler<Request> for Handler {
             attributes =
                 attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true);
         }
-        if let Some((x, y, width, height)) = saved_frame() {
+        let parent = from.and_then(|from| self.windows.iter().find(|win| win.no == from));
+        let place = match parent {
+            Some(parent) => {
+                // A little down and right of the window it came from, its size.
+                let window = &parent.window;
+                let position =
+                    if cfg!(target_os = "macos") { window.inner_position() } else { window.outer_position() };
+                let size = window.inner_size().to_logical::<f64>(parent.scale);
+                position.ok().map(|p| {
+                    let p = p.to_logical::<f64>(parent.scale);
+                    (p.x + CASCADE, p.y + CASCADE, size.width, size.height)
+                })
+            }
+            None => saved_frame(),
+        };
+        if let Some((x, y, width, height)) = place {
             attributes =
                 attributes.with_position(LogicalPosition::new(x, y)).with_inner_size(LogicalSize::new(width, height));
         }
@@ -757,60 +847,139 @@ impl ApplicationHandler<Request> for Handler {
             Ok(window) => Arc::new(window),
             Err(error) => {
                 crate::fatal(&format!("opening the window: {error}"));
-                event_loop.exit();
+                if self.windows.is_empty() {
+                    event_loop.exit();
+                }
                 return;
             }
         };
+        self.next += 1;
         window.set_cursor(CursorIcon::Text);
         #[cfg(not(target_os = "macos"))]
         window.set_blur(BLUR.load(Ordering::Acquire));
         #[cfg(target_os = "macos")]
-        menu::install();
-        self.scale = window.scale_factor();
+        if self.windows.is_empty() && self.first.is_some() {
+            menu::install();
+        }
+        let (sender, receiver) = match self.first.take() {
+            Some(sender) => (sender, None),
+            None => {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                (sender, Some(receiver))
+            }
+        };
+        let mut win = Win {
+            no,
+            window: window.clone(),
+            surface: None,
+            #[cfg(target_os = "macos")]
+            on_layer: false,
+            sender: sender.clone(),
+            scale: window.scale_factor(),
+            modifiers: ModifiersState::empty(),
+            pointer: (0.0, 0.0),
+            buttons: 0,
+            last_click: None,
+            clicks: 0,
+        };
         #[cfg(target_os = "macos")]
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) {
                 unsafe {
-                    temino_metal_attach(handle.ns_view.as_ptr());
+                    temino_metal_attach(handle.ns_view.as_ptr(), no);
                     temino_titlebar(handle.ns_view.as_ptr(), TITLEBAR as f64);
                     temino_blur(handle.ns_view.as_ptr(), BLUR.load(Ordering::Acquire));
-                    temino_viewer_init(handle.ns_view.as_ptr(), viewer_event);
+                    temino_viewer_init(handle.ns_view.as_ptr(), no, viewer_event);
                 }
-                self.on_layer = true;
-                self.window = Some(window);
-                self.send_size();
-                return;
+                win.on_layer = true;
             }
         }
-        let surface = softbuffer::Context::new(window.clone())
-            .and_then(|context| softbuffer::Surface::new(&context, window.clone()));
-        match surface {
-            Ok(surface) => self.surface = Some(surface),
-            Err(error) => {
-                crate::fatal(&format!("setting up the window surface: {error}"));
-                event_loop.exit();
-                return;
+        #[cfg(target_os = "macos")]
+        let needs_surface = !win.on_layer;
+        #[cfg(not(target_os = "macos"))]
+        let needs_surface = true;
+        if needs_surface {
+            let surface = softbuffer::Context::new(window.clone())
+                .and_then(|context| softbuffer::Surface::new(&context, window.clone()));
+            match surface {
+                Ok(surface) => win.surface = Some(surface),
+                Err(error) => {
+                    crate::fatal(&format!("setting up the window surface: {error}"));
+                    if self.windows.is_empty() {
+                        event_loop.exit();
+                    }
+                    return;
+                }
             }
         }
-        self.window = Some(window);
-        self.send_size();
+        crate::trace(&format!("window {no}: opened"));
+        SENDERS.lock().unwrap().push((no, sender.clone()));
+        win.send_size();
+        self.windows.push(win);
+        WINDOWS.store(self.windows.len(), Ordering::Release);
+        if let (Some(receiver), Some(start)) = (receiver, NEW_CORE.get().copied()) {
+            let started = std::thread::Builder::new().name(format!("temino core {no}")).spawn(move || {
+                WINDOW.with(|window| window.set(no));
+                start(receiver, sender, cwd);
+            });
+            if started.is_err() {
+                self.close_window(event_loop, no);
+            }
+        }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, request: Request) {
+    /// Closes window `no` (its core is done with it); the oldest window
+    /// left takes over keeping the tabs, and with none left the app quits.
+    fn close_window(&mut self, event_loop: &ActiveEventLoop, no: u32) {
+        let Some(index) = self.windows.iter().position(|win| win.no == no) else { return };
+        let win = self.windows.remove(index);
+        #[cfg(target_os = "macos")]
+        unsafe {
+            temino_viewer_detach(no);
+            temino_metal_detach(no);
+        }
+        FRAMES.lock().unwrap().retain(|(n, ..)| *n != no);
+        SENDERS.lock().unwrap().retain(|(n, _)| *n != no);
+        drop(win);
+        WINDOWS.store(self.windows.len(), Ordering::Release);
+        crate::trace(&format!("window {no}: closed, {} left", self.windows.len()));
+        let Some(next) = self.windows.first() else {
+            event_loop.exit();
+            return;
+        };
+        if no == self.primary {
+            self.primary = next.no;
+            next.send(UiEvent::Primary);
+        }
+    }
+}
+
+/// How far down and right a new window opens from the one it came from.
+const CASCADE: f64 = 26.0;
+
+impl ApplicationHandler<(u32, Request)> for Handler {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.first.is_some() && self.windows.is_empty() {
+            self.open_window(event_loop, None, None);
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, (no, request): (u32, Request)) {
         match request {
             Request::Present => {
-                PRESENT_PENDING.store(false, Ordering::Release);
-                self.draw();
+                if let Some(win) = self.win(no) {
+                    win.draw();
+                }
             }
             Request::Title(title) => {
-                if let Some(window) = &self.window {
-                    window.set_title(&title);
+                if let Some(win) = self.win(no) {
+                    win.window.set_title(&title);
                 }
             }
             Request::Cursor(cursor) => {
-                if let Some(window) = &self.window {
-                    window.set_cursor(match cursor {
+                if let Some(win) = self.win(no) {
+                    win.window.set_cursor(match cursor {
                         Cursor::IBeam => CursorIcon::Text,
                         Cursor::Arrow => CursorIcon::Default,
                         Cursor::ResizeColumn => CursorIcon::ColResize,
@@ -820,13 +989,13 @@ impl ApplicationHandler<Request> for Handler {
                 }
             }
             Request::Blur(on) => {
-                if let Some(window) = &self.window {
+                if let Some(win) = self.win(no) {
                     #[cfg(not(target_os = "macos"))]
-                    window.set_blur(on);
+                    win.window.set_blur(on);
                     #[cfg(target_os = "macos")]
                     {
                         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                        if let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) {
+                        if let Ok(RawWindowHandle::AppKit(handle)) = win.window.window_handle().map(|h| h.as_raw()) {
                             unsafe { temino_blur(handle.ns_view.as_ptr(), on) };
                         }
                     }
@@ -849,7 +1018,16 @@ impl ApplicationHandler<Request> for Handler {
             Request::ViewerFocus(id) => unsafe { temino_viewer_focus(id.unwrap_or(0)) },
             #[cfg(not(target_os = "macos"))]
             Request::ViewerOpen(..) | Request::ViewerPlace(_) | Request::ViewerClose(_) | Request::ViewerFocus(_) => {}
-            Request::Quit => event_loop.exit(),
+            Request::NewWindow(cwd) => self.open_window(event_loop, Some(no), cwd),
+            Request::CloseWindow => self.close_window(event_loop, no),
+            Request::Quit => {
+                // The others are asked to finish too (one with unsaved work
+                // stays open), then this one closes.
+                for win in self.windows.iter().filter(|win| win.no != no) {
+                    win.send(UiEvent::Quit);
+                }
+                self.close_window(event_loop, no);
+            }
             #[cfg(target_os = "macos")]
             Request::Hotkey(key) => {
                 let (code, modifiers) = key.unwrap_or((u32::MAX, 0));
@@ -862,33 +1040,47 @@ impl ApplicationHandler<Request> for Handler {
         }
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let primary = self.primary;
+        let Some(win) = self.windows.iter_mut().find(|win| win.window.id() == id) else { return };
         match event {
-            WindowEvent::CloseRequested => self.send(UiEvent::Close),
+            WindowEvent::CloseRequested => win.send(UiEvent::Close),
             WindowEvent::Resized(_) => {
-                self.send_size();
-                self.save_frame();
+                win.send_size();
+                if win.no == primary {
+                    win.save_frame();
+                }
             }
-            WindowEvent::Moved(_) => self.save_frame(),
+            WindowEvent::Moved(_) => {
+                if win.no == primary {
+                    win.save_frame();
+                }
+            }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.scale = scale_factor;
-                self.send_size();
+                win.scale = scale_factor;
+                win.send_size();
             }
-            WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::Focused(focused) => self.send(UiEvent::Focus(focused)),
+            WindowEvent::RedrawRequested => win.draw(),
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    // Menu picks go to the window in front.
+                    *MENU_SENDER.lock().unwrap() = Some(win.sender.clone());
+                }
+                win.send(UiEvent::Focus(focused));
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.modifiers = modifiers.state();
-                self.send(UiEvent::Modifiers(self.mods()));
+                win.modifiers = modifiers.state();
+                win.send(UiEvent::Modifiers(win.mods()));
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
-                    self.key(&event);
+                    win.key(&event);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer = ((position.x / self.scale) as f32, (position.y / self.scale) as f32);
-                let (x, y) = self.pointer;
-                self.send(UiEvent::MouseMoved { x, y, buttons: self.buttons });
+                win.pointer = ((position.x / win.scale) as f32, (position.y / win.scale) as f32);
+                let (x, y) = win.pointer;
+                win.send(UiEvent::MouseMoved { x, y, buttons: win.buttons });
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let bit = match button {
@@ -897,22 +1089,22 @@ impl ApplicationHandler<Request> for Handler {
                     MouseButton::Middle => buttons::TERTIARY,
                     _ => return,
                 };
-                let (x, y) = self.pointer;
+                let (x, y) = win.pointer;
                 if state == ElementState::Pressed {
                     let now = Instant::now();
-                    let repeat = self.last_click.is_some_and(|(at, (px, py), b)| {
+                    let repeat = win.last_click.is_some_and(|(at, (px, py), b)| {
                         b == bit
                             && now.duration_since(at) < DOUBLE_CLICK
                             && (px - x).abs() < 4.0
                             && (py - y).abs() < 4.0
                     });
-                    self.clicks = if repeat { self.clicks + 1 } else { 1 };
-                    self.last_click = Some((now, (x, y), bit));
-                    self.buttons |= bit;
-                    self.send(UiEvent::MouseDown { x, y, buttons: bit, clicks: self.clicks, mods: self.mods() });
+                    win.clicks = if repeat { win.clicks + 1 } else { 1 };
+                    win.last_click = Some((now, (x, y), bit));
+                    win.buttons |= bit;
+                    win.send(UiEvent::MouseDown { x, y, buttons: bit, clicks: win.clicks, mods: win.mods() });
                 } else {
-                    self.buttons &= !bit;
-                    self.send(UiEvent::MouseUp { x, y });
+                    win.buttons &= !bit;
+                    win.send(UiEvent::MouseUp { x, y });
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -920,12 +1112,12 @@ impl ApplicationHandler<Request> for Handler {
                 let (dx, dy, precise) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (-x, -y, false),
                     MouseScrollDelta::PixelDelta(PhysicalPosition { x, y }) => {
-                        let line = 16.0 * self.scale;
+                        let line = 16.0 * win.scale;
                         ((-x / line) as f32 / 3.0, (-y / line) as f32 / 3.0, true)
                     }
                 };
-                let (x, y) = self.pointer;
-                self.send(UiEvent::Wheel { dx, dy, x, y, mods: self.mods(), precise });
+                let (x, y) = win.pointer;
+                win.send(UiEvent::Wheel { dx, dy, x, y, mods: win.mods(), precise });
             }
             _ => {}
         }

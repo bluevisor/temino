@@ -32,6 +32,8 @@
 	id<MTLBuffer> rects;
 	id<MTLBuffer> glyphs;
 	BOOL atlasReady;
+	// The window whose layer it draws into.
+	uint32_t window;
 }
 @end
 
@@ -98,9 +100,17 @@ temino_emoji(const char* text, float size, float max_width, float max_height,
 }
 
 
-// The window's layer, attached on the main thread and drawn into from the
-// core thread (retained; there is one window).
-static _Atomic(void*) sLayer;
+// Each window's layer, by window number: attached on the main thread and
+// drawn into from that window's core thread.
+static NSMutableDictionary<NSNumber*, CAMetalLayer*>* sLayers;
+
+static CAMetalLayer*
+layer_for(uint32_t window)
+{
+	@synchronized(TeminoMetal.class) {
+		return sLayers[@(window)];
+	}
+}
 
 
 static void
@@ -131,11 +141,12 @@ make_pipeline(id<MTLDevice> device, id<MTLLibrary> library, NSString* vertex,
 
 
 void*
-temino_metal_new(const char* shaders, uint32_t atlas_size, uint32_t color_atlas_size,
+temino_metal_new(uint32_t window, const char* shaders, uint32_t atlas_size, uint32_t color_atlas_size,
 	char* name, size_t name_length, char* error, size_t error_length)
 {
 	@autoreleasepool {
 		TeminoMetal* gpu = [TeminoMetal new];
+		gpu->window = window;
 		gpu->device = MTLCreateSystemDefaultDevice();
 		if (gpu->device == nil) {
 			set_error(error, error_length, @"no Metal device");
@@ -226,7 +237,7 @@ temino_metal_render(void* handle, uint32_t width, uint32_t height,
 				withBytes:color_pixels + color_lo * color_size * 4 bytesPerRow:color_size * 4];
 		}
 
-		CAMetalLayer* layer = (__bridge CAMetalLayer*)atomic_load(&sLayer);
+		CAMetalLayer* layer = layer_for(gpu->window);
 		id<CAMetalDrawable> drawable = nil;
 		id<MTLTexture> target;
 		if (layer != nil) {
@@ -459,11 +470,11 @@ temino_menu_install(const TeminoMenuItem* items, size_t count, TeminoMenuCallbac
 @end
 
 
-// Gives the window `view` a layer that frames render straight into. They
-// keep their premultiplied alpha, so a see-through background shows the
-// desktop (blurred, if Settings says so).
+// Gives window `window`'s `view` a layer that frames render straight into.
+// They keep their premultiplied alpha, so a see-through background shows
+// the desktop (blurred, if Settings says so).
 void
-temino_metal_attach(void* view_handle)
+temino_metal_attach(void* view_handle, uint32_t window)
 {
 	@autoreleasepool {
 		NSView* view = (__bridge NSView*)view_handle;
@@ -483,8 +494,36 @@ temino_metal_attach(void* view_handle)
 		// While the window resizes, the last frame stays put at the top left.
 		layer.contentsGravity = kCAGravityTopLeft;
 		layer.contentsScale = view.window ? view.window.backingScaleFactor : 1;
-		atomic_store(&sLayer, (__bridge_retained void*)layer);
+		@synchronized(TeminoMetal.class) {
+			if (sLayers == nil)
+				sLayers = [NSMutableDictionary dictionary];
+			sLayers[@(window)] = layer;
+		}
 	}
+}
+
+// Window `window` closed: its core has stopped drawing.
+void
+temino_metal_detach(uint32_t window)
+{
+	@synchronized(TeminoMetal.class) {
+		[sLayers removeObjectForKey:@(window)];
+	}
+}
+
+// Holds a window's viewers over its frames (see Viewers below).
+@interface TeminoViewerHost : NSView
+@end
+
+// What of Temino's own a window's content view holds: the view the frames
+// render into, the blur under it, the viewers' host over it.
+static NSView*
+subview_of_class(NSWindow* window, Class kind)
+{
+	for (NSView* view in window.contentView.subviews)
+		if ([view isKindOfClass:kind])
+			return view;
+	return nil;
 }
 
 
@@ -495,13 +534,10 @@ temino_metal_attach(void* view_handle)
 // traffic lights are centered in it. AppKit lays them back out at the
 // standard height whenever the window resizes, so they're placed again.
 static CGFloat sTitlebarHeight = 0;
-// Holds the viewers over the frames (see Viewers below).
-static NSView* sViewerHost;
 
 // Blurs the desktop behind a see-through background. winit's blur (the
 // window server's) covers the window's whole rectangle, so its corners
-// showed square; this view's blur is masked to the rounded corners.
-static NSVisualEffectView* sBlur;
+// showed square; a view's blur is masked to the rounded corners.
 
 static NSImage*
 rounded_mask(CGFloat radius)
@@ -525,7 +561,7 @@ rounded_mask(CGFloat radius)
 static void
 round_corners(NSWindow* window)
 {
-	CAMetalLayer* layer = (__bridge CAMetalLayer*)atomic_load(&sLayer);
+	CALayer* layer = subview_of_class(window, TeminoMetalView.class).layer;
 	if (layer == nil)
 		return;
 	CGFloat radius = 0;
@@ -546,12 +582,14 @@ round_corners(NSWindow* window)
 	frame.layer.cornerCurve = kCACornerCurveContinuous;
 	frame.layer.masksToBounds = radius > 0;
 	[window invalidateShadow];
-	if (sBlur != nil)
-		sBlur.maskImage = rounded_mask(radius);
-	if (sViewerHost != nil) {
-		sViewerHost.layer.cornerRadius = radius;
-		sViewerHost.layer.cornerCurve = kCACornerCurveContinuous;
-		sViewerHost.layer.masksToBounds = radius > 0;
+	NSVisualEffectView* blur = (NSVisualEffectView*)subview_of_class(window, NSVisualEffectView.class);
+	if (blur != nil)
+		blur.maskImage = rounded_mask(radius);
+	NSView* host = subview_of_class(window, TeminoViewerHost.class);
+	if (host != nil) {
+		host.layer.cornerRadius = radius;
+		host.layer.cornerCurve = kCACornerCurveContinuous;
+		host.layer.masksToBounds = radius > 0;
 	}
 }
 
@@ -588,20 +626,23 @@ temino_blur(void* view_handle, bool on)
 {
 	@autoreleasepool {
 		NSView* view = (__bridge NSView*)view_handle;
+		NSView* existing = nil;
+		for (NSView* subview in view.subviews)
+			if ([subview isKindOfClass:NSVisualEffectView.class])
+				existing = subview;
 		if (!on) {
-			[sBlur removeFromSuperview];
-			sBlur = nil;
+			[existing removeFromSuperview];
 			return;
 		}
-		if (sBlur != nil)
+		if (existing != nil)
 			return;
-		sBlur = [[NSVisualEffectView alloc] initWithFrame:view.bounds];
-		sBlur.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-		sBlur.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-		sBlur.material = NSVisualEffectMaterialUnderWindowBackground;
-		sBlur.state = NSVisualEffectStateActive;
+		NSVisualEffectView* blur = [[NSVisualEffectView alloc] initWithFrame:view.bounds];
+		blur.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+		blur.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+		blur.material = NSVisualEffectMaterialUnderWindowBackground;
+		blur.state = NSVisualEffectStateActive;
 		// Under the frames, which draw the background over it.
-		[view addSubview:sBlur positioned:NSWindowBelow relativeTo:nil];
+		[view addSubview:blur positioned:NSWindowBelow relativeTo:nil];
 		if (view.window != nil)
 			round_corners(view.window);
 	}
@@ -640,11 +681,12 @@ temino_titlebar(void* view_handle, double height)
 }
 
 
-// Whether frames go straight to the window.
+// Whether `handle`'s frames go straight to its window.
 bool
-temino_metal_on_screen(void)
+temino_metal_on_screen(void* handle)
 {
-	return atomic_load(&sLayer) != NULL;
+	TeminoMetal* gpu = (__bridge TeminoMetal*)handle;
+	return gpu != nil && layer_for(gpu->window) != nil;
 }
 
 
@@ -748,7 +790,16 @@ static const CGFloat kViewerButton = 24;
 static const NSTimeInterval kViewerSlide = 0.3;
 
 static TeminoViewerCallback sViewerCallback;
+// Every window's viewers, by id: the window's number in the top 32 bits,
+// the pane's below. And each window's host for them, by window number.
 static NSMutableDictionary<NSNumber*, id>* sViewers;
+static NSMutableDictionary<NSNumber*, NSView*>* sViewerHosts;
+
+static NSView*
+host_for(uint64_t id)
+{
+	return sViewerHosts[@((uint32_t)(id >> 32))];
+}
 
 static void
 viewer_send(uint64_t id, int32_t event, NSString* text)
@@ -772,8 +823,6 @@ abbreviated(NSString* path)
 
 // Covers winit's view in top-left coordinates, letting every event through
 // except over a viewer.
-@interface TeminoViewerHost : NSView
-@end
 
 @implementation TeminoViewerHost
 - (BOOL)isFlipped
@@ -1239,19 +1288,26 @@ viewer_take_focus(TeminoViewer* viewer)
 }
 
 void
-temino_viewer_init(void* view_handle, TeminoViewerCallback callback)
+temino_viewer_init(void* view_handle, uint32_t window, TeminoViewerCallback callback)
 {
 	@autoreleasepool {
 		NSView* view = (__bridge NSView*)view_handle;
-		sViewerCallback = callback;
-		sViewers = [NSMutableDictionary dictionary];
 		TeminoViewerHost* host = [[TeminoViewerHost alloc] initWithFrame:view.bounds];
 		host.wantsLayer = YES;
 		host.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 		[view addSubview:host];
-		sViewerHost = host;
 		if (view.window != nil)
 			round_corners(view.window);
+		bool first = sViewerHosts == nil;
+		if (first) {
+			sViewers = [NSMutableDictionary dictionary];
+			sViewerHosts = [NSMutableDictionary dictionary];
+		}
+		sViewerHosts[@(window)] = host;
+		sViewerCallback = callback;
+		// The monitors are app-wide: they look at the window an event is in.
+		if (!first)
+			return;
 		// A click into a viewer gives it the pane focus too.
 		[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown
 			handler:^NSEvent*(NSEvent* event) {
@@ -1275,11 +1331,12 @@ void
 temino_viewer_open(uint64_t id, int32_t kind, const char* target, const TeminoViewerStyle* style)
 {
 	@autoreleasepool {
-		if (sViewerHost == nil)
+		NSView* host = host_for(id);
+		if (host == nil)
 			return;
 		TeminoViewer* old = viewer_for(id);
 		NSRect frame = old != nil ? old.frame : NSMakeRect(0, 0, 400, 400);
-		BOOL focused = old != nil && focused_viewer(sViewerHost.window) == old;
+		BOOL focused = old != nil && focused_viewer(host.window) == old;
 		[old removeFromSuperview];
 		TeminoViewer* viewer = [[TeminoViewer alloc] initWithFrame:frame];
 		viewer.viewerId = id;
@@ -1291,7 +1348,7 @@ temino_viewer_open(uint64_t id, int32_t kind, const char* target, const TeminoVi
 		viewer.appearance = [NSAppearance appearanceNamed:style->dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
 		viewer.path = [NSString stringWithUTF8String:target] ?: @"";
 		sViewers[@(id)] = viewer;
-		[sViewerHost addSubview:viewer];
+		[host addSubview:viewer];
 		[viewer buildWithStyle:style];
 		switch (kind) {
 		case KIND_TEXT:
@@ -1321,7 +1378,7 @@ temino_viewer_place(uint64_t id, double x, double y, double width, double height
 		viewer.slideIn = NO;
 		[CATransaction begin];
 		[CATransaction setDisableActions:YES];
-		viewer.frame = NSOffsetRect(frame, MAX(NSWidth(sViewerHost.bounds) - x, width), 0);
+		viewer.frame = NSOffsetRect(frame, MAX(NSWidth(viewer.superview.bounds) - x, width), 0);
 		viewer.hidden = NO;
 		[CATransaction commit];
 		[NSAnimationContext runAnimationGroup:^(NSAnimationContext* context) {
@@ -1349,22 +1406,35 @@ temino_viewer_close(uint64_t id)
 		return;
 	NSWindow* window = viewer.window;
 	if (focused_viewer(window) == viewer)
-		[window makeFirstResponder:sViewerHost.superview];
+		[window makeFirstResponder:viewer.superview.superview];
 	[viewer removeFromSuperview];
 	[sViewers removeObjectForKey:@(id)];
 }
 
+// Gives the keyboard to viewer `id`, or (its pane part 0) back to its
+// window's terminal.
 void
 temino_viewer_focus(uint64_t id)
 {
-	NSWindow* window = sViewerHost.window;
+	NSView* host = host_for(id);
+	NSWindow* window = host.window;
 	TeminoViewer* viewer = viewer_for(id);
 	for (TeminoViewer* other in sViewers.allValues) {
-		if (other != viewer)
+		if (other != viewer && other.window == window)
 			other.pendingFocus = NO;
 	}
 	if (viewer != nil)
 		viewer_take_focus(viewer);
-	else if (focused_viewer(window) != nil)
-		[window makeFirstResponder:sViewerHost.superview];
+	else if (window != nil && focused_viewer(window) != nil)
+		[window makeFirstResponder:host.superview];
+}
+
+// Window `window` closed: its viewers and their host go with it.
+void
+temino_viewer_detach(uint32_t window)
+{
+	for (NSNumber* id in sViewers.allKeys)
+		if ((uint32_t)(id.unsignedLongLongValue >> 32) == window)
+			[sViewers removeObjectForKey:id];
+	[sViewerHosts removeObjectForKey:@(window)];
 }

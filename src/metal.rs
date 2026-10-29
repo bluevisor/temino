@@ -13,6 +13,7 @@ pub type Result<T> = std::result::Result<T, String>;
 
 extern "C" {
     fn temino_metal_new(
+        window: u32,
         shaders: *const c_char,
         atlas_size: u32,
         color_atlas_size: u32,
@@ -48,7 +49,7 @@ extern "C" {
         error: *mut c_char,
         error_length: usize,
     ) -> bool;
-    fn temino_metal_on_screen() -> bool;
+    fn temino_metal_on_screen(gpu: *mut c_void) -> bool;
 }
 
 fn message(buffer: &[u8]) -> String {
@@ -69,7 +70,9 @@ impl Gpu {
         let mut name = [0u8; 256];
         let mut error = [0u8; 1024];
         let handle = unsafe {
+            // It draws into the layer of the window this core thread runs.
             temino_metal_new(
+                crate::platform::window_no(),
                 shaders.as_ptr(),
                 ATLAS_SIZE as u32,
                 COLOR_ATLAS_SIZE as u32,
@@ -89,7 +92,7 @@ impl Gpu {
 
     /// Whether `render` shows frames itself, in the window's layer.
     pub fn on_screen(&self) -> bool {
-        unsafe { temino_metal_on_screen() }
+        unsafe { temino_metal_on_screen(self.handle) }
     }
 
     /// Renders `scene` into the window. The frame comes back as tightly

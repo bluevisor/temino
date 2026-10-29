@@ -50,6 +50,7 @@ impl Combo {
 /// Every action a key can be bound to, and the default shortcut that does
 /// it ("cmd" is the shortcut modifier on every platform).
 pub const ACTIONS: &[(&str, &str)] = &[
+    ("new_window", "cmd+n"),
     ("new_tab", "cmd+t"),
     ("close_pane", "cmd+w"),
     ("split_right", "cmd+d"),
