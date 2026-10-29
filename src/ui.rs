@@ -300,3 +300,13 @@ pub fn hint(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, key: &str, 
     let label_width = text.draw_text(scene, label, x + key_width + 7.0, y + 14.0, UI, 12.0, theme.text_faint);
     key_width + 7.0 + label_width
 }
+
+/// "45s", "3m 07s", "1h 04m".
+pub fn short_duration(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, s / 60 % 60),
+    }
+}

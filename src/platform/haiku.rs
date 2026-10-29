@@ -325,6 +325,20 @@ pub fn hangup(pid: i32) {
     unsafe { temino_hangup(pid) }
 }
 
+extern "C" {
+    fn tcgetpgrp(fd: i32) -> i32;
+    fn getpgid(pid: i32) -> i32;
+}
+
+/// The process group in front on the terminal `master`: the running job.
+pub fn foreground_group(master: i32) -> i32 {
+    unsafe { tcgetpgrp(master) }
+}
+
+pub fn process_group(pid: i32) -> i32 {
+    unsafe { getpgid(pid) }
+}
+
 /// Haiku has no primary selection.
 pub fn selection_set(_text: &str) {}
 

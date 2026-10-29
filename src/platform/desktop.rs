@@ -426,6 +426,15 @@ pub fn hangup(pid: i32) {
     unsafe { libc::kill(pid, libc::SIGHUP) };
 }
 
+/// The process group in front on the terminal `master`: the running job.
+pub fn foreground_group(master: i32) -> i32 {
+    unsafe { libc::tcgetpgrp(master) }
+}
+
+pub fn process_group(pid: i32) -> i32 {
+    unsafe { libc::getpgid(pid) }
+}
+
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 struct Handler {

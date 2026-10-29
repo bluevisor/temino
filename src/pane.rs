@@ -4,7 +4,7 @@
 //! the mouse in its own coordinates, as if it had the window to itself.
 
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::Dimensions;
@@ -14,6 +14,7 @@ use crate::agent::{self, AgentState};
 use crate::complete::{self, Candidate, Commands, Completion, Kind};
 use crate::editor::{Editor, History};
 use crate::keys::{self, Named};
+use crate::llm;
 use crate::platform::{self, buttons, Cursor, KeyEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::session::{BlockKind, Credits, GridSize, Link, Notice, Phase, Session};
@@ -45,6 +46,18 @@ const AGENT_SCAN: Duration = Duration::from_millis(300);
 const AGENT_SCAN_LINES: usize = 10;
 const AGENT_QUIET: Duration = Duration::from_millis(1500);
 const AGENT_ECHO: Duration = Duration::from_millis(400);
+/// How long a recap stays up, at most while its summary is on the way,
+/// and how long it takes to fade.
+const RECAP_SHOWN: Duration = Duration::from_secs(6);
+const RECAP_WAIT: Duration = Duration::from_secs(20);
+const RECAP_FADE: Duration = Duration::from_millis(400);
+const RECAP_SYSTEM: &str = "Someone is coming back to a terminal tab after a break. From what ran there, \
+say in one short sentence (at most 20 words) what they were doing and where it stands. \
+Plain text, no preamble, no quotes.";
+/// How much of a pane's recent history the summary is written from.
+const RECAP_BLOCKS: usize = 5;
+const RECAP_LINES: usize = 30;
+const RECAP_CHARS: usize = 6000;
 /// The launch banner, in figlet's "ANSI Shadow" style.
 const BANNER: [&str; 6] = [
     "████████╗███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ",
@@ -177,6 +190,59 @@ pub struct Pane {
     agent_block: Option<u64>,
     screen: Option<(Instant, Option<AgentState>)>,
     pub agent_unseen: bool,
+    /// The agent's state this frame, read once by the window.
+    pub agent_now: Option<AgentState>,
+    /// Claude Code's own account of the agent, read in the background.
+    watcher: Option<agent::Watcher>,
+    /// What's been typed to the agent since the last Enter, and the last
+    /// line sent: its prompt, for agents with no records we can read.
+    typed: String,
+    typed_prompt: Option<String>,
+    /// When the agent's current turn began, and how long the last one took.
+    turn: Option<Instant>,
+    last_turn: Option<Duration>,
+    /// When focus last left the pane (or the window), and the recap shown
+    /// on coming back to it after a while.
+    left_at: Option<Instant>,
+    recap: Option<Recap>,
+}
+
+/// "Where was I?": a line of facts about a pane you come back to, and a
+/// model's sentence on what you were doing, which arrives a little later.
+struct Recap {
+    shown: Instant,
+    facts: String,
+    /// The summary, once the model answered (None if it couldn't).
+    summary: Arc<Mutex<Option<Option<String>>>>,
+    /// When the summary came in, so it gets its own few seconds.
+    summary_at: Option<Instant>,
+}
+
+impl Recap {
+    fn summary(&self) -> Option<Option<String>> {
+        self.summary.lock().unwrap().clone()
+    }
+
+    /// When it goes away: a while after it, or its summary, appeared.
+    fn until(&self) -> Instant {
+        match (self.summary_at, llm::enabled()) {
+            (Some(at), _) => at.max(self.shown) + RECAP_SHOWN,
+            (None, true) => self.shown + RECAP_WAIT,
+            (None, false) => self.shown + RECAP_SHOWN,
+        }
+    }
+}
+
+/// What the header over an agent's pane says.
+pub struct AgentInfo {
+    pub state: AgentState,
+    pub prompt: Option<String>,
+    pub subagents: usize,
+    pub name: Option<String>,
+    /// How long the current turn has run, or the last one took.
+    pub turn: Option<Duration>,
+    /// How long the agent has been running.
+    pub uptime: Duration,
 }
 
 impl Pane {
@@ -222,6 +288,14 @@ impl Pane {
             agent_block: None,
             screen: None,
             agent_unseen: false,
+            agent_now: None,
+            watcher: None,
+            typed: String::new(),
+            typed_prompt: None,
+            turn: None,
+            last_turn: None,
+            left_at: None,
+            recap: None,
         })
     }
 
@@ -304,7 +378,15 @@ impl Pane {
             self.agent_was = None;
             self.agent_unseen = false;
             self.screen = None;
+            self.watcher = None;
+            self.typed.clear();
+            self.typed_prompt = None;
+            self.turn = None;
+            self.last_turn = None;
             return None;
+        }
+        if let Some(group) = self.session.foreground_group() {
+            self.watcher.get_or_insert_with(agent::Watcher::new).set_group(group);
         }
         if self.screen.is_none_or(|(at, _)| now.duration_since(at) >= AGENT_SCAN) {
             self.screen = Some((now, self.screen_tail().as_deref().and_then(agent::screen_state)));
@@ -336,8 +418,211 @@ impl Pane {
         if input.is_some_and(|input| now.duration_since(input) < AGENT_ECHO) {
             self.agent_unseen = false;
         }
+        // A turn runs from when it starts working until it's back at rest;
+        // stopping to ask you something is part of it.
+        if state == AgentState::Idle {
+            if let Some(start) = self.turn.take() {
+                self.last_turn = Some(now.duration_since(start));
+            }
+        } else if self.turn.is_none() {
+            self.turn = Some(now);
+        }
         self.agent_was = Some(state);
         Some(if state == AgentState::Idle && self.agent_unseen { AgentState::Done } else { state })
+    }
+
+    /// What the header over the agent here shows, as of the last `agent()`.
+    pub fn agent_info(&self, now: Instant) -> Option<AgentInfo> {
+        let state = self.agent_now?;
+        let report = self.watcher.as_ref().and_then(agent::Watcher::report).unwrap_or_default();
+        let started = self.session.active().map_or(now, |block| block.started);
+        Some(AgentInfo {
+            state,
+            prompt: report.prompt.or_else(|| self.typed_prompt.clone()),
+            subagents: report.subagents,
+            name: report.name,
+            turn: self.turn.map(|start| now.duration_since(start)).or(self.last_turn),
+            uptime: now.duration_since(started),
+        })
+    }
+
+    pub fn focus_lost(&mut self, now: Instant) {
+        self.left_at = Some(now);
+    }
+
+    /// Coming back to the pane: after `idle` or longer with nothing
+    /// happening in it, or when asked (`idle` None), a recap shows.
+    pub fn focus_gained(&mut self, now: Instant, idle: Option<Duration>) {
+        let last = [self.left_at, self.session.input_at(), self.session.output_at].into_iter().flatten().max();
+        let left = self.left_at.take();
+        let away = last.map_or(Duration::ZERO, |last| now.duration_since(last));
+        let due = match idle {
+            None => true,
+            Some(idle) => left.is_some() && !idle.is_zero() && away >= idle,
+        };
+        if due {
+            self.show_recap(now, away);
+        }
+    }
+
+    fn show_recap(&mut self, now: Instant, away: Duration) {
+        let mut facts = Vec::new();
+        if away >= Duration::from_secs(60) {
+            facts.push(format!("↩ idle {}", ui::short_duration(away)));
+        } else {
+            facts.push("↩".to_owned());
+        }
+        let finished =
+            self.session.blocks.iter().rev().find(|block| block.kind == BlockKind::Command && !block.running());
+        match (self.session.active(), finished) {
+            (Some(block), _) => facts.push(format!("running: {}", agent::one_line(&block.command))),
+            (None, Some(block)) => {
+                let status = match block.exit {
+                    Some(0) | None => "✓".to_owned(),
+                    Some(code) => format!("✗ exit {code}"),
+                };
+                let ago = block.finished.map(|at| format!(" · {} ago", ui::short_duration(now.duration_since(at))));
+                let command = agent::one_line(&block.command);
+                let command = if command.is_empty() { "command".to_owned() } else { command };
+                facts.push(format!("last: {command} {status}{}", ago.unwrap_or_default()));
+            }
+            (None, None) => {}
+        }
+        let place = ui::short_path(&self.session.cwd);
+        facts.push(match &self.session.branch {
+            Some(branch) => format!("{place} ({branch})"),
+            None => place,
+        });
+        if let Some(info) = self.agent_info(now) {
+            facts.push(format!("agent {}", info.state.label().to_lowercase()));
+        }
+        let summary = Arc::new(Mutex::new(None));
+        if llm::enabled() {
+            let context = self.recap_context(now);
+            let theirs = summary.clone();
+            let _ = std::thread::Builder::new().name("recap".into()).spawn(move || {
+                let answer = llm::complete(RECAP_SYSTEM, &context, 120).ok().filter(|answer| !answer.is_empty());
+                *theirs.lock().unwrap() = Some(answer.map(|answer| agent::one_line(&answer)));
+            });
+        } else {
+            *summary.lock().unwrap() = Some(None);
+        }
+        self.recap = Some(Recap { shown: now, facts: facts.join(" · "), summary, summary_at: None });
+    }
+
+    /// What the summary is written from: the folder, the agent's last
+    /// prompt, and the last few commands with how they ended and the end
+    /// of their output, newest last.
+    fn recap_context(&mut self, now: Instant) -> String {
+        let mut parts = vec![format!("Folder: {}", self.session.cwd)];
+        if let Some(branch) = &self.session.branch {
+            parts.push(format!("Git branch: {branch}"));
+        }
+        if let Some(info) = self.agent_info(now) {
+            parts.push(format!("A coding agent runs here, {}.", info.state.label().to_lowercase()));
+            if let Some(prompt) = info.prompt {
+                parts.push(format!("Last prompt to the agent: {prompt}"));
+            }
+        }
+        let first = self.session.blocks.len().saturating_sub(RECAP_BLOCKS);
+        let mut blocks = Vec::new();
+        for block in self.session.blocks[first..].iter_mut().filter(|block| block.kind == BlockKind::Command) {
+            let status = match (block.running(), block.exit) {
+                (true, _) => "still running".to_owned(),
+                (false, Some(code)) => format!("exit {code}"),
+                (false, None) => "finished".to_owned(),
+            };
+            let lines = block.output_lines();
+            let output = if lines == 0 {
+                String::new()
+            } else {
+                block.text_between((lines.saturating_sub(RECAP_LINES), 0), (lines - 1, usize::MAX))
+            };
+            let output: String =
+                output.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+            blocks.push(format!("$ {} ({status})\n{output}", block.command.trim()));
+        }
+        parts.push(blocks.join("\n\n"));
+        let context = parts.join("\n");
+        // Keep the end: it's the most recent.
+        let skip = context.chars().count().saturating_sub(RECAP_CHARS);
+        context.chars().skip(skip).collect()
+    }
+
+    /// The recap card, over the bottom of the output (the top of a
+    /// full-screen program), fading out at the end.
+    fn draw_recap(&mut self, scene: &mut Scene, ctx: &mut Ctx, alt: bool) {
+        let Some(recap) = &self.recap else { return };
+        let now = Instant::now();
+        let fade = (recap.until().saturating_duration_since(now).as_secs_f32() / RECAP_FADE.as_secs_f32()).min(1.0);
+        let appear = (now.duration_since(recap.shown).as_secs_f32() / 0.18).min(1.0);
+        let alpha = fade.min(appear);
+        let theme = &ctx.theme;
+        let text = &mut ctx.text;
+        let width = (self.rect.w - 2.0 * PAD_X).max(0.0);
+        let (font, line) = (12.5, 20.0);
+        let height = 2.0 * line + 14.0;
+        let y = if alt { ALT_PAD_Y } else { (self.layout.list.h - height - 8.0).max(4.0) };
+        let card = Rect::new(PAD_X, y, width, height);
+        scene.set_layer(LAYER_OVERLAY);
+        scene.shadow(card, Color::hex(0x000000).alpha(0.45 * alpha), 8.0, 8.0);
+        // The theme's raised surface is a light wash over what's under it:
+        // put the page color down first so the output doesn't show through.
+        scene.quad(Quad::new(card, theme.background.alpha(alpha)).radius(8.0));
+        scene.quad(Quad::new(card, theme.raised.alpha(alpha)).radius(8.0).border(1.0, theme.divider.alpha(alpha)));
+        let ascent = text.ui_ascent(font);
+        let room = width - 28.0;
+        let first = card.y + 7.0 + (line + ascent * 0.72) / 2.0;
+        let facts = text.elide(&recap.facts, UI, font, room);
+        text.draw_text(scene, &facts, card.x + 14.0, first.round(), UI, font, theme.text.alpha(alpha));
+        let (summary, ink) = match recap.summary() {
+            None => ("✦ Summarizing…".to_owned(), theme.text_faint),
+            Some(Some(summary)) => (format!("✦ {summary}"), theme.text_dim),
+            Some(None) => ("✦ No summary: the model server didn't answer".to_owned(), theme.text_faint),
+        };
+        let summary = text.elide(&summary, UI, font, room);
+        text.draw_text(scene, &summary, card.x + 14.0, (first + line).round(), UI, font, ink.alpha(alpha));
+        scene.set_layer(LAYER_CONTENT);
+    }
+
+    /// One line on what the pane is doing: the running command, or the
+    /// folder at rest; and whether something runs.
+    pub fn activity(&self) -> (bool, String) {
+        let running = self.session.active().map(|block| agent::one_line(&block.command));
+        match running {
+            Some(command) if !command.is_empty() => (true, command),
+            Some(_) if !self.program_title.is_empty() => (true, agent::one_line(&self.program_title)),
+            running => (running.is_some(), ui::short_path(&self.session.cwd)),
+        }
+    }
+
+    /// Follows what's typed to an agent, to know its prompt when it keeps
+    /// no records we read. Answers to its questions aren't prompts.
+    fn track_typing(&mut self, text: &str) {
+        if self.agent_block.is_none() || self.agent_was == Some(AgentState::Waiting) {
+            self.typed.clear();
+            return;
+        }
+        for c in text.chars() {
+            match c {
+                '\r' => {
+                    let line = agent::one_line(&self.typed);
+                    if !line.is_empty() {
+                        self.typed_prompt = Some(line);
+                    }
+                    self.typed.clear();
+                }
+                '\u{7f}' | '\u{8}' => {
+                    self.typed.pop();
+                }
+                // Control+C or Control+U: the line is gone.
+                '\u{3}' | '\u{15}' => self.typed.clear(),
+                // Arrows and the like: we can't follow the line any more.
+                '\u{1b}' => return,
+                c if c.is_control() => {}
+                c => self.typed.push(c),
+            }
+        }
     }
 
     /// The last few lines the running program left on screen.
@@ -353,6 +638,18 @@ impl Pane {
     /// Advances animations; true when the pane needs a new frame.
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut dirty = self.session.tick(now);
+        if let Some(recap) = &mut self.recap {
+            if recap.summary_at.is_none() && recap.summary().is_some() {
+                recap.summary_at = Some(now);
+                dirty = true;
+            }
+            if now >= recap.until() {
+                self.recap = None;
+                dirty = true;
+            } else if now + RECAP_FADE >= recap.until() {
+                dirty = true;
+            }
+        }
         if self.reflow_at.is_some_and(|at| now >= at) {
             self.reflow_at = None;
             self.session.reflow();
@@ -391,6 +688,16 @@ impl Pane {
     pub fn next_wakeup(&self) -> Option<Instant> {
         let mut times = vec![self.session.deadline(), self.reflow_at];
         times.push(self.bell.map(|at| at + Duration::from_millis(200)));
+        if let Some(recap) = &self.recap {
+            // Fading, or waiting on its summary.
+            let until = recap.until();
+            let now = Instant::now();
+            times.push(Some(match recap.summary_at {
+                None => (now + Duration::from_millis(250)).min(until),
+                Some(_) if now + RECAP_FADE >= until => now + Duration::from_millis(33),
+                Some(_) => until - RECAP_FADE,
+            }));
+        }
         if (self.scroll - self.scroll_target).abs() > 0.0 {
             times.push(Some(Instant::now() + Duration::from_millis(16)));
         }
@@ -465,6 +772,9 @@ impl Pane {
     // ---- keys ---------------------------------------------------------
 
     pub fn key(&mut self, ctx: &mut Ctx, key: KeyEvent) {
+        if !key.cmd() {
+            self.recap = None;
+        }
         let named = keys::named(&key);
         // At the prompt, ⌘←/→ and ⌘⌫ are line editing (see editor_key).
         let line_edit = key.line_mod()
@@ -519,6 +829,7 @@ impl Pane {
             }
             let bytes = keys::encode(&key, mode);
             if !bytes.is_empty() {
+                self.track_typing(&String::from_utf8_lossy(&bytes));
                 self.session.write(&bytes);
                 self.selection = None;
                 self.pin_to_bottom();
@@ -908,8 +1219,9 @@ impl Pane {
 
     /// Text an input method committed: typed, not pasted.
     pub fn text_input(&mut self, text: &str) {
-        if let Some(block) = self.session.active() {
-            let _ = block;
+        self.recap = None;
+        if self.session.active().is_some() {
+            self.track_typing(text);
             self.session.write(text.as_bytes());
             self.selection = None;
             self.pin_to_bottom();
@@ -935,6 +1247,7 @@ impl Pane {
         if let Some(block) = self.session.active() {
             let bracketed = block.term.mode().contains(TermMode::BRACKETED_PASTE);
             let body = text.replace('\n', "\r");
+            self.track_typing(&text.replace('\n', " "));
             if bracketed {
                 self.session.write(format!("\x1b[200~{}\x1b[201~", body.replace("\x1b[201~", "")).as_bytes());
             } else {
@@ -1323,6 +1636,7 @@ impl Pane {
             self.draw_main(scene, ctx, focused);
         }
         self.draw_link(scene, ctx);
+        self.draw_recap(scene, ctx, alt);
         if self.bell.is_some() {
             scene.set_layer(LAYER_OVERLAY);
             let edge = Rect::new(0.0, 0.0, self.rect.w, self.rect.h);
