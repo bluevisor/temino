@@ -475,6 +475,9 @@ pub struct App {
     /// The keys file, as last read.
     bindings: Bindings,
     palette: usize,
+    /// The theme the pointer is over in Settings' theme list, shown for now
+    /// in place of `palette`.
+    previewing: Option<usize>,
     background: Option<usize>,
     opacity: usize,
     blur: bool,
@@ -750,6 +753,7 @@ impl App {
             themes,
             bindings: Bindings::default(),
             palette,
+            previewing: None,
             background,
             opacity,
             blur: crate::setting("blur").as_deref() == Some("on"),
@@ -1683,6 +1687,34 @@ impl App {
         self.apply_theme();
     }
 
+    /// While the theme list is open, the theme under the pointer shows
+    /// everywhere at once, as picking it would; off the list, or with it
+    /// closed, the theme in use is back.
+    fn preview_theme(&mut self) {
+        let (x, y) = self.mouse;
+        let hovered = match self.settings.action_at(x, y) {
+            Some(Action::PickTheme(index))
+                if self.settings.themes_open && matches!(self.pane_at(x, y), Some((SETTINGS, _))) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        };
+        if hovered == self.previewing {
+            return;
+        }
+        self.previewing = hovered;
+        match hovered.and_then(|index| self.themes.get(index)) {
+            Some(palette) => {
+                // Picked, a theme drops the background preset.
+                self.ctx.theme = build_theme(palette, None, self.ctx.theme.opacity);
+                platform::set_background(self.ctx.theme.background.to_rgb8());
+                self.dirty = true;
+            }
+            None => self.apply_theme(),
+        }
+    }
+
     /// Settings ▸ Theme: the scheme `step` places along the library; its
     /// own background replaces one picked before.
     fn step_theme(&mut self, step: i32) {
@@ -2139,6 +2171,7 @@ impl App {
             }
             Action::PickTheme(index) => {
                 self.settings.themes_open = false;
+                self.previewing = None;
                 self.step_theme(index as i32 - self.palette as i32);
             }
             Action::QuickTerminal(on) => {
@@ -2652,6 +2685,10 @@ impl App {
 
     fn mouse_moved(&mut self, x: f32, y: f32, pressed: i32) {
         self.mouse = (x, y);
+        if self.settings.themes_open {
+            // The theme under the pointer previews (see `preview_theme`).
+            self.dirty = true;
+        }
         if !self.update_hits.is_empty() {
             // The pill and the card's buttons light up under the pointer.
             self.dirty = true;
@@ -2829,6 +2866,7 @@ impl App {
 
     fn render(&mut self) {
         crate::trace("render: begin");
+        self.preview_theme();
         self.dirty = false;
         let (width, height) = (self.width, self.height);
         self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.window());
