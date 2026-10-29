@@ -108,6 +108,12 @@ word, triple: line). Click a pane to focus it; middle-click a tab to close it.
 On Linux a selection also goes to the primary selection, and middle-click
 pastes it. Option (macOS) and Alt (Linux) are Meta for the shell.
 
+Click a link in output to open it beside its pane, sliding in from the
+right (macOS): a text file in an editor (Cmd+S saves, Cmd+F finds; RTF stays
+rich), a web page in a browser, an image in a viewer (pinch to zoom).
+Cmd+click opens it in the system's default app instead, as does a plain
+click on Linux and Haiku. Folders and binaries always go to the system.
+
 ## How it works
 
 ```

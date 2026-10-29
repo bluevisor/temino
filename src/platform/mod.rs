@@ -165,3 +165,49 @@ pub enum Cursor {
     ResizeRow = 3,
     Link = 4,
 }
+
+/// Whether links open in built-in viewers (native views laid over the
+/// pane's place); elsewhere they go to the system's app.
+pub const VIEWERS: bool = cfg!(target_os = "macos");
+
+/// What a viewer shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewerKind {
+    /// A text file to edit; RTF stays rich.
+    Text = 0,
+    /// A web page, or a local page, PDF or SVG.
+    Web = 1,
+    Image = 2,
+}
+
+/// The theme a viewer is drawn in: sRGB colors, the text size in points.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ViewerStyle {
+    pub background: [f32; 3],
+    pub text: [f32; 3],
+    pub accent: [f32; 3],
+    pub selection: [f32; 3],
+    /// Its header bar, the line under it, and its secondary text.
+    pub header: [f32; 3],
+    pub divider: [f32; 3],
+    pub dim: [f32; 3],
+    pub faint: [f32; 3],
+    pub font_size: f32,
+    pub dark: bool,
+}
+
+/// What a viewer tells the app.
+#[derive(Clone, Debug)]
+pub enum ViewerEvent {
+    /// Clicked into: it has the keyboard now.
+    Focused,
+    Title(String),
+    /// A page went to this address.
+    Url(String),
+    /// Whether it has unsaved changes.
+    Dirty(bool),
+    Failed(String),
+    /// Its close button was clicked.
+    Close,
+}

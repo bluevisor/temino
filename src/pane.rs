@@ -156,6 +156,8 @@ pub struct Pane {
     /// A link pressed with a plain click: it opens if the button comes up
     /// without a drag.
     link_click: Option<String>,
+    /// A link a plain click let go of, for the app to open in a viewer.
+    pub clicked_link: Option<String>,
     /// While dragging the scroll bar: where in the thumb it was grabbed.
     bar_grab: Option<f32>,
     credits: Arc<Credits>,
@@ -302,6 +304,7 @@ impl Pane {
             hint: None,
             pointer: None,
             link_click: None,
+            clicked_link: None,
             bar_grab: None,
             credits,
             rect,
@@ -1725,8 +1728,9 @@ impl Pane {
         }
         if button == 0 && clicks == 1 {
             if let Some((_, link)) = self.link_under(ctx, x, y) {
-                // Cmd+click opens at once, even over programs that take the
-                // mouse; a plain click waits to see it isn't a drag.
+                // Cmd+click opens in the system's app at once, even over
+                // programs that take the mouse; a plain click waits to see
+                // it isn't a drag, then the app opens it beside the pane.
                 if mods & platform::mods::COMMAND != 0 {
                     platform::open_url(&link.url);
                     return;
@@ -1883,9 +1887,7 @@ impl Pane {
         if let Some(selection) = self.selection {
             if selection.mode == SelectMode::Char && selection.anchor == selection.head {
                 self.selection = None;
-                if let Some(url) = link {
-                    platform::open_url(&url);
-                }
+                self.clicked_link = link;
             } else if was_dragging {
                 if let Some(text) = self.selection_text() {
                     platform::selection_set(&text);

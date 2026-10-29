@@ -32,6 +32,7 @@ mod text;
 mod theme;
 mod ui;
 mod update;
+mod viewer;
 
 use std::sync::mpsc;
 use std::thread;
@@ -46,6 +47,8 @@ pub enum Msg {
     Update(update::Event),
     /// How many files changed in a pane's repository: pane, folder, count.
     Git(u64, String, usize),
+    /// News from the viewer with this id.
+    Viewer(u64, platform::ViewerEvent),
 }
 
 /// History, the shell integration script and logs: ~/config/settings/Temino
