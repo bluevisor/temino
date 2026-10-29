@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, KeyEvent as WinitKey, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent as WinitKey, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -43,6 +43,8 @@ enum Request {
     Title(String),
     Cursor(Cursor),
     Blur(bool),
+    /// Where the text caret is, in logical pixels: x, y, height.
+    Caret(i32, i32, i32),
     Quit,
 }
 
@@ -122,6 +124,7 @@ pub fn app_run() {
         buttons: 0,
         last_click: None,
         clicks: 0,
+        composing: false,
     };
     let _ = event_loop.run_app(&mut handler);
 }
@@ -260,7 +263,10 @@ pub fn set_cursor(cursor: Cursor) {
     request(Request::Cursor(cursor));
 }
 
-pub fn set_text_caret(_x: i32, _y: i32, _height: i32) {}
+/// Where an input method's candidate window opens: beside the caret.
+pub fn set_text_caret(x: i32, y: i32, height: i32) {
+    request(Request::Caret(x, y, height));
+}
 
 pub fn beep() {}
 
@@ -417,6 +423,8 @@ struct Handler {
     buttons: i32,
     last_click: Option<(Instant, (f32, f32), i32)>,
     clicks: i32,
+    /// An input method is composing: its keys aren't ours.
+    composing: bool,
 }
 
 impl Handler {
@@ -582,6 +590,8 @@ impl ApplicationHandler<Request> for Handler {
             }
         };
         window.set_cursor(CursorIcon::Text);
+        // Pinyin and the other input methods.
+        window.set_ime_allowed(true);
         window.set_blur(BLUR.load(Ordering::Acquire));
         #[cfg(target_os = "macos")]
         menu::install();
@@ -638,6 +648,11 @@ impl ApplicationHandler<Request> for Handler {
                     window.set_blur(on);
                 }
             }
+            Request::Caret(x, y, height) => {
+                if let Some(window) = &self.window {
+                    window.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(1, height.max(1)));
+                }
+            }
             Request::Quit => event_loop.exit(),
         }
     }
@@ -657,8 +672,23 @@ impl ApplicationHandler<Request> for Handler {
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Focused(focused) => self.send(UiEvent::Focus(focused)),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::Ime(ime) => match ime {
+                Ime::Preedit(text, _) => {
+                    self.composing = !text.is_empty();
+                    self.send(UiEvent::Preedit(text));
+                }
+                Ime::Commit(text) => {
+                    self.composing = false;
+                    self.send(UiEvent::Text(text));
+                }
+                Ime::Disabled => {
+                    self.composing = false;
+                    self.send(UiEvent::Preedit(String::new()));
+                }
+                Ime::Enabled => {}
+            },
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
+                if event.state == ElementState::Pressed && !self.composing {
                     self.key(&event);
                 }
             }
