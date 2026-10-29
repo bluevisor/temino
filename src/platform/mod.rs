@@ -33,7 +33,7 @@ pub const COMMAND_NAME: &str = if cfg!(target_os = "haiku") {
     "Ctrl+Shift"
 };
 
-/// What the welcome screen says Temino is for.
+/// The OS's name: told to the model, and the host name when there's none.
 pub const OS_NAME: &str = if cfg!(target_os = "haiku") {
     "Haiku"
 } else if cfg!(target_os = "macos") {

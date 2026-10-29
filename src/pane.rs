@@ -2067,8 +2067,8 @@ impl Pane {
             text.draw_text(scene, "Temino", x, y + 26.0, UI_BOLD, 28.0, theme.text);
             y += 30.0;
         }
-        let tagline = format!("An ADHD-friendly, GPU-accelerated terminal for {}", platform::OS_NAME);
-        let width = text.draw_text(scene, &tagline, x, y + 22.0, UI, 13.0, theme.text_dim);
+        let tagline = "An ADHD-friendly, GPU-accelerated terminal";
+        let width = text.draw_text(scene, tagline, x, y + 22.0, UI, 13.0, theme.text_dim);
         let api = if cfg!(target_os = "macos") { "Metal" } else { "Vulkan" };
         let device = format!("  ·  {api} on {device_name}  ·  v{}", env!("CARGO_PKG_VERSION"));
         text.draw_text(scene, &device, x + width, y + 22.0, UI, 13.0, theme.text_faint);
