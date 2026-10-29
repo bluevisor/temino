@@ -60,8 +60,15 @@ Plain text, no preamble, no quotes.";
 const RECAP_BLOCKS: usize = 5;
 const RECAP_LINES: usize = 30;
 const RECAP_CHARS: usize = 6000;
-/// The launch banner, in figlet's "ANSI Shadow" style.
-const BANNER: [&str; 6] = [
+/// The launch banner: 5-pixel-tall block letters packed two pixel rows per
+/// cell with half blocks, so it's 29x3 cells.
+const BANNER: &[&str] = &[
+    "▀██▀ █▀▀▀ █▄ ▄█ ▀█▀ █▄ █ █▀▀█",
+    " ██  █▀▀  █ ▀ █  █  █ ▀█ █  █",
+    " ▀▀  ▀▀▀▀ ▀   ▀ ▀▀▀ ▀  ▀ ▀▀▀▀",
+];
+/// The big banner for very wide panes, in figlet's "ANSI Shadow" style.
+const BANNER_LARGE: &[&str] = &[
     "████████╗███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ",
     "╚══██╔══╝██╔════╝████╗ ████║██║████╗  ██║██╔═══██╗",
     "   ██║   █████╗  ██╔████╔██║██║██╔██╗ ██║██║   ██║",
@@ -69,6 +76,8 @@ const BANNER: [&str; 6] = [
     "   ██║   ███████╗██║ ╚═╝ ██║██║██║ ╚████║╚██████╔╝",
     "   ╚═╝   ╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ",
 ];
+/// Pane width (columns) from which `BANNER_LARGE` replaces `BANNER`.
+const BANNER_LARGE_COLUMNS: usize = 150;
 
 /// What every pane shares: fonts, colors, history, the clock for the caret.
 pub struct Ctx {
@@ -2191,35 +2200,43 @@ impl Pane {
         self.draw_input(scene, ctx, focused, input_y, input_height);
     }
 
-    /// Whether the pane is wide enough for the ASCII-art banner.
-    fn banner_fits(&self) -> bool {
-        self.session.size.columns >= BANNER[0].chars().count() + 2
+    /// The ASCII-art banner for this pane's width, if any fits.
+    fn banner(&self) -> Option<&'static [&'static str]> {
+        let columns = self.session.size.columns;
+        if columns >= BANNER_LARGE_COLUMNS {
+            Some(BANNER_LARGE)
+        } else if columns >= BANNER[0].chars().count() + 2 {
+            Some(BANNER)
+        } else {
+            None
+        }
     }
 
     fn welcome_height(&self, text: &TextSystem) -> f32 {
-        let title = if self.banner_fits() { BANNER.len() as f32 * text.cell.height } else { 30.0 };
+        let title = self.banner().map_or(30.0, |b| b.len() as f32 * text.cell.height);
         24.0 + title + 30.0 + 3.0 * 28.0 + 12.0
     }
 
     fn draw_welcome(&mut self, scene: &mut Scene, ctx: &mut Ctx, top: f32) {
-        let banner = self.banner_fits();
+        let banner = self.banner();
         let Ctx { text, theme, device_name, .. } = ctx;
         let x = PAD_X + 6.0;
         let mut y = top + 24.0;
-        if banner {
+        if let Some(banner) = banner {
             // The three leaves of the Haiku logo, left to right: green,
             // orange, peach, blended by hue so green turns yellow on its way
             // to orange. Top rows catch a little light like the leaves'
-            // upper edges; the box-drawing "shadow" strokes sit darker.
+            // upper edges; the big banner's box-drawing "shadow" strokes sit
+            // darker.
             let leaves = [Color::hex(0x5ae202), Color::hex(0xff8203), Color::hex(0xffc468)];
-            let columns = BANNER[0].chars().count() as f32 - 1.0;
-            for (row, line) in BANNER.iter().enumerate() {
-                let light = 0.22 * (1.0 - row as f32 / (BANNER.len() - 1) as f32);
+            let columns = banner[0].chars().count() as f32 - 1.0;
+            for (row, line) in banner.iter().enumerate() {
+                let light = 0.22 * (1.0 - row as f32 / (banner.len() - 1) as f32);
                 for (column, c) in line.chars().enumerate() {
                     let t = column as f32 / columns * 2.0;
                     let leaf =
                         if t < 1.0 { leaves[0].mix_hue(leaves[1], t) } else { leaves[1].mix_hue(leaves[2], t - 1.0) };
-                    let color = if c == '█' {
+                    let color = if matches!(c, '█' | '▀' | '▄') {
                         leaf.mix(Color::hex(0xffffff), light)
                     } else {
                         leaf.mix(theme.background, 0.55)
