@@ -213,6 +213,9 @@ pub struct Pane {
     agent_program: Option<&'static str>,
     screen: Option<(Instant, Option<AgentState>)>,
     pub agent_unseen: bool,
+    /// Whether the agent's header is extended to show what it only has room
+    /// to hint at: the whole prompt, the subagents' tasks, the queue.
+    pub header_open: bool,
     /// The agent's state this frame, read once by the window.
     pub agent_now: Option<AgentState>,
     /// Since when the agent has been waiting on you or done unseen, and which.
@@ -298,8 +301,11 @@ pub struct AgentInfo {
     pub state: AgentState,
     pub prompt: Option<String>,
     pub subagents: usize,
-    /// Prompts waiting for the current turn to end.
+    /// What each subagent was sent to do.
+    pub subagent_tasks: Vec<String>,
+    /// Prompts waiting for the current turn to end, and their text.
     pub queued: usize,
+    pub queue: Vec<String>,
     pub name: Option<String>,
     /// How long the current turn has run, or the last one took.
     pub turn: Option<Duration>,
@@ -308,6 +314,11 @@ pub struct AgentInfo {
     /// The recap, while one is up: the header shows it in place of the
     /// prompt.
     pub recap: Option<String>,
+    /// The folder it runs in, and its git branch.
+    pub cwd: String,
+    pub branch: Option<String>,
+    /// Whether the header is extended.
+    pub open: bool,
 }
 
 impl Pane {
@@ -355,6 +366,7 @@ impl Pane {
             agent_program: None,
             screen: None,
             agent_unseen: false,
+            header_open: false,
             program_now: None,
             agent_now: None,
             needs_since: None,
@@ -462,6 +474,7 @@ impl Pane {
         if !is_agent {
             self.agent_was = None;
             self.agent_unseen = false;
+            self.header_open = false;
             self.screen = None;
             self.watcher = None;
             self.typed.clear();
@@ -544,11 +557,16 @@ impl Pane {
             state,
             prompt: report.prompt.or_else(|| self.typed_prompt.clone()),
             subagents: report.subagents,
+            subagent_tasks: report.subagent_tasks,
             queued: report.queued,
+            queue: report.queue,
             name: report.name,
             turn: self.turn.map(|start| now.duration_since(start)).or(self.last_turn),
             uptime: now.duration_since(started),
             recap: self.recap.as_ref().map(Recap::line),
+            cwd: self.session.cwd.clone(),
+            branch: self.session.branch.clone(),
+            open: self.header_open,
         })
     }
 

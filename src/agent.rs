@@ -191,8 +191,12 @@ pub struct Report {
     pub prompt: Option<String>,
     /// Subagents it started that haven't reported back.
     pub subagents: usize,
+    /// What each of those was sent to do, in the order they went out.
+    pub subagent_tasks: Vec<String>,
     /// Prompts you sent that wait for the current turn to end.
     pub queued: usize,
+    /// Those prompts, oldest first.
+    pub queue: Vec<String>,
     /// The session's name.
     pub name: Option<String>,
     /// Whether the session says it's working: true from the moment a turn
@@ -245,7 +249,9 @@ fn watch(shared: Arc<Mutex<Watch>>) {
             Report {
                 prompt: transcript.prompt.clone(),
                 subagents: transcript.subagents.len(),
+                subagent_tasks: transcript.subagents.iter().map(|(_, _, task)| task.clone()).collect(),
                 queued: transcript.queued(),
+                queue: transcript.queue.iter().filter_map(|text| prompt_text(text)).collect(),
                 name: session.name,
                 busy: session.busy,
             }
@@ -306,9 +312,9 @@ struct Transcript {
     /// How far it's been read, up to the end of its last whole line.
     offset: u64,
     prompt: Option<String>,
-    /// Subagent tool calls not yet answered, and whether each runs in the
-    /// background (answered at once, reporting back later).
-    subagents: VecDeque<(String, bool)>,
+    /// Subagent tool calls not yet answered, whether each runs in the
+    /// background (answered at once, reporting back later), and its task.
+    subagents: VecDeque<(String, bool, String)>,
     /// Messages waiting for the agent: your prompts and its own notices.
     queue: VecDeque<String>,
 }
@@ -366,9 +372,14 @@ impl Transcript {
                 for item in content.map(Value::array).unwrap_or_default() {
                     if item.str_at("type") == Some("tool_use") && matches!(item.str_at("name"), Some("Agent" | "Task"))
                     {
-                        let background = item.get("input").and_then(|input| input.get("run_in_background"));
+                        let input = item.get("input");
+                        let background = input.and_then(|input| input.get("run_in_background"));
+                        let task = input
+                            .and_then(|input| input.str_at("description").or_else(|| input.str_at("subagent_type")))
+                            .map(one_line)
+                            .unwrap_or_default();
                         let id = item.str_at("id").unwrap_or_default().to_owned();
-                        self.subagents.push_back((id, background.is_some_and(Value::is_true)));
+                        self.subagents.push_back((id, background.is_some_and(Value::is_true), task));
                     }
                 }
             }
@@ -381,7 +392,7 @@ impl Transcript {
                             match item.str_at("type") {
                                 Some("tool_result") => {
                                     let id = item.str_at("tool_use_id").unwrap_or_default();
-                                    self.subagents.retain(|(call, background)| call != id || *background);
+                                    self.subagents.retain(|(call, background, _)| call != id || *background);
                                     return;
                                 }
                                 Some("text") => text.push_str(item.str_at("text").unwrap_or_default()),
@@ -395,8 +406,9 @@ impl Transcript {
                 if text.starts_with("<task-notification>") {
                     // A background subagent reporting back: the one it names,
                     // else the oldest.
-                    let named = self.subagents.iter().position(|(id, bg)| *bg && !id.is_empty() && text.contains(id));
-                    if let Some(index) = named.or_else(|| self.subagents.iter().position(|(_, bg)| *bg)) {
+                    let named =
+                        self.subagents.iter().position(|(id, bg, _)| *bg && !id.is_empty() && text.contains(id));
+                    if let Some(index) = named.or_else(|| self.subagents.iter().position(|(_, bg, _)| *bg)) {
                         self.subagents.remove(index);
                     }
                     return;
@@ -492,13 +504,15 @@ mod tests {
         for line in [
             r#"{"type":"user","message":{"role":"user","content":"fix the\nbuild"}}"#,
             r#"{"type":"user","isMeta":true,"message":{"content":"Caveat: ignore"}}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a","name":"Agent","input":{}},{"type":"tool_use","id":"b","name":"Agent","input":{"run_in_background":true}},{"type":"tool_use","id":"c","name":"Bash","input":{}}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a","name":"Agent","input":{"description":"Find the\nflaky test"}},{"type":"tool_use","id":"b","name":"Agent","input":{"subagent_type":"Explore","run_in_background":true}},{"type":"tool_use","id":"c","name":"Bash","input":{}}]}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","content":"launched"}]}}"#,
         ] {
             transcript.line(line);
         }
         assert_eq!(transcript.prompt.as_deref(), Some("fix the build"));
         assert_eq!(transcript.subagents.len(), 2);
+        let tasks: Vec<_> = transcript.subagents.iter().map(|(_, _, task)| task.as_str()).collect();
+        assert_eq!(tasks, ["Find the flaky test", "Explore"]);
         transcript
             .line(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}}"#);
         transcript.line(r#"{"type":"user","message":{"content":"<task-notification>b done</task-notification>"}}"#);
@@ -514,6 +528,8 @@ mod tests {
         }
         assert_eq!(transcript.prompt.as_deref(), Some("/review 12"));
         assert_eq!(transcript.queued(), 2);
+        let queue: Vec<_> = transcript.queue.iter().filter_map(|text| prompt_text(text)).collect();
+        assert_eq!(queue, ["and the tests", "then push"]);
         transcript.line(r#"{"type":"queue-operation","operation":"dequeue"}"#);
         transcript.line(r#"{"type":"queue-operation","operation":"remove","content":"then push"}"#);
         assert_eq!(transcript.queued(), 0);
