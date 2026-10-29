@@ -11,13 +11,13 @@ use crate::theme::Color;
 
 pub const ATLAS_SIZE: usize = 2048;
 /// The RGBA atlas for color emoji, drawn by CoreText on macOS.
-pub const COLOR_ATLAS_SIZE: usize = 1024;
+pub const COLOR_ATLAS_SIZE: usize = 2048;
 
 const MONO_FONTS: [&[u8]; 4] = [
-    include_bytes!("../assets/fonts/JetBrainsMonoNL-Regular.ttf"),
-    include_bytes!("../assets/fonts/JetBrainsMonoNL-Bold.ttf"),
-    include_bytes!("../assets/fonts/JetBrainsMonoNL-Italic.ttf"),
-    include_bytes!("../assets/fonts/JetBrainsMonoNL-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
 ];
 
 const EMOJI: &str = "NotoEmoji-Regular.ttf";
@@ -132,7 +132,7 @@ type Emoji = ([f32; 4], f32, f32);
 pub struct Atlas {
     pub pixels: Vec<u8>,
     pub dirty: Option<(usize, usize)>,
-    size: usize,
+    pub size: usize,
     channels: usize,
     shelf_x: usize,
     shelf_y: usize,
@@ -211,6 +211,15 @@ pub struct TextSystem {
     pub cell: CellMetrics,
     /// Physical pixels per logical one: glyphs rasterize at this density.
     pub scale: f32,
+    /// The mono faces for shaping, their ligatures on, and runs shaped
+    /// already: the glyph each character becomes.
+    shapers: Vec<rustybuzz::Face<'static>>,
+    pub ligatures: bool,
+    shaped: HashMap<(String, FontId), Option<Vec<u16>>>,
+    /// Inline images in the color atlas, by picture and physical size
+    /// (macOS); elsewhere their mosaics, averaged down.
+    pictures: HashMap<(u64, usize, usize), Option<[f32; 4]>>,
+    mosaics: HashMap<(u64, usize, usize), std::rc::Rc<Vec<u8>>>,
 }
 
 fn load_system_font(name: &str) -> Option<Font> {
@@ -275,6 +284,11 @@ impl TextSystem {
             atlas: Atlas::new(ATLAS_SIZE, 1),
             color_atlas: Atlas::new(if cfg!(target_os = "macos") { COLOR_ATLAS_SIZE } else { 0 }, 4),
             emoji: HashMap::new(),
+            shapers: MONO_FONTS.iter().filter_map(|data| rustybuzz::Face::from_slice(data, 0)).collect(),
+            ligatures: true,
+            shaped: HashMap::new(),
+            pictures: HashMap::new(),
+            mosaics: HashMap::new(),
             cell: CellMetrics { width: 0.0, height: 0.0, baseline: 0.0, size, underline: 0.0, stroke: 1.0 },
             scale: 1.0,
         };
@@ -441,6 +455,106 @@ impl TextSystem {
         scene.glyph(Rect::new(self.snap(gx), self.snap(gy), glyph.width, glyph.height), glyph.uv, color);
     }
 
+    /// Ligatures in a run of characters in one style: per character, the
+    /// glyph it becomes where that's not its own (None: draw it as usual).
+    /// The mono font's ligatures keep one glyph a cell, each drawn over its
+    /// neighbors, so they slot into the grid as they are.
+    pub fn ligatures(&mut self, run: &[char], style: Style) -> Vec<Option<u16>> {
+        let none = vec![None; run.len()];
+        // Every ligature in the font joins symbols ("->", "!=", "</>"…).
+        let worth = self.ligatures
+            && run.len() >= 2
+            && run.windows(2).any(|w| w.iter().all(|c| c.is_ascii_punctuation()))
+            && run.iter().all(|&c| c.is_ascii_graphic() || c == ' ');
+        if !worth {
+            return none;
+        }
+        let font = style.mono_font();
+        let text: String = run.iter().collect();
+        let key = (text, font);
+        if !self.shaped.contains_key(&key) {
+            if self.shaped.len() > 4096 {
+                self.shaped.clear();
+            }
+            let shaped = self.shapers.get(font as usize).and_then(|face| {
+                let mut buffer = rustybuzz::UnicodeBuffer::new();
+                buffer.push_str(&key.0);
+                let output = rustybuzz::shape(face, &[], buffer);
+                let glyphs: Vec<u16> = output.glyph_infos().iter().map(|g| g.glyph_id as u16).collect();
+                (glyphs.len() == run.len()).then_some(glyphs)
+            });
+            self.shaped.insert(key.clone(), shaped);
+        }
+        let Some(glyphs) = &self.shaped[&key] else { return none };
+        let mono = &self.fonts[font as usize];
+        run.iter().zip(glyphs).map(|(&c, &g)| (mono.lookup_glyph_index(c) != g).then_some(g)).collect()
+    }
+
+    /// Draws a glyph of a mono face in a cell, as the font places it.
+    pub fn draw_mono_glyph(&mut self, scene: &mut Scene, glyph: u16, x: f32, y: f32, style: Style, color: Color) {
+        let cell = self.cell;
+        let Some(g) = self.glyph(style.mono_font(), glyph, cell.size) else { return };
+        if g.width == 0.0 {
+            return;
+        }
+        let rect = Rect::new(self.snap(x + g.left), self.snap(y + cell.baseline + g.top), g.width, g.height);
+        scene.glyph(rect, g.uv, color);
+    }
+
+    /// Draws an inline image filling `rect`: from the color atlas where
+    /// there is one (Metal), else as a mosaic of small squares.
+    pub fn draw_picture(&mut self, scene: &mut Scene, picture: &crate::picture::Picture, rect: Rect) {
+        let s = self.scale;
+        if self.color_atlas.size > 0 {
+            // At most half the atlas a side; bigger ones are drawn stretched.
+            let fit = (1024.0 / (rect.w * s).max(rect.h * s)).min(1.0);
+            let w = ((rect.w * s * fit).round() as usize).clamp(1, picture.width.max(1));
+            let h = ((rect.h * s * fit).round() as usize).clamp(1, picture.height.max(1));
+            let key = (picture.id, w, h);
+            if !self.pictures.contains_key(&key) {
+                let pixels = picture.scaled(w, h);
+                let slot = self.color_atlas.allocate(w, h).or_else(|| {
+                    self.emoji.clear();
+                    self.pictures.clear();
+                    self.color_atlas.clear();
+                    self.color_atlas.allocate(w, h)
+                });
+                let uv = slot.map(|(x, y)| {
+                    self.color_atlas.write(x, y, w, h, &pixels);
+                    let n = COLOR_ATLAS_SIZE as f32;
+                    [x as f32 / n, y as f32 / n, (x + w) as f32 / n, (y + h) as f32 / n]
+                });
+                self.pictures.insert(key, uv);
+            }
+            if let Some(uv) = self.pictures[&key] {
+                scene.color_glyph(rect, uv, 1.0);
+            }
+            return;
+        }
+        // About two physical pixels a square, at most 240 across.
+        let step = (2.0 / s).max(rect.w / 240.0).max(rect.h / 240.0);
+        let (w, h) = (((rect.w / step).ceil() as usize).max(1), ((rect.h / step).ceil() as usize).max(1));
+        let key = (picture.id, w, h);
+        if self.mosaics.len() > 64 {
+            self.mosaics.clear();
+        }
+        let pixels = self.mosaics.entry(key).or_insert_with(|| std::rc::Rc::new(picture.scaled(w, h))).clone();
+        let (sw, sh) = (rect.w / w as f32, rect.h / h as f32);
+        for y in 0..h {
+            for x in 0..w {
+                let p = &pixels[(y * w + x) * 4..][..4];
+                if p[3] == 0 {
+                    continue;
+                }
+                // Premultiplied: back to straight color for a fill.
+                let a = p[3] as f32 / 255.0;
+                let color =
+                    Color { r: p[0] as f32 / 255.0 / a, g: p[1] as f32 / 255.0 / a, b: p[2] as f32 / 255.0 / a, a };
+                scene.fill(Rect::new(rect.x + x as f32 * sw, rect.y + y as f32 * sh, sw + 0.01, sh + 0.01), color);
+            }
+        }
+    }
+
     /// A character and the zero-width marks on it (variation selectors,
     /// skin tones, joined emoji): a color emoji where there is one, else
     /// each drawn in its cell.
@@ -490,6 +604,7 @@ impl TextSystem {
                     None => {
                         // Full: start over; emoji come back as they are drawn.
                         self.emoji.clear();
+                        self.pictures.clear();
                         self.color_atlas.clear();
                         self.color_atlas.allocate(w, h)?
                     }
@@ -580,10 +695,18 @@ impl TextSystem {
     /// Mono text on the cell grid (one cell per char); returns the width.
     pub fn draw_mono(&mut self, scene: &mut Scene, text: &str, x: f32, y: f32, style: Style, color: Color) -> f32 {
         let mut pen = x;
-        for c in text.chars() {
+        let chars: Vec<char> = text.chars().collect();
+        let ligatures = if chars.iter().all(|&c| c.is_ascii_graphic() || c == ' ') {
+            self.ligatures(&chars, style)
+        } else {
+            vec![None; chars.len()]
+        };
+        for (c, ligature) in chars.into_iter().zip(ligatures) {
             // CJK takes two cells.
             let span = crate::editor::width(c);
-            if span > 0 {
+            if let Some(glyph) = ligature {
+                self.draw_mono_glyph(scene, glyph, pen, y, style, color);
+            } else if span > 0 {
                 self.draw_cluster(scene, c, &[], pen, y, style, color, span);
             }
             pen += span as f32 * self.cell.width;

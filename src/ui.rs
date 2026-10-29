@@ -42,6 +42,8 @@ pub struct GridView<'a> {
     pub cursor: bool,
     pub focused: bool,
     pub selection: Option<Span>,
+    /// Search matches: (line, start column, end column, current).
+    pub marks: Vec<(usize, usize, usize, bool)>,
     pub blink_on: bool,
 }
 
@@ -85,6 +87,35 @@ pub fn draw_grid(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, view: 
             }
         }
 
+        for &(_, from, to, current) in view.marks.iter().filter(|m| m.0 == index) {
+            let rect = Rect::new(view.x + from as f32 * cell.width, y, (to - from) as f32 * cell.width, cell.height);
+            if current {
+                scene.quad(Quad::new(rect, theme.warning.alpha(0.55)).radius(2.0).border(1.0, theme.warning));
+            } else {
+                scene.quad(Quad::new(rect, theme.warning.alpha(0.22)).radius(2.0));
+            }
+        }
+
+        // Ligatures, shaped a run of one style at a time.
+        let mut ligature: Vec<Option<u16>> = vec![None; columns];
+        let mut start = 0;
+        while start < columns {
+            let style_of =
+                |c: &Cell| Style { bold: c.flags.contains(Flags::BOLD), italic: c.flags.contains(Flags::ITALIC) };
+            let style = style_of(&row[Column(start)]);
+            let mut end = start;
+            while end < columns && row[Column(end)].c.is_ascii_graphic() && style_of(&row[Column(end)]) == style {
+                end += 1;
+            }
+            if end > start + 1 {
+                let run: Vec<char> = (start..end).map(|i| row[Column(i)].c).collect();
+                for (i, glyph) in text.ligatures(&run, style).into_iter().enumerate() {
+                    ligature[start + i] = glyph;
+                }
+            }
+            start = end.max(start + 1);
+        }
+
         for column in 0..columns {
             let c = &row[Column(column)];
             if c.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
@@ -95,7 +126,10 @@ pub fn draw_grid(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, view: 
             let span = if c.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
             if !c.flags.contains(Flags::HIDDEN) {
                 let style = Style { bold: c.flags.contains(Flags::BOLD), italic: c.flags.contains(Flags::ITALIC) };
-                text.draw_cluster(scene, c.c, c.zerowidth().unwrap_or(&[]), x, y, style, fg, span);
+                match ligature[column] {
+                    Some(glyph) => text.draw_mono_glyph(scene, glyph, x, y, style, fg),
+                    None => text.draw_cluster(scene, c.c, c.zerowidth().unwrap_or(&[]), x, y, style, fg, span),
+                }
             }
             let width = cell.width * span as f32;
             if c.flags.intersects(Flags::ALL_UNDERLINES) {

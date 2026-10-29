@@ -42,7 +42,29 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
   panes start in the current pane's directory. Tabs are listed down the left
   side once there is a second one, or across the top (Settings, or
   `TEMINO_TABS=top`).
-- **Settings in a tab.** Cmd+, opens them: background color, text size,
+- **Search the scrollback.** Cmd+F searches every block's output as you
+  type (lowercase ignores case), marks the matches and scrolls to them;
+  Enter or ↑ goes to the older match, Shift+Enter or ↓ to the newer one.
+- **Themes from real machines.** Settings ▸ Theme steps through the screens
+  of the Apple II, Macintosh II, IBM PC, Commodore 64, Amiga 500, Atari 800,
+  ZX Spectrum, BBC Micro, DEC VT220, IBM 3279, a Sun SPARCstation and an SGI
+  Indy, each in its own palette. Ghostty theme files dropped into the
+  `themes` folder (next to the settings) join the list.
+- **Your own keys.** Every shortcut can be rebound in the `keys` file next to
+  the settings (Settings ▸ Edit Key Bindings writes one listing each action):
+  `ctrl+shift+t = new_tab`, `cmd+j = text:git status\r`, `cmd+k = ignore`.
+  Saved changes apply at once.
+- **Quick terminal** (macOS). A hotkey from any app brings Temino forward to
+  the Space you're on, and hides it again: Settings ▸ Quick terminal, Ctrl+\`
+  unless `quick_terminal=<keys>` in the settings file says otherwise.
+- **Ligatures and images.** JetBrains Mono's ligatures (`->`, `!=`, `>=`, `===`),
+  off in Settings ▸ Text if you'd rather not. Images print inline through the
+  iTerm2 (`imgcat`) and Kitty graphics protocols, PNG, JPEG and GIF; on Vulkan
+  (Linux, Haiku) they're drawn as a fine mosaic.
+- **Output comes back.** Quitting keeps each pane's last 50 blocks, colors
+  and all, and relaunching shows them above the new prompt
+  (`restore_output=off` in the settings file turns that off).
+- **Settings in a tab.** Cmd+, opens them: theme, background color, text size,
   default shell, tab list position and updates; on macOS also how
   see-through the background is and whether the desktop behind it is
   blurred. On macOS frames render straight into the window's Metal layer.
@@ -74,6 +96,7 @@ macOS, Ctrl+Shift (or Super) on Linux.
 | Cmd+C, Cmd+Shift+C, Cmd+V | copy (selection, else the selected block's output), copy the block's command, paste |
 | Cmd+↑ / Cmd+↓ | select the previous / next block |
 | Cmd+K, Ctrl+L | clear the blocks |
+| Cmd+F, Cmd+G / Cmd+Shift+G | search the output, next / previous match |
 | Cmd+= / Cmd+- / Cmd+0 | font size |
 | Ctrl+C | interrupt the running program (at the prompt: clear the line) |
 | Shift+PageUp / PageDown | scroll while a program runs |

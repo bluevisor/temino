@@ -4,6 +4,7 @@
 // TEMINO_CAPTURE) they also come back as BGRA rows.
 
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 #import <CoreText/CoreText.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -570,4 +571,73 @@ bool
 temino_metal_on_screen(void)
 {
 	return atomic_load(&sLayer) != NULL;
+}
+
+
+// ---- Quick terminal: a global hotkey brings the window and hides it ----
+
+static EventHotKeyRef sHotKey;
+static bool sHotKeyHandler;
+
+static NSWindow*
+main_window(void)
+{
+	for (NSWindow* window in NSApp.windows)
+		if (window.canBecomeMainWindow)
+			return window;
+	return nil;
+}
+
+// Hides Temino when its window is in front, else brings it to this Space.
+void
+temino_toggle_window(void)
+{
+	NSWindow* window = main_window();
+	if (window == nil)
+		return;
+	if (NSApp.isActive && window.isKeyWindow && window.isVisible
+		&& !window.isMiniaturized) {
+		[NSApp hide:nil];
+		return;
+	}
+	[NSApp unhide:nil];
+	if (window.isMiniaturized)
+		[window deminiaturize:nil];
+	[NSApp activateIgnoringOtherApps:YES];
+	[window makeKeyAndOrderFront:nil];
+}
+
+static OSStatus
+hotkey_pressed(EventHandlerCallRef next, EventRef event, void* data)
+{
+	(void)next;
+	(void)event;
+	(void)data;
+	temino_toggle_window();
+	return noErr;
+}
+
+// Registers the hotkey (a virtual key code and Carbon modifiers), or none
+// with keycode UINT32_MAX. Carbon hotkeys need no accessibility permission.
+void
+temino_hotkey(uint32_t keycode, uint32_t modifiers)
+{
+	if (!sHotKeyHandler) {
+		EventTypeSpec type = { kEventClassKeyboard, kEventHotKeyPressed };
+		InstallApplicationEventHandler(&hotkey_pressed, 1, &type, NULL, NULL);
+		sHotKeyHandler = true;
+	}
+	if (sHotKey != NULL) {
+		UnregisterEventHotKey(sHotKey);
+		sHotKey = NULL;
+	}
+	NSWindow* window = main_window();
+	if (keycode == UINT32_MAX) {
+		window.collectionBehavior &= ~NSWindowCollectionBehaviorMoveToActiveSpace;
+		return;
+	}
+	EventHotKeyID id = { 'tmno', 1 };
+	RegisterEventHotKey(keycode, modifiers, id, GetApplicationEventTarget(), 0, &sHotKey);
+	// Summoned, the window comes to the Space you're on.
+	window.collectionBehavior |= NSWindowCollectionBehaviorMoveToActiveSpace;
 }

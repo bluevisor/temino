@@ -7,8 +7,10 @@
 mod agent;
 mod app;
 mod ask;
+mod bindings;
 mod complete;
 mod editor;
+mod find;
 #[cfg(not(target_os = "macos"))]
 mod gpu;
 #[cfg(target_os = "macos")]
@@ -19,6 +21,7 @@ mod json;
 mod keys;
 mod llm;
 mod pane;
+mod picture;
 mod platform;
 mod scene;
 mod session;

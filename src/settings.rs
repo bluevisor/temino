@@ -19,7 +19,17 @@ const WHEEL_STEP: f32 = 48.0;
 
 /// What the settings are now, for drawing them.
 pub struct Values {
-    pub background: usize,
+    /// The background picked over the theme's own, if any.
+    pub background: Option<usize>,
+    /// The theme's name, and how many the library holds.
+    pub theme: String,
+    pub themes: usize,
+    /// How many key bindings the keys file holds.
+    pub bindings: usize,
+    pub ligatures: bool,
+    /// The quick terminal's hotkey, if it's on; the outer None where there
+    /// is no quick terminal.
+    pub quick_terminal: Option<Option<String>>,
     /// An index into OPACITIES.
     pub opacity: usize,
     pub blur: bool,
@@ -73,6 +83,12 @@ impl Field {
 /// What a click on the page asks for.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
+    /// The theme this many places along the library.
+    Theme(i32),
+    OpenThemes,
+    EditKeys,
+    Ligatures(bool),
+    QuickTerminal(bool),
     Background(usize),
     Opacity(usize),
     Blur(bool),
@@ -128,13 +144,18 @@ impl Page {
         ui.text.draw_text(ui.scene, "Settings", x, y + 24.0, UI_BOLD, 22.0, theme.text);
         y += 52.0;
 
-        let mut rows = vec![Row::Background];
+        let mut rows = vec![Row::Theme, Row::ThemeFolder, Row::Background];
         if values.see_through {
             rows.extend([Row::Opacity, Row::Blur]);
         }
         y = ui.section(x, y, width, "Appearance", &rows, values);
-        y = ui.section(x, y, width, "Text", &[Row::Zoom], values);
+        y = ui.section(x, y, width, "Text", &[Row::Zoom, Row::Ligatures], values);
         y = ui.section(x, y, width, "Shell", &[Row::Shell], values);
+        let mut keys = vec![Row::Keys];
+        if values.quick_terminal.is_some() {
+            keys.push(Row::QuickTerminal);
+        }
+        y = ui.section(x, y, width, "Keys", &keys, values);
         y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Headers], values);
         y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::CheckForUpdates], values);
         let fields = Field::ALL.map(Row::Field);
@@ -152,6 +173,11 @@ impl Page {
 /// on the right.
 #[derive(Clone, Copy)]
 enum Row {
+    Theme,
+    ThemeFolder,
+    Keys,
+    Ligatures,
+    QuickTerminal,
     Background,
     Opacity,
     Blur,
@@ -202,7 +228,31 @@ impl Ui<'_> {
     fn row(&mut self, rect: Rect, row: Row, values: &Values) {
         let theme = self.theme;
         let (label, detail) = match row {
-            Row::Background => ("Background", BACKGROUNDS[values.background].0.to_owned()),
+            Row::Theme => {
+                ("Theme", format!("{} of {} · colors for the terminal and the window", values.theme, values.themes))
+            }
+            Row::Keys => (
+                "Key bindings",
+                match values.bindings {
+                    0 => "The defaults; the keys file rebinds any of them".to_owned(),
+                    1 => "1 custom binding, from the keys file".to_owned(),
+                    n => format!("{n} custom bindings, from the keys file"),
+                },
+            ),
+            Row::Ligatures => ("Ligatures", "Symbols like -> != >= drawn joined".to_owned()),
+            Row::QuickTerminal => (
+                "Quick terminal",
+                match values.quick_terminal.clone().flatten() {
+                    Some(keys) => {
+                        format!("{keys} from any app brings Temino, and hides it · quick_terminal= in settings")
+                    }
+                    None => "A hotkey from any app brings Temino forward".to_owned(),
+                },
+            ),
+            Row::ThemeFolder => ("Your themes", "Ghostty theme files dropped here join the list".to_owned()),
+            Row::Background => {
+                ("Background", values.background.map_or("The theme's own".to_owned(), |i| BACKGROUNDS[i].0.to_owned()))
+            }
             Row::Opacity => ("Background opacity", "How much of the desktop shows through".to_owned()),
             Row::Blur => ("Blur behind the window", "Soften what shows through".to_owned()),
             Row::Zoom => ("Size", format!("{:.0}% · Command+plus and Command+minus too", values.zoom)),
@@ -221,6 +271,17 @@ impl Ui<'_> {
         let right = rect.right() - 16.0;
         let control_y = rect.y + (ROW - CONTROL_HEIGHT) / 2.0;
         match row {
+            Row::Theme => {
+                let labels = ["‹".to_owned(), values.theme.clone(), "›".to_owned()];
+                self.segments(right, control_y, &labels, None, |i| Action::Theme(i as i32 - 1));
+            }
+            Row::Ligatures => self.toggle(right, rect.y, values.ligatures, Action::Ligatures(!values.ligatures)),
+            Row::QuickTerminal => {
+                let on = values.quick_terminal.as_ref().is_some_and(Option::is_some);
+                self.toggle(right, rect.y, on, Action::QuickTerminal(!on));
+            }
+            Row::Keys => self.button(right, control_y, "Edit Key Bindings", Action::EditKeys),
+            Row::ThemeFolder => self.button(right, control_y, "Open Themes Folder", Action::OpenThemes),
             Row::Background => self.swatches(right, rect.y + (ROW - SWATCH) / 2.0, values.background),
             Row::Opacity => {
                 let labels: Vec<String> = OPACITIES.iter().map(|o| format!("{o}")).collect();
@@ -311,21 +372,21 @@ impl Ui<'_> {
     }
 
     /// The backgrounds as color dots, right-aligned at `right`.
-    fn swatches(&mut self, right: f32, y: f32, selected: usize) {
+    fn swatches(&mut self, right: f32, y: f32, selected: Option<usize>) {
         let theme = self.theme;
         let step = SWATCH + 10.0;
         let mut x = right - step * BACKGROUNDS.len() as f32 + 10.0;
         for (index, &(_, rgb)) in BACKGROUNDS.iter().enumerate() {
             let dot = Rect::new(x, y, SWATCH, SWATCH);
             let hit = dot.inset(-4.0, -4.0);
-            let ring = if index == selected {
+            let ring = if Some(index) == selected {
                 theme.accent
             } else if self.hovered(hit) {
                 theme.text_dim
             } else {
                 Color::hex(0xffffff).alpha(0.18)
             };
-            if index == selected {
+            if Some(index) == selected {
                 self.scene.quad(Quad::new(dot.inset(-3.0, -3.0), Color::TRANSPARENT).radius(SWATCH).border(2.0, ring));
                 self.scene.quad(
                     Quad::new(dot, Color::hex(rgb)).radius(SWATCH / 2.0).border(1.0, Color::hex(0xffffff).alpha(0.18)),
@@ -409,7 +470,12 @@ mod tests {
         let mut text = TextSystem::new(14.0);
         let theme = Theme::dark();
         let values = Values {
-            background: 0,
+            background: Some(0),
+            theme: "Temino".into(),
+            themes: 12,
+            bindings: 0,
+            ligatures: true,
+            quick_terminal: Some(None),
             opacity: 0,
             blur: false,
             shell: Some(0),
@@ -427,10 +493,18 @@ mod tests {
         scene.reset(1100.0, 2000.0, 1.0, theme.background);
         page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
         let actions: Vec<Action> = page.hits.iter().map(|&(_, a)| a).collect();
-        let mut expected: Vec<Action> = (0..BACKGROUNDS.len()).map(Action::Background).collect();
+        let mut expected = vec![Action::Theme(-1), Action::Theme(0), Action::Theme(1), Action::OpenThemes];
+        expected.extend((0..BACKGROUNDS.len()).map(Action::Background));
         expected.extend((0..OPACITIES.len()).map(Action::Opacity));
-        expected.extend([Action::Blur(true), Action::Zoom(-1), Action::Zoom(0), Action::Zoom(1)]);
+        expected.extend([
+            Action::Blur(true),
+            Action::Zoom(-1),
+            Action::Zoom(0),
+            Action::Zoom(1),
+            Action::Ligatures(false),
+        ]);
         expected.extend((0..KINDS.len()).map(Action::Shell));
+        expected.extend([Action::EditKeys, Action::QuickTerminal(true)]);
         expected.extend([
             Action::TabsTop(false),
             Action::TabsTop(true),
