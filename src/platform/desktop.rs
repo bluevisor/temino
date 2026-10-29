@@ -222,6 +222,8 @@ mod menu {
         ("View", Some("Next Tab"), "}", SHIFT, None, ']'),
         ("View", Some("Previous Pane"), "[", 0, None, '['),
         ("View", Some("Next Pane"), "]", 0, None, ']'),
+        ("View", Some("Jump to What Needs You"), "`", 0, None, '`'),
+        ("View", Some("Jump to Newest Need"), "~", SHIFT, None, '`'),
         ("View", Some("Zoom Pane"), "\r", 0, Some(Named::Enter), '\r'),
         ("View", None, "", 0, None, '\0'),
         ("View", Some("Bigger Text"), "+", 0, None, '='),

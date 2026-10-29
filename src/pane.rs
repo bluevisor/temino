@@ -193,6 +193,8 @@ pub struct Pane {
     pub agent_unseen: bool,
     /// The agent's state this frame, read once by the window.
     pub agent_now: Option<AgentState>,
+    /// Since when the agent has been waiting on you or done unseen, and which.
+    pub needs_since: Option<(AgentState, Instant)>,
     /// The listed program running here this frame, and since when.
     pub program_now: Option<(String, Instant)>,
     /// Claude Code's own account of the agent, read in the background.
@@ -304,6 +306,7 @@ impl Pane {
             agent_unseen: false,
             program_now: None,
             agent_now: None,
+            needs_since: None,
             watcher: None,
             typed: String::new(),
             typed_prompt: None,
