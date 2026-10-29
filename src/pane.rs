@@ -856,6 +856,22 @@ impl Pane {
     /// A short summary: the folder, then what's running and the last few
     /// distinct commands, newest first. Just the path in a fresh pane.
     pub fn title(&self) -> String {
+        let recent = self.recent_commands();
+        if recent.is_empty() {
+            return self.folder();
+        }
+        format!("{} · {}", self.folder(), recent.join(", "))
+    }
+
+    /// The name of the folder it's in.
+    pub fn folder(&self) -> String {
+        folder_name(&self.session.cwd)
+    }
+
+    /// What's running, then the last few distinct commands run in the
+    /// folder it's in now, newest first: after a `cd` the old folder's
+    /// commands no longer describe it.
+    pub fn recent_commands(&self) -> Vec<String> {
         let mut recent: Vec<String> = Vec::new();
         if let Some(block) = self.session.active() {
             recent.extend(block.command.lines().next().filter(|line| !line.trim().is_empty()).map(str::to_owned));
@@ -863,7 +879,8 @@ impl Pane {
         let active = self.session.active().map(|block| block.id);
         let finished =
             self.session.blocks.iter().rev().filter(|b| b.kind == BlockKind::Command && Some(b.id) != active);
-        for gist in finished.filter_map(|block| command_gist(&block.command)) {
+        let here = finished.filter(|block| block.cwd == self.session.cwd);
+        for gist in here.filter_map(|block| command_gist(&block.command)) {
             if recent.len() == TITLE_COMMANDS {
                 break;
             }
@@ -871,10 +888,7 @@ impl Pane {
                 recent.push(gist);
             }
         }
-        if recent.is_empty() {
-            return folder_name(&self.session.cwd);
-        }
-        format!("{} · {}", folder_name(&self.session.cwd), recent.join(", "))
+        recent
     }
 
     /// Moves the pane; the grid follows now, finished blocks rewrap shortly.
