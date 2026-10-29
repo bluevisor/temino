@@ -2,7 +2,7 @@
 
 <img src="docs/icon.png" width="64" align="right" alt="">
 
-A modern GPU-accelerated terminal for [Haiku](https://www.haiku-os.org), Linux and macOS, drawn with Vulkan (Metal on macOS).
+An ADHD-friendly, GPU-accelerated terminal for [Haiku](https://www.haiku-os.org), Linux and macOS, drawn with Vulkan (Metal on macOS).
 
 Temino works like [Warp](https://github.com/warpdotdev/warp): every command and
 its output is a **block** you can select and copy, and commands are typed in a

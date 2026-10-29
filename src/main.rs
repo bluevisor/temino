@@ -1,4 +1,4 @@
-//! Temino: a modern GPU-accelerated block terminal for Haiku, Linux and
+//! Temino: an ADHD-friendly, GPU-accelerated block terminal for Haiku, Linux and
 //! macOS, rendered with Vulkan (Metal on macOS).
 
 // Drawing helpers take a scene, the text system, a position and a style.
