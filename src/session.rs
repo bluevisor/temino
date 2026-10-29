@@ -593,6 +593,8 @@ pub struct Session {
     input_at: Cell<Option<Instant>>,
     /// The shell's own $PATH, which a Dock-launched Temino's lacks.
     pub path: Option<String>,
+    /// The shell's file name: "zsh".
+    pub shell_name: String,
 }
 
 impl Session {
@@ -617,6 +619,7 @@ impl Session {
             output_at: None,
             input_at: Cell::new(None),
             path: None,
+            shell_name: String::new(),
         }
     }
 
@@ -626,6 +629,7 @@ impl Session {
 
     /// Starts `shell`; its output arrives as `Msg::Pty(id, ...)`.
     pub fn start(&mut self, id: u64, shell: &str, sender: Sender<Msg>, credits: Arc<Credits>) -> std::io::Result<()> {
+        self.shell_name = shell.rsplit('/').next().unwrap_or(shell).to_owned();
         let mut env: Vec<String> = std::env::vars()
             .filter(|(key, _)| {
                 !matches!(key.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "COLUMNS" | "LINES" | "ZDOTDIR")
@@ -753,6 +757,11 @@ impl Session {
             return None;
         }
         self.blocks.iter().rev().find(|b| b.kind == BlockKind::Command && b.running())
+    }
+
+    /// The last command that ran to its end.
+    pub fn last_finished(&self) -> Option<&Block> {
+        self.blocks.iter().rev().find(|b| b.kind == BlockKind::Command && !b.running())
     }
 
     pub fn active_mut(&mut self) -> Option<&mut Block> {

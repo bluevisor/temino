@@ -45,6 +45,8 @@ const AGENT_DONE: u32 = 0x8ccf7e;
 const AGENT_HEADER: f32 = 26.0;
 /// The extended sidebar's line per pane, under each tab's title.
 const SIDEBAR_LINE: f32 = 18.0;
+/// How long the pointer rests on a tab before its folder shows beside it.
+const TAB_HINT_DELAY: Duration = Duration::from_millis(600);
 
 /// Where the tabs are listed: down the left side (the default) or across
 /// the top (`TEMINO_TABS=top`).
@@ -274,6 +276,8 @@ struct TabView {
     agent: Option<AgentState>,
     /// In the extended sidebar: a line on what each of its panes is doing.
     lines: Vec<PaneLine>,
+    /// Its focused pane's folder, in full.
+    path: String,
 }
 
 /// One pane's line in the extended sidebar.
@@ -282,6 +286,8 @@ struct PaneLine {
     agent: Option<AgentState>,
     /// Something runs in it.
     busy: bool,
+    /// Idle, and its last command failed.
+    failed: bool,
     text: String,
 }
 
@@ -357,6 +363,8 @@ pub struct App {
     /// Whether panes running an agent (or a listed program) get a header.
     headers: bool,
     hover_tab: Option<usize>,
+    /// When the pointer came onto the hovered tab, for its path's label.
+    hover_at: Instant,
     mouse: (f32, f32),
     /// What an input method is composing, drawn at the cursor.
     preedit: String,
@@ -405,6 +413,7 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
                     Msg::ShellExited(..) => "loop: shell exited",
                     Msg::Notice(..) => "loop: notice",
                     Msg::Update(..) => "loop: update",
+                    Msg::Git(..) => "loop: git",
                 });
                 app.handle(message)
             }
@@ -600,6 +609,7 @@ impl App {
             field: None,
             headers: crate::setting("headers").as_deref() != Some("off"),
             hover_tab: None,
+            hover_at: Instant::now(),
             mouse: (0.0, 0.0),
             preedit: String::new(),
             caret_sent: None,
@@ -1100,6 +1110,12 @@ impl App {
                 self.dirty = true;
             }
             Msg::Ui(event) => self.ui_event(event),
+            Msg::Git(id, cwd, changed) => {
+                if let Some(pane) = self.pane(id) {
+                    pane.git_changes = Some((cwd, changed));
+                }
+                self.dirty = true;
+            }
             Msg::Notice(message) => {
                 self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(6)));
                 self.dirty = true;
@@ -1990,7 +2006,10 @@ impl App {
             }
         }
         let hover = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, index)| index);
-        self.dirty |= hover != self.hover_tab;
+        if hover != self.hover_tab {
+            self.dirty = true;
+            self.hover_at = Instant::now();
+        }
         self.hover_tab = hover;
         match &self.pointer {
             Pointer::Divider(divider) if pressed != 0 => {
@@ -2329,11 +2348,17 @@ impl App {
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
                 // Only the current tab grows its lines; the rest stay one row.
-                let lines = if extended && index == self.active { self.pane_lines(&leaves, now) } else { Vec::new() };
+                let lines = if extended && index == self.active { self.pane_lines(index, &leaves, now) } else { Vec::new() };
                 TabView {
                     lines,
                     agent: agents[index],
                     title: self.tab_title(index),
+                    path: self
+                        .panes
+                        .iter()
+                        .find(|pane| pane.id == self.tabs[index].focus)
+                        .map(|pane| ui::short_path(&pane.session.cwd))
+                        .unwrap_or_default(),
                     panes: leaves.len(),
                     color: self.tabs[index].color.map(|c| Color::hex(TAB_COLORS[c])),
                     editing: self
@@ -2352,12 +2377,19 @@ impl App {
 
     /// What each of `leaves` is doing, a line apiece: an agent's state, turn
     /// and last prompt; a shell's running command, or its folder.
-    fn pane_lines(&self, leaves: &[u64], now: Instant) -> Vec<PaneLine> {
-        leaves
+    fn pane_lines(&mut self, index: usize, leaves: &[u64], now: Instant) -> Vec<PaneLine> {
+        let sender = self.ctx.sender.clone();
+        for pane in self.panes.iter_mut().filter(|pane| leaves.contains(&pane.id)) {
+            pane.refresh_git(&sender, now);
+        }
+        // Idle lines say the folder only where it isn't the tab's own.
+        let focus = self.tabs[index].focus;
+        let base = self.panes.iter().find(|pane| pane.id == focus).map(|pane| pane.session.cwd.clone());
+        let lines: Vec<PaneLine> = leaves
             .iter()
             .filter_map(|&id| {
                 if id == SETTINGS {
-                    return Some(PaneLine { id, agent: None, busy: false, text: "Settings".to_owned() });
+                    return Some(PaneLine { id, agent: None, busy: false, failed: false, text: "Settings".to_owned() });
                 }
                 let pane = self.panes.iter().find(|pane| pane.id == id)?;
                 if let Some(info) = pane.agent_info(now) {
@@ -2365,12 +2397,28 @@ impl App {
                     if let Some(prompt) = &info.prompt {
                         text = format!("{text} · {prompt}");
                     }
-                    return Some(PaneLine { id, agent: Some(info.state), busy: true, text });
+                    return Some(PaneLine { id, agent: Some(info.state), busy: true, failed: false, text });
                 }
                 let (busy, text) = pane.activity();
-                Some(PaneLine { id, agent: None, busy, text })
+                if busy {
+                    return Some(PaneLine { id, agent: None, busy, failed: false, text });
+                }
+                let text = pane.idle_line(base.as_deref().unwrap_or(&pane.session.cwd), now);
+                Some(PaneLine { id, agent: None, busy, failed: pane.last_failed(), text })
             })
-            .collect()
+            .collect();
+        // A lone idle shell: its title says it all.
+        if let [line] = lines.as_slice() {
+            if !line.busy && line.agent.is_none() {
+                return Vec::new();
+            }
+        }
+        // Idle lines tell how long ago; read them again as the minutes turn.
+        if lines.iter().any(|line| !line.busy) {
+            let at = now + Duration::from_secs(30);
+            self.animation_at = Some(self.animation_at.map_or(at, |a| a.min(at)));
+        }
+        lines
     }
 
     /// One tab's row: number, title (or the rename field), the
@@ -2540,9 +2588,7 @@ impl App {
             self.extend_hit = extend;
         }
         scene.pop_clip();
-        if self.compact {
-            self.draw_compact_hint(tabs);
-        }
+        self.draw_tab_hint(tabs);
     }
 
     /// The extended sidebar's lines under a tab's title, one per pane:
@@ -2561,6 +2607,7 @@ impl App {
             let color = match line.agent {
                 Some(state) => agent_color(theme, state, t),
                 None if line.busy => theme.accent.alpha(0.7),
+                None if line.failed => theme.error.alpha(0.85),
                 None => theme.text_faint.alpha(0.5),
             };
             scene.quad(Quad::new(dot, color).radius(3.0));
@@ -2586,17 +2633,30 @@ impl App {
         tab_hits.push((rect, index));
     }
 
-    /// The hovered compact row's title, in a label beside it.
-    fn draw_compact_hint(&mut self, tabs: &[TabView]) {
+    /// A label beside the hovered row: a compact row's title at once, a
+    /// full row's folder after a moment, when its title doesn't show it.
+    fn draw_tab_hint(&mut self, tabs: &[TabView]) {
         if !matches!(self.pointer, Pointer::Idle) {
             return;
         }
         let (mx, my) = self.mouse;
         let Some(&(row, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(mx, my)) else { return };
         let Some(tab) = tabs.get(index) else { return };
-        let title = match tab.agent {
-            Some(agent) => format!("{} · {}", agent.label(), tab.title),
-            None => tab.title.clone(),
+        let title = if self.compact {
+            match tab.agent {
+                Some(agent) => format!("{} · {}", agent.label(), tab.title),
+                None => tab.title.clone(),
+            }
+        } else {
+            if tab.path.is_empty() || tab.path == tab.title || tab.editing.is_some() {
+                return;
+            }
+            let at = self.hover_at + TAB_HINT_DELAY;
+            if Instant::now() < at {
+                self.animation_at = Some(self.animation_at.map_or(at, |a| a.min(at)));
+                return;
+            }
+            tab.path.clone()
         };
         let Self { scene, ctx, .. } = self;
         let Ctx { text, theme, .. } = ctx;

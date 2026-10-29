@@ -40,6 +40,8 @@ pub enum Msg {
     /// A message for the user from another thread (the updater).
     Notice(String),
     Update(update::Event),
+    /// How many files changed in a pane's repository: pane, folder, count.
+    Git(u64, String, usize),
 }
 
 /// History, the shell integration script and logs: ~/config/settings/Temino

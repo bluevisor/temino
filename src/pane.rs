@@ -18,7 +18,7 @@ use crate::keys::{self, Named};
 use crate::llm;
 use crate::platform::{self, buttons, Cursor, KeyEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
-use crate::session::{BlockKind, Credits, GridSize, Link, Notice, Phase, Session};
+use crate::session::{Block, BlockKind, Credits, GridSize, Link, Notice, Phase, Session};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{Color, Theme, SURFACE_LIFT};
 use crate::ui::{self, GridView, Span};
@@ -37,6 +37,8 @@ const INPUT_PAD: f32 = 10.0;
 pub const BLINK: Duration = Duration::from_millis(530);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const MAX_EDITOR_LINES: usize = 10;
+/// How long an idle pane's count of changed files is trusted.
+const GIT_RECHECK: Duration = Duration::from_secs(20);
 const MENU_ROWS: usize = 8;
 /// How many commands a pane's title lists.
 const TITLE_COMMANDS: usize = 3;
@@ -218,6 +220,10 @@ pub struct Pane {
     /// shell. The request on its way: its block and the model's reply.
     ai: bool,
     asking: Option<(u64, Answer)>,
+    /// How many files `git status` lists in the folder, by folder; and what
+    /// it was last asked for (folder and last command), and when.
+    pub git_changes: Option<(String, usize)>,
+    git_asked: Option<(String, Option<u64>, Instant)>,
 }
 
 /// The model's reply to an AI-mode request, filled in by its thread.
@@ -312,6 +318,8 @@ impl Pane {
             program_now: None,
             agent_now: None,
             needs_since: None,
+            git_changes: None,
+            git_asked: None,
             watcher: None,
             typed: String::new(),
             typed_prompt: None,
@@ -645,6 +653,77 @@ impl Pane {
         }
     }
 
+    /// A line on an idle shell for the extended sidebar: its folder when
+    /// not `base` (the tab's), the last command, how it ended and how long
+    /// ago, and the git branch with its count of changed files.
+    pub fn idle_line(&self, base: &str, now: Instant) -> String {
+        let mut parts = Vec::new();
+        let cwd = &self.session.cwd;
+        if cwd != base {
+            parts.push(match cwd.strip_prefix(base).filter(|rest| rest.starts_with('/')) {
+                Some(rest) => format!(".{rest}"),
+                None => ui::short_path(cwd),
+            });
+        }
+        match self.session.last_finished() {
+            Some(block) => {
+                let mark = if block.failed() { "✗" } else { "✓" };
+                let mut last = format!("{mark} {}", agent::one_line(&block.command));
+                if let Some(code) = block.exit.filter(|&code| code != 0) {
+                    last.push_str(&format!(" (exit {code})"));
+                }
+                if let Some(at) = block.finished {
+                    last.push_str(&format!(" · {}", ago(now.saturating_duration_since(at))));
+                }
+                parts.push(last);
+            }
+            None if parts.is_empty() => parts.push(format!("shell · {}", self.session.shell_name)),
+            None => {}
+        }
+        if let Some(branch) = &self.session.branch {
+            match self.git_changes.as_ref().filter(|(dir, _)| dir == cwd) {
+                Some((_, n)) if *n > 0 => parts.push(format!("{branch} ●{n}")),
+                _ => parts.push(branch.clone()),
+            }
+        }
+        parts.join(" · ")
+    }
+
+    /// Whether the last command failed, for the sidebar's red dot.
+    pub fn last_failed(&self) -> bool {
+        self.session.last_finished().is_some_and(Block::failed)
+    }
+
+    /// Asks git, off the main thread, how many files changed in this idle
+    /// pane's repository: again after each command, a new folder, or a while.
+    pub fn refresh_git(&mut self, sender: &Sender<Msg>, now: Instant) {
+        if self.session.branch.is_none() || self.session.active().is_some() {
+            return;
+        }
+        let cwd = self.session.cwd.clone();
+        let last = self.session.last_finished().map(|block| block.id);
+        let fresh = |(dir, block, at): &(String, Option<u64>, Instant)| {
+            *dir == cwd && *block == last && now.saturating_duration_since(*at) < GIT_RECHECK
+        };
+        if self.git_asked.as_ref().is_some_and(fresh) {
+            return;
+        }
+        self.git_asked = Some((cwd.clone(), last, now));
+        let (id, sender, path) = (self.id, sender.clone(), self.session.path.clone());
+        std::thread::spawn(move || {
+            let mut git = std::process::Command::new("git");
+            git.args(["-C", &cwd, "status", "--porcelain", "--untracked-files=normal"]);
+            if let Some(path) = path {
+                git.env("PATH", path);
+            }
+            let Ok(output) = git.stderr(std::process::Stdio::null()).output() else { return };
+            if output.status.success() {
+                let changed = output.stdout.split(|&b| b == b'\n').filter(|line| !line.is_empty()).count();
+                let _ = sender.send(Msg::Git(id, cwd, changed));
+            }
+        });
+    }
+
     /// Follows what's typed to an agent, to know its prompt when it keeps
     /// no records we read. Answers to its questions aren't prompts.
     fn track_typing(&mut self, text: &str) {
@@ -778,7 +857,7 @@ impl Pane {
             }
         }
         if recent.is_empty() {
-            return ui::short_path(&self.session.cwd);
+            return folder_name(&self.session.cwd);
         }
         format!("{} · {}", folder_name(&self.session.cwd), recent.join(", "))
     }
@@ -2449,6 +2528,16 @@ fn command_gist(command: &str) -> Option<String> {
 }
 
 /// The last part of a path, `~` at home.
+/// How long ago, to the minute: "now", "3m", "2h", "5d".
+fn ago(d: Duration) -> String {
+    match d.as_secs() {
+        0..60 => "now".to_owned(),
+        s @ 60..3600 => format!("{}m", s / 60),
+        s @ 3600..86400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86400),
+    }
+}
+
 fn folder_name(path: &str) -> String {
     let short = ui::short_path(path);
     match short.trim_end_matches('/').rsplit('/').next() {
@@ -2459,7 +2548,18 @@ fn folder_name(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_gist, command_rows};
+    use std::time::Duration;
+
+    use super::{ago, command_gist, command_rows};
+
+    #[test]
+    fn ago_rounds_to_the_minute() {
+        let ago = |s| ago(Duration::from_secs(s));
+        assert_eq!(ago(14), "now");
+        assert_eq!(ago(190), "3m");
+        assert_eq!(ago(7300), "2h");
+        assert_eq!(ago(3 * 86400), "3d");
+    }
 
     #[test]
     fn command_gist_keeps_program_and_first_argument() {
