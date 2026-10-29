@@ -1,7 +1,7 @@
 name			temino
 version			@VERSION@-@REVISION@
 architecture		@ARCH@
-summary			"A modern GPU-accelerated terminal for Haiku"
+summary			"An ADHD-friendly, GPU-accelerated modern terminal, designed for the AI age"
 description		"Temino is a modern terminal in the style of Warp: every command \
 and its output is a block you can select and copy, commands are typed in an \
 editor with syntax colors, history, autosuggestions and Tab completion, and \
