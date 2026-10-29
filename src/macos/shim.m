@@ -514,6 +514,14 @@ round_corners(NSWindow* window)
 	layer.cornerRadius = radius;
 	layer.cornerCurve = kCACornerCurveContinuous;
 	layer.masksToBounds = radius > 0;
+	// The frame view behind it draws the window's hairline border, square
+	// unless it's rounded too; the shadow follows once it's redone.
+	NSView* frame = window.contentView.superview;
+	frame.wantsLayer = YES;
+	frame.layer.cornerRadius = radius;
+	frame.layer.cornerCurve = kCACornerCurveContinuous;
+	frame.layer.masksToBounds = radius > 0;
+	[window invalidateShadow];
 }
 
 static void
@@ -522,9 +530,11 @@ place_traffic_lights(NSWindow* window)
 	NSButton* close = [window standardWindowButton:NSWindowCloseButton];
 	NSView* bar = close.superview;
 	NSView* container = bar.superview;
-	if (container == nil || sTitlebarHeight <= 0
+	static bool placing = false;
+	if (container == nil || sTitlebarHeight <= 0 || placing
 		|| (window.styleMask & NSWindowStyleMaskFullScreen) != 0)
 		return;
+	placing = true;
 	NSRect frame = container.frame;
 	frame.size.height = sTitlebarHeight;
 	frame.origin.y = NSHeight(window.frame) - sTitlebarHeight;
@@ -538,6 +548,7 @@ place_traffic_lights(NSWindow* window)
 		place.origin.y = round((sTitlebarHeight - NSHeight(place)) / 2);
 		[button setFrameOrigin:place.origin];
 	}
+	placing = false;
 }
 
 
@@ -562,6 +573,14 @@ temino_titlebar(void* view_handle, double height)
 				round_corners(note.object);
 			}];
 		}
+		// AppKit also lays the bar out on its own, at its standard height,
+		// with no window notification; its frame changing gives that away.
+		NSView* container = [window standardWindowButton:NSWindowCloseButton].superview.superview;
+		container.postsFrameChangedNotifications = YES;
+		[center addObserverForName:NSViewFrameDidChangeNotification object:container queue:nil
+			usingBlock:^(NSNotification* note) {
+				place_traffic_lights(((NSView*)note.object).window);
+			}];
 	}
 }
 
