@@ -481,6 +481,10 @@ pub struct App {
     update_card: Rect,
     /// Quitting to start the installed update.
     relaunch: bool,
+    /// Whether this window keeps the tabs (and their output) for the next
+    /// launch, and checks for updates: the first one does, and when it
+    /// closes the oldest left takes over.
+    primary: bool,
     /// `TEMINO_RECAP_TEST=<seconds>`: show the focused pane's recap this
     /// long after launch, as Command+I would, for screenshots.
     recap_test: Option<Instant>,
@@ -489,8 +493,15 @@ pub struct App {
     open_test: Option<(Instant, String)>,
 }
 
-pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32) {
-    let mut app = match App::new(sender, width, height) {
+/// How a window starts: with the tabs the last launch left (the first
+/// window), or with one new tab in this directory (another window).
+pub enum Start {
+    Restore,
+    Fresh(Option<String>),
+}
+
+pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32, start: Start) {
+    let mut app = match App::new(sender, width, height, start) {
         Ok(app) => app,
         Err(error) => {
             crate::fatal(&error);
@@ -644,7 +655,7 @@ fn load_opacity() -> usize {
 }
 
 impl App {
-    fn new(sender: Sender<Msg>, width: u32, height: u32) -> Result<App, String> {
+    fn new(sender: Sender<Msg>, width: u32, height: u32, start: Start) -> Result<App, String> {
         let gpu = Gpu::new()?;
         let mut text = TextSystem::new(BASE_FONT_SIZE);
         text.ligatures = crate::setting("ligatures").as_deref() != Some("off");
@@ -747,6 +758,7 @@ impl App {
                 .and_then(|seconds| seconds.parse::<f32>().ok())
                 .map(|seconds| Instant::now() + Duration::from_secs_f32(seconds)),
             relaunch: false,
+            primary: matches!(start, Start::Restore),
         };
         app.apply_blur();
         app.bindings.refresh();
@@ -755,8 +767,13 @@ impl App {
             crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(DEFAULT_FONT_SIZE / BASE_FONT_SIZE),
             false,
         );
-        app.restore_tabs()?;
-        crate::update::check(app.ctx.sender.clone(), false);
+        match start {
+            Start::Restore => app.restore_tabs()?,
+            Start::Fresh(cwd) => app.new_tab_in(cwd)?,
+        }
+        if app.primary {
+            crate::update::check(app.ctx.sender.clone(), false);
+        }
         crate::trace("app: shell started");
         Ok(app)
     }
@@ -791,7 +808,12 @@ impl App {
     }
 
     fn new_tab(&mut self) -> Result<(), String> {
-        let id = self.make_pane()?;
+        self.new_tab_in(None)
+    }
+
+    /// A new tab in `cwd`, or else the focused pane's directory.
+    fn new_tab_in(&mut self, cwd: Option<String>) -> Result<(), String> {
+        let id = self.make_pane_in(cwd)?;
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -865,6 +887,9 @@ impl App {
 
     /// Each pane's finished blocks, for `restore_tabs` to bring back.
     fn save_sessions(&mut self) {
+        if !self.primary {
+            return;
+        }
         let dir = sessions_dir();
         let _ = std::fs::remove_dir_all(&dir);
         if crate::setting("restore_output").as_deref() == Some("off") {
@@ -912,6 +937,9 @@ impl App {
 
     /// Writes the tabs down for `restore_tabs`.
     fn save_tabs(&self) {
+        if !self.primary {
+            return;
+        }
         let lines: String = self
             .tabs
             .iter()
@@ -1099,7 +1127,7 @@ impl App {
                 self.save_tabs();
             }
             if self.tabs.is_empty() {
-                self.quit();
+                self.close_window();
                 return;
             }
             self.switch_tab(if tab_index < self.active || self.active >= self.tabs.len() {
@@ -1518,15 +1546,32 @@ impl App {
         }
     }
 
+    /// Quits Temino: this window and every other one.
     fn quit(&mut self) {
+        self.shut_down();
+        update::finish(self.relaunch);
+        platform::quit();
+    }
+
+    /// Closes this window; the last one quits.
+    fn close_window(&mut self) {
+        if platform::window_count() <= 1 {
+            self.quit();
+            return;
+        }
+        self.shut_down();
+        platform::close_window();
+    }
+
+    /// Done with this window: its tabs saved (if it keeps them) and its
+    /// shells hung up; the loop then ends.
+    fn shut_down(&mut self) {
         self.save_tabs();
         self.save_sessions();
         for pane in &mut self.panes {
             pane.hangup();
         }
-        update::finish(self.relaunch);
         self.quitting = true;
-        platform::quit();
     }
 
     // ---- events -------------------------------------------------------
@@ -1564,7 +1609,20 @@ impl App {
             }
             UiEvent::Close => {
                 if !self.unsaved_blocks_quit() {
-                    self.quit()
+                    self.close_window()
+                }
+            }
+            UiEvent::Quit => {
+                // Another window quits the app; one with unsaved work stays.
+                if !self.unsaved_blocks_quit() {
+                    self.shut_down();
+                    platform::close_window();
+                }
+            }
+            UiEvent::Primary => {
+                if !self.quitting {
+                    self.primary = true;
+                    self.save_tabs();
                 }
             }
             UiEvent::Text(text) => {
@@ -1887,6 +1945,12 @@ impl App {
                     if let Err(error) = self.new_tab() {
                         self.ctx.show_toast(&error);
                     }
+                    true
+                }
+                (_, Some('n')) => {
+                    // Another window, its first tab where you are.
+                    let cwd = self.focused_id().and_then(|id| self.panes.iter().find(|p| p.id == id));
+                    platform::new_window(cwd.map(|pane| pane.session.cwd.clone()));
                     true
                 }
                 (_, Some('i')) if key.shift() => {

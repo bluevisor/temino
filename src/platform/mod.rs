@@ -134,6 +134,14 @@ pub enum UiEvent {
     #[allow(dead_code)]
     Modifiers(u32),
     Close,
+    /// Another window is quitting the app: finish and close this one too
+    /// (desktop only).
+    #[allow(dead_code)]
+    Quit,
+    /// This window now keeps the tabs for the next launch: the one that did
+    /// closed (desktop only).
+    #[allow(dead_code)]
+    Primary,
     /// Settings ▸ Background picked this entry of `theme::BACKGROUNDS`
     /// (Haiku's menu; elsewhere the Settings tab sets it).
     #[allow(dead_code)]
