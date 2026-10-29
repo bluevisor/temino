@@ -50,11 +50,9 @@ const AGENT_SCAN: Duration = Duration::from_millis(300);
 const AGENT_SCAN_LINES: usize = 10;
 const AGENT_QUIET: Duration = Duration::from_millis(1500);
 const AGENT_ECHO: Duration = Duration::from_millis(400);
-/// How long a recap stays up, at most while its summary is on the way,
-/// and how long it takes to fade.
+/// How long a recap stays up, and at most while its summary is on the way.
 const RECAP_SHOWN: Duration = Duration::from_secs(6);
 const RECAP_WAIT: Duration = Duration::from_secs(20);
-const RECAP_FADE: Duration = Duration::from_millis(400);
 const RECAP_SYSTEM: &str = "Someone is coming back to a terminal tab after a break. From what ran there, \
 say in one short sentence (at most 20 words) what they were doing and where it stands. \
 Plain text, no preamble, no quotes.";
@@ -88,6 +86,9 @@ pub struct Ctx {
     /// An input method is composing at the cursor: the prompt's hint stays
     /// out of its way.
     pub composing: bool,
+    /// Agents get a status header (Settings ▸ Tabs), and their recap
+    /// shows in it.
+    pub headers: bool,
 }
 
 impl Ctx {
@@ -251,6 +252,16 @@ impl Recap {
         self.summary.lock().unwrap().clone()
     }
 
+    /// The recap in one line: the summary once the model wrote it, else
+    /// the facts.
+    fn line(&self) -> String {
+        match self.summary() {
+            Some(Some(summary)) => format!("✦ {summary}"),
+            None => format!("{} · ✦ Summarizing…", self.facts),
+            Some(None) => self.facts.clone(),
+        }
+    }
+
     /// When it goes away: a while after it, or its summary, appeared.
     fn until(&self) -> Instant {
         match (self.summary_at, llm::enabled()) {
@@ -282,6 +293,9 @@ pub struct AgentInfo {
     pub turn: Option<Duration>,
     /// How long the agent has been running.
     pub uptime: Duration,
+    /// The recap, while one is up: the header shows it in place of the
+    /// prompt.
+    pub recap: Option<String>,
 }
 
 impl Pane {
@@ -516,6 +530,7 @@ impl Pane {
             name: report.name,
             turn: self.turn.map(|start| now.duration_since(start)).or(self.last_turn),
             uptime: now.duration_since(started),
+            recap: self.recap.as_ref().map(Recap::line),
         })
     }
 
@@ -628,42 +643,6 @@ impl Pane {
         // Keep the end: it's the most recent.
         let skip = context.chars().count().saturating_sub(RECAP_CHARS);
         context.chars().skip(skip).collect()
-    }
-
-    /// The recap card, over the bottom of the output (the top of a
-    /// full-screen program), fading out at the end.
-    fn draw_recap(&mut self, scene: &mut Scene, ctx: &mut Ctx, alt: bool) {
-        let Some(recap) = &self.recap else { return };
-        let now = Instant::now();
-        let fade = (recap.until().saturating_duration_since(now).as_secs_f32() / RECAP_FADE.as_secs_f32()).min(1.0);
-        let appear = (now.duration_since(recap.shown).as_secs_f32() / 0.18).min(1.0);
-        let alpha = fade.min(appear);
-        let theme = &ctx.theme;
-        let text = &mut ctx.text;
-        let width = (self.rect.w - 2.0 * PAD_X).max(0.0);
-        let (font, line) = (12.5, 20.0);
-        let height = 2.0 * line + 14.0;
-        let y = if alt { ALT_PAD_Y } else { (self.layout.list.h - height - 8.0).max(4.0) };
-        let card = Rect::new(PAD_X, y, width, height);
-        scene.set_layer(LAYER_OVERLAY);
-        scene.shadow(card, Color::hex(0x000000).alpha(0.45 * alpha), 8.0, 8.0);
-        // The theme's raised surface is a light wash over what's under it:
-        // put the page color down first so the output doesn't show through.
-        scene.quad(Quad::new(card, theme.background.alpha(alpha)).radius(8.0));
-        scene.quad(Quad::new(card, theme.raised.alpha(alpha)).radius(8.0).border(1.0, theme.divider.alpha(alpha)));
-        let ascent = text.ui_ascent(font);
-        let room = width - 28.0;
-        let first = card.y + 7.0 + (line + ascent * 0.72) / 2.0;
-        let facts = text.elide(&recap.facts, UI, font, room);
-        text.draw_text(scene, &facts, card.x + 14.0, first.round(), UI, font, theme.text.alpha(alpha));
-        let (summary, ink) = match recap.summary() {
-            None => ("✦ Summarizing…".to_owned(), theme.text_faint),
-            Some(Some(summary)) => (format!("✦ {summary}"), theme.text_dim),
-            Some(None) => ("✦ No summary: the model server didn't answer".to_owned(), theme.text_faint),
-        };
-        let summary = text.elide(&summary, UI, font, room);
-        text.draw_text(scene, &summary, card.x + 14.0, (first + line).round(), UI, font, ink.alpha(alpha));
-        scene.set_layer(LAYER_CONTENT);
     }
 
     /// One line on what the pane is doing: the running command, or the
@@ -798,8 +777,6 @@ impl Pane {
             if now >= recap.until() {
                 self.recap = None;
                 dirty = true;
-            } else if now + RECAP_FADE >= recap.until() {
-                dirty = true;
             }
         }
         if self.reflow_at.is_some_and(|at| now >= at) {
@@ -847,13 +824,11 @@ impl Pane {
             times.push(Some(Instant::now() + Duration::from_millis(100)));
         }
         if let Some(recap) = &self.recap {
-            // Fading, or waiting on its summary.
+            // Going away, or waiting on its summary.
             let until = recap.until();
-            let now = Instant::now();
             times.push(Some(match recap.summary_at {
-                None => (now + Duration::from_millis(250)).min(until),
-                Some(_) if now + RECAP_FADE >= until => now + Duration::from_millis(33),
-                Some(_) => until - RECAP_FADE,
+                None => (Instant::now() + Duration::from_millis(250)).min(until),
+                Some(_) => until,
             }));
         }
         if (self.scroll - self.scroll_target).abs() > 0.0 {
@@ -2011,7 +1986,6 @@ impl Pane {
             self.draw_main(scene, ctx, focused);
         }
         self.draw_link(scene, ctx);
-        self.draw_recap(scene, ctx, alt);
         self.draw_find(scene, ctx);
         if self.bell.is_some() {
             scene.set_layer(LAYER_OVERLAY);
@@ -2437,6 +2411,9 @@ impl Pane {
         let blink = ctx.blink_on() && focused;
         let phase = self.session.phase;
         let hint = if self.completion.is_none() { self.suggestion(ctx) } else { None };
+        // Coming back to the pane, its recap takes the hint's place (an
+        // agent's goes in its header instead).
+        let recap = self.recap.as_ref().filter(|_| !(ctx.headers && self.agent_now.is_some())).map(Recap::line);
         let Ctx { text, theme, commands, user_host, .. } = ctx;
         let Pane { session, editor, layout, completion, ai, .. } = self;
         let ai = *ai && phase == Phase::Ready;
@@ -2476,7 +2453,8 @@ impl Pane {
 
         let status = |scene: &mut Scene, text: &mut TextSystem, message: &str, color: Color| {
             let baseline = editor_y + text.cell.baseline;
-            text.draw_text(scene, message, text_x, baseline, UI, 13.0, color);
+            let message = text.elide(message, UI, 13.0, width - text_x - PAD_X);
+            text.draw_text(scene, &message, text_x, baseline, UI, 13.0, color);
         };
         match phase {
             Phase::Boot => status(scene, text, "Starting bash…", theme.text_faint),
@@ -2489,13 +2467,16 @@ impl Pane {
                     theme.text_dim,
                 )
             }
-            Phase::Running => {
-                let message = format!(
-                    "Running · keystrokes go to the program · Ctrl+C interrupts · {}+C copies",
-                    platform::COMMAND_NAME
-                );
-                status(scene, text, &message, theme.text_faint)
-            }
+            Phase::Running => match &recap {
+                Some(recap) => status(scene, text, recap, theme.text_dim),
+                None => {
+                    let message = format!(
+                        "Running · keystrokes go to the program · Ctrl+C interrupts · {}+C copies",
+                        platform::COMMAND_NAME
+                    );
+                    status(scene, text, &message, theme.text_faint)
+                }
+            },
             Phase::Prompt | Phase::Submitted => {}
             Phase::Ready | Phase::Continuation => {
                 let first_line = editor.position(editor.cursor).0.saturating_sub(MAX_EDITOR_LINES - 1);
@@ -2507,7 +2488,10 @@ impl Pane {
                     } else {
                         "Type a command · Tab here for AI · Tab completes · ↑ history"
                     };
-                    status(scene, text, hint, theme.text_faint);
+                    match &recap {
+                        Some(recap) if phase == Phase::Ready && !ai => status(scene, text, recap, theme.text_dim),
+                        _ => status(scene, text, hint, theme.text_faint),
+                    }
                 }
                 // Selection.
                 if let Some((a, b)) = editor.selection() {

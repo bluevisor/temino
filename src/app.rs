@@ -669,6 +669,7 @@ impl App {
             toast: None,
             shell,
             composing: false,
+            headers: crate::setting("headers").as_deref() != Some("off"),
         };
         let mut app = App {
             gpu,
@@ -2092,6 +2093,7 @@ impl App {
             }
             Action::Headers(on) => {
                 self.headers = on;
+                self.ctx.headers = on;
                 crate::save_setting("headers", if on { "on" } else { "off" });
                 self.relayout();
             }
@@ -3956,10 +3958,16 @@ fn draw_agent_header(
         text.draw_text(scene, chip, right - w, baseline, UI, 11.0, theme.text_faint);
         right -= w + 14.0;
     }
-    if let Some(prompt) = &info.prompt {
+    // Coming back to the pane, its recap stands in for the prompt.
+    let line = match (&info.recap, &info.prompt) {
+        (Some(recap), _) => Some((recap.clone(), theme.text)),
+        (None, Some(prompt)) => Some((format!("› {prompt}"), theme.text_dim)),
+        (None, None) => None,
+    };
+    if let Some((line, ink)) = line {
         let room = right - x - 14.0;
-        let shown = text.elide(&format!("› {prompt}"), UI, font, room);
-        text.draw_text(scene, &shown, x, baseline, UI, font, theme.text_dim);
+        let shown = text.elide(&line, UI, font, room);
+        text.draw_text(scene, &shown, x, baseline, UI, font, ink);
     }
 }
 
