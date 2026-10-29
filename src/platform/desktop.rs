@@ -274,6 +274,7 @@ mod menu {
         ("Shell", Some("New Tab"), "t", 0, None, 't'),
         ("Shell", Some("Split Right"), "d", 0, None, 'd'),
         ("Shell", Some("Split Down"), "e", 0, None, 'e'),
+        ("Shell", Some("Split Up"), "e", SHIFT, None, 'e'),
         ("Shell", None, "", 0, None, '\0'),
         ("Shell", Some("Close Pane"), "w", 0, None, 'w'),
         ("Edit", Some("Copy"), "c", 0, None, 'c'),
@@ -789,7 +790,10 @@ impl ApplicationHandler<Request> for Handler {
             }
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Focused(focused) => self.send(UiEvent::Focus(focused)),
-            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+                self.send(UiEvent::Modifiers(self.mods()));
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
                     self.key(&event);

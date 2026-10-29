@@ -107,19 +107,23 @@ impl Node {
     }
 
     /// Replaces leaf `id` with a split of it and `new`.
-    fn split(&mut self, id: u64, new: u64, axis: Axis) -> bool {
+    /// Splits leaf `id`, `new` after it (right or below), or before it.
+    fn split(&mut self, id: u64, new: u64, axis: Axis, before: bool) -> bool {
         match self {
             Node::Leaf(leaf) if *leaf == id => {
+                let (first, second) = if before { (new, id) } else { (id, new) };
                 *self = Node::Split {
                     axis,
                     ratio: 0.5,
-                    first: Box::new(Node::Leaf(id)),
-                    second: Box::new(Node::Leaf(new)),
+                    first: Box::new(Node::Leaf(first)),
+                    second: Box::new(Node::Leaf(second)),
                 };
                 true
             }
             Node::Leaf(_) => false,
-            Node::Split { first, second, .. } => first.split(id, new, axis) || second.split(id, new, axis),
+            Node::Split { first, second, .. } => {
+                first.split(id, new, axis, before) || second.split(id, new, axis, before)
+            }
         }
     }
 
@@ -367,6 +371,8 @@ pub struct App {
     /// When the pointer came onto the hovered tab, for its path's label.
     hover_at: Instant,
     mouse: (f32, f32),
+    /// The modifier keys held, as last reported.
+    held: u32,
     /// What an input method is composing, drawn at the cursor.
     preedit: String,
     /// The caret last reported to the platform, in window pixels.
@@ -628,6 +634,7 @@ impl App {
             hover_tab: None,
             hover_at: Instant::now(),
             mouse: (0.0, 0.0),
+            held: 0,
             preedit: String::new(),
             caret_sent: None,
             installing: None,
@@ -833,12 +840,12 @@ impl App {
         }
     }
 
-    fn split(&mut self, axis: Axis) {
+    fn split(&mut self, axis: Axis, before: bool) {
         let Some(focus) = self.focused_id().filter(|&id| id != SETTINGS) else { return };
         match self.make_pane() {
             Ok(id) => {
                 let tab = &mut self.tabs[self.active];
-                tab.root.split(focus, id, axis);
+                tab.root.split(focus, id, axis, before);
                 tab.zoomed = false;
                 self.set_focus(id);
                 self.save_tabs();
@@ -1279,6 +1286,7 @@ impl App {
                 self.scale = scale;
                 self.set_zoom(self.zoom, false);
             }
+            UiEvent::Modifiers(mods) => self.modifiers_changed(mods),
             UiEvent::Focus(focused) => {
                 let now = Instant::now();
                 self.focused = focused;
@@ -1632,11 +1640,11 @@ impl App {
                     true
                 }
                 (_, Some('d')) => {
-                    self.split(Axis::Row);
+                    self.split(Axis::Row, false);
                     true
                 }
                 (_, Some('e')) => {
-                    self.split(Axis::Column);
+                    self.split(Axis::Column, key.shift());
                     true
                 }
                 (_, Some('w')) => {
@@ -1999,8 +2007,8 @@ impl App {
                     self.close_tab(index);
                 }
             }
-            MenuAction::SplitRight => self.split(Axis::Row),
-            MenuAction::SplitDown => self.split(Axis::Column),
+            MenuAction::SplitRight => self.split(Axis::Row, false),
+            MenuAction::SplitDown => self.split(Axis::Column, false),
             MenuAction::ClosePane => {
                 if let Some(id) = self.focused_id() {
                     self.close_pane(id);
@@ -2149,6 +2157,29 @@ impl App {
         if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
             pane.mouse_down(ctx, x - rect.x, y - rect.y, pressed, clicks, mods);
         }
+    }
+
+    /// Option pressed while dragging a divider turns its split, side by side
+    /// to stacked and back, the way Option turns a guide being dragged in
+    /// Photoshop; the divider then follows the pointer the new way.
+    fn modifiers_changed(&mut self, mods: u32) {
+        let pressed = mods & platform::mods::OPTION != 0 && self.held & platform::mods::OPTION == 0;
+        self.held = mods;
+        if !pressed {
+            return;
+        }
+        let Pointer::Divider(divider) = &mut self.pointer else { return };
+        let axis = if divider.axis == Axis::Row { Axis::Column } else { Axis::Row };
+        divider.axis = axis;
+        let path = divider.path.clone();
+        if let Some(Node::Split { axis: a, .. }) = self.tabs[self.active].root.at_path(&path) {
+            *a = axis;
+        }
+        self.set_cursor(if axis == Axis::Row { Cursor::ResizeColumn } else { Cursor::ResizeRow });
+        let (x, y) = self.mouse;
+        self.mouse_moved(x, y, buttons::PRIMARY);
+        self.relayout();
+        self.save_tabs();
     }
 
     fn mouse_moved(&mut self, x: f32, y: f32, pressed: i32) {

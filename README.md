@@ -85,7 +85,8 @@ macOS, Ctrl+Shift (or Super) on Linux.
 | Tab, Ctrl+Shift+Space, Ctrl+R, ↑ ↓ | complete, list every command, search history, browse history |
 | → or End at the end of the line | accept the suggestion (Ctrl+→ one word) |
 | Cmd+T | new tab |
-| Cmd+D / Cmd+E | split the pane right / down |
+| Cmd+D / Cmd+E / Cmd+Shift+E | split the pane right / down / up |
+| Option while dragging a divider | turn the split: side by side ↔ stacked |
 | Cmd+W, Cmd+Q | close the pane (its tab with its last pane), quit |
 | Cmd+[ / Cmd+], Cmd+Option+arrows | previous / next pane, the pane in that direction |
 | Cmd+\` / Cmd+Shift+\` | the agent waiting on you longest / most recently; with none, the pane you were in before |

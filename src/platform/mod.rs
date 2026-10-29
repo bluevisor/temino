@@ -130,6 +130,9 @@ pub enum UiEvent {
         scale: f32,
     },
     Focus(bool),
+    /// The modifier keys held now, when that changes (desktop only).
+    #[allow(dead_code)]
+    Modifiers(u32),
     Close,
     /// Settings ▸ Background picked this entry of `theme::BACKGROUNDS`
     /// (Haiku's menu; elsewhere the Settings tab sets it).
