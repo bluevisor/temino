@@ -58,20 +58,60 @@ const LAUNCHERS: [&str; 10] = ["env", "npx", "bunx", "pnpx", "exec", "command", 
 /// Whether `command` runs an agent: `claude`, `npx @openai/codex`,
 /// `FOO=1 gemini -p ...`.
 pub fn is_agent_command(command: &str) -> bool {
+    agent_program(command).is_some()
+}
+
+/// The agent `command` runs, as its entry in AGENTS (`kiro` for both of
+/// Kiro's names).
+pub fn agent_program(command: &str) -> Option<&'static str> {
     let mut words = command.split_whitespace().filter(|word| !word.starts_with('-'));
     let program = loop {
         match words.next() {
             Some(word) if word.contains('=') || LAUNCHERS.contains(&word) || word == "dlx" => continue,
             Some("pnpm" | "yarn" | "bun" | "npm") => continue,
             Some(word) => break word,
-            None => return false,
+            None => return None,
         }
     };
     let name = program.rsplit('/').next().unwrap_or(program);
     // `@anthropic-ai/claude-code@latest` → `claude-code`.
     let name = name.split('@').find(|part| !part.is_empty()).unwrap_or(name);
     let name = name.strip_suffix("-cli").unwrap_or(name);
-    AGENTS.contains(&name) || name == "kiro"
+    if name == "kiro" {
+        return Some("kiro-cli");
+    }
+    AGENTS.iter().copied().find(|&agent| agent == name)
+}
+
+/// The agent a window title names, for agents run under an alias.
+pub fn title_program(title: &str) -> Option<&'static str> {
+    if title.trim_start().starts_with('✳') || title.contains("Claude Code") {
+        Some("claude")
+    } else if title.contains("Gemini CLI") {
+        Some("gemini")
+    } else {
+        None
+    }
+}
+
+/// How an agent from AGENTS goes by: its name and its brand color.
+pub fn agent_brand(program: &str) -> (&'static str, u32) {
+    match program {
+        "claude" | "claude-code" => ("Claude Code", 0xD97757),
+        "codex" => ("Codex", 0x10A37F),
+        "gemini" => ("Gemini CLI", 0x4796E3),
+        "aider" => ("Aider", 0x14B014),
+        "opencode" => ("opencode", 0x9A9A9A),
+        "cursor-agent" => ("Cursor Agent", 0x9A9A9A),
+        "amp" => ("Amp", 0xF34E3F),
+        "goose" => ("Goose", 0x9A9A9A),
+        "crush" => ("Crush", 0xFF60FF),
+        "qwen" => ("Qwen Code", 0x615CED),
+        "copilot" => ("Copilot", 0x8957E5),
+        "droid" => ("Droid", 0xEE6018),
+        "kiro-cli" => ("Kiro", 0x9046FF),
+        _ => ("Agent", 0x9A9A9A),
+    }
 }
 
 /// What an agent's window title says, if it says anything we know.
@@ -91,7 +131,7 @@ pub fn title_state(title: &str) -> Option<AgentState> {
 /// Whether a title looks like an agent's own, for agents run under an
 /// alias we can't recognize by name.
 pub fn is_agent_title(title: &str) -> bool {
-    title.trim_start().starts_with('✳') || title.contains("Claude Code") || title.contains("Gemini CLI")
+    title_program(title).is_some()
 }
 
 /// What the bottom of an agent's screen says: a working line with an
@@ -129,8 +169,13 @@ pub struct Report {
     pub prompt: Option<String>,
     /// Subagents it started that haven't reported back.
     pub subagents: usize,
+    /// Prompts you sent that wait for the current turn to end.
+    pub queued: usize,
     /// The session's name.
     pub name: Option<String>,
+    /// Whether the session says it's working: true from the moment a turn
+    /// starts until it ends, however quiet the screen and title are.
+    pub busy: bool,
 }
 
 /// Reads Claude Code's records for the agent in a pane, once a second, off
@@ -175,7 +220,13 @@ fn watch(shared: Arc<Mutex<Watch>>) {
                 transcript = Transcript { path, ..Transcript::default() };
             }
             transcript.read_new();
-            Report { prompt: transcript.prompt.clone(), subagents: transcript.subagents.len(), name: session.name }
+            Report {
+                prompt: transcript.prompt.clone(),
+                subagents: transcript.subagents.len(),
+                queued: transcript.queued(),
+                name: session.name,
+                busy: session.busy,
+            }
         });
         shared.lock().unwrap().report = report;
         std::thread::sleep(Duration::from_secs(1));
@@ -199,6 +250,7 @@ struct ClaudeSession {
     id: String,
     cwd: String,
     name: Option<String>,
+    busy: bool,
 }
 
 /// The Claude Code session run by process group `group`. Claude Code
@@ -212,6 +264,7 @@ fn claude_session(group: i32) -> Option<ClaudeSession> {
             id: record.str_at("sessionId")?.to_owned(),
             cwd: record.str_at("cwd")?.to_owned(),
             name: record.str_at("name").filter(|name| !name.is_empty()).map(str::to_owned),
+            busy: record.str_at("status") == Some("busy"),
         })
     };
     read(group).or_else(|| {
@@ -234,9 +287,16 @@ struct Transcript {
     /// Subagent tool calls not yet answered, and whether each runs in the
     /// background (answered at once, reporting back later).
     subagents: VecDeque<(String, bool)>,
+    /// Messages waiting for the agent: your prompts and its own notices.
+    queue: VecDeque<String>,
 }
 
 impl Transcript {
+    /// Your prompts waiting in the queue.
+    fn queued(&self) -> usize {
+        self.queue.iter().filter(|text| prompt_text(text).is_some()).count()
+    }
+
     fn read_new(&mut self) {
         let Ok(mut file) = std::fs::File::open(&self.path) else { return };
         let mut bytes = Vec::new();
@@ -251,6 +311,24 @@ impl Transcript {
     }
 
     fn line(&mut self, line: &str) {
+        // What you send while the agent works waits in a queue until the
+        // turn ends, or is folded into the turn it was sent during.
+        if line.starts_with("{\"type\":\"queue-operation\"") {
+            let Some(entry) = json::parse(line) else { return };
+            let content = entry.str_at("content").unwrap_or_default();
+            match entry.str_at("operation") {
+                Some("enqueue") => self.queue.push_back(content.to_owned()),
+                Some("dequeue") => drop(self.queue.pop_front()),
+                Some("remove") => {
+                    if let Some(index) = self.queue.iter().position(|queued| queued == content) {
+                        self.queue.remove(index);
+                    }
+                }
+                Some("popAll") => self.queue.clear(),
+                _ => {}
+            }
+            return;
+        }
         // Most of a transcript is tool output; look closer only at turns.
         if !line.contains("\"type\":\"user\"") && !line.contains("\"type\":\"assistant\"") {
             return;
@@ -359,6 +437,9 @@ mod tests {
         assert!(!is_agent_command("ls -la"));
         assert!(!is_agent_command("vim claude.md"));
         assert!(!is_agent_command(""));
+        assert_eq!(agent_program("npx @anthropic-ai/claude-code@latest"), Some("claude-code"));
+        assert_eq!(agent_program("kiro-cli chat"), Some("kiro-cli"));
+        assert_eq!(title_program("✳ Fixing the build"), Some("claude"));
     }
 
     #[test]
@@ -391,6 +472,18 @@ mod tests {
         assert!(transcript.subagents.is_empty());
         transcript.line(r#"{"type":"user","message":{"content":"<command-name>/review</command-name><command-args>12</command-args>"}}"#);
         assert_eq!(transcript.prompt.as_deref(), Some("/review 12"));
+        for line in [
+            r#"{"type":"queue-operation","operation":"enqueue","content":"and the tests"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>x</task-notification>"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","content":"then push"}"#,
+        ] {
+            transcript.line(line);
+        }
+        assert_eq!(transcript.prompt.as_deref(), Some("/review 12"));
+        assert_eq!(transcript.queued(), 2);
+        transcript.line(r#"{"type":"queue-operation","operation":"dequeue"}"#);
+        transcript.line(r#"{"type":"queue-operation","operation":"remove","content":"then push"}"#);
+        assert_eq!(transcript.queued(), 0);
         assert_eq!(project_dir("/Users/a/my.app"), "-Users-a-my-app");
     }
 }

@@ -5,7 +5,7 @@
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use crate::agent::AgentState;
+use crate::agent::{self, AgentState};
 use crate::complete::Commands;
 use crate::editor::History;
 use crate::gpu::Gpu;
@@ -2845,9 +2845,37 @@ fn agent_summary(info: &AgentInfo) -> String {
     }
 }
 
-/// The bar over an agent's pane. Left: a dot and what it's doing, with the
-/// turn's clock; then your last prompt. Right: its subagents, its session's
-/// name and how long it has run.
+/// An agent's mark, 14 points square, its left edge at `x` and centered on
+/// `cy`; returns its right edge. Claude Code's is its spark, drawn as rays
+/// of dots; the others are their initial on a badge in their color.
+fn draw_agent_icon(scene: &mut Scene, text: &mut TextSystem, program: &str, brand: Color, x: f32, cy: f32) -> f32 {
+    let size = 14.0;
+    if program.starts_with("claude") {
+        let (cx, r) = (x + size / 2.0, size / 2.0);
+        for ray in 0..8 {
+            let angle = ray as f32 * std::f32::consts::FRAC_PI_4 + 0.2;
+            let (sin, cos) = angle.sin_cos();
+            for (along, dot) in [(1.6, 2.6), (3.6, 2.4), (5.6, 2.0)] {
+                let along = along * r / 7.0;
+                let (dx, dy) = (cx + cos * along, cy + sin * along);
+                scene.quad(Quad::new(Rect::new(dx - dot / 2.0, dy - dot / 2.0, dot, dot), brand).radius(dot / 2.0));
+            }
+        }
+    } else {
+        let badge = Rect::new(x, cy - size / 2.0, size, size);
+        scene.quad(Quad::new(badge, brand).radius(4.0));
+        let initial = agent::agent_brand(program).0.chars().next().unwrap_or('?').to_uppercase().to_string();
+        let w = text.measure(&initial, UI_BOLD, 10.0);
+        let baseline = (cy + text.ui_ascent(10.0) * 0.36).round();
+        text.draw_text(scene, &initial, x + (size - w) / 2.0, baseline, UI_BOLD, 10.0, Color::hex(0xFFFFFF));
+    }
+    x + size
+}
+
+/// The bar over an agent's pane. Left: the agent's mark and name, then a
+/// dot and what it's doing, with the turn's clock; then your last prompt.
+/// Right: its subagents, the prompts queued behind this turn, its
+/// session's name and how long it has run.
 fn draw_agent_header(
     scene: &mut Scene,
     text: &mut TextSystem,
@@ -2867,7 +2895,15 @@ fn draw_agent_header(
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
-    let mut x = bar.x + 12.0;
+    let mut x = bar.x + 10.0;
+    if let Some(program) = info.program {
+        let (name, brand) = agent::agent_brand(program);
+        x = draw_agent_icon(scene, text, program, Color::hex(brand), x, cy) + 6.0;
+        text.draw_text(scene, name, x, baseline, UI_BOLD, font, theme.text);
+        x += text.measure(name, UI_BOLD, font) + 12.0;
+        scene.fill(Rect::new(x, cy - 7.0, 1.0, 14.0), theme.divider);
+        x += 12.0;
+    }
     scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), color).radius(4.0));
     x += 16.0;
     let summary = agent_summary(info);
@@ -2881,14 +2917,15 @@ fn draw_agent_header(
     // The right side, laid out from the edge in: the subagents whenever
     // they fit, the rest only while the prompt keeps some room.
     let mut right = bar.right() - 12.0;
-    if info.subagents > 0 {
-        let s = if info.subagents == 1 { "" } else { "s" };
-        let chip = format!("{} subagent{s}", info.subagents);
-        let w = text.measure(&chip, UI, 11.0);
+    let subagents = (info.subagents > 0)
+        .then(|| format!("{} subagent{}", info.subagents, if info.subagents == 1 { "" } else { "s" }));
+    let queued = (info.queued > 0).then(|| format!("{} queued", info.queued));
+    for chip in subagents.iter().chain(&queued) {
+        let w = text.measure(chip, UI, 11.0);
         if right - w - 12.0 > x {
             let pill = Rect::new(right - w - 12.0, cy - 9.0, w + 12.0, 18.0);
             scene.quad(Quad::new(pill, theme.accent.alpha(0.16)).radius(9.0));
-            text.draw_text(scene, &chip, pill.x + 6.0, baseline, UI, 11.0, theme.accent);
+            text.draw_text(scene, chip, pill.x + 6.0, baseline, UI, 11.0, theme.accent);
             right = pill.x - 12.0;
         }
     }
