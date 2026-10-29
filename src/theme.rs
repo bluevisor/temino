@@ -308,7 +308,7 @@ pub struct Palette {
 /// ANSI 0-15, from the machine's own palette where it had one. Temino's own
 /// comes first and is the default.
 type BuiltIn = (&'static str, u32, u32, u32, u32, u32, [u32; 16]);
-const BUILT_IN: [BuiltIn; 15] = [
+const BUILT_IN: [BuiltIn; 11] = [
     ("Temino", 0x0f1117, 0xd8dee9, 0x6cb6ff, 0, 0, [0; 16]),
     // Green phosphor (Monitor II), the lo-res colors for the rest.
     (
@@ -376,19 +376,6 @@ const BUILT_IN: [BuiltIn; 15] = [
             0x99ff99, 0xffaa33, 0xbbddff, 0xffaadd, 0xaaffff, 0xffffff,
         ],
     ),
-    // READY: light blue on blue, GTIA hues.
-    (
-        "Atari 800",
-        0x1a4f9a,
-        0x9ccbff,
-        0x9ccbff,
-        0x3f74c0,
-        0,
-        [
-            0x0a1f40, 0xe05050, 0x50c050, 0xd0c040, 0x6090ff, 0xc060c0, 0x50c0c0, 0xc0d8ff, 0x405880, 0xff7070,
-            0x80e080, 0xf0e060, 0x90b8ff, 0xe090e0, 0x80e0e0, 0xffffff,
-        ],
-    ),
     // Black ink on white paper, the ULA's eight colors and their brights.
     (
         "ZX Spectrum",
@@ -402,19 +389,6 @@ const BUILT_IN: [BuiltIn; 15] = [
             0x00a800, 0xa08800, 0x0000ff, 0xff00ff, 0x00a0a0, 0x000000,
         ],
     ),
-    // Mode 7 teletext: white on black and the seven pure colors.
-    (
-        "BBC Micro",
-        0x000000,
-        0xffffff,
-        0xffffff,
-        0x0000ff,
-        0x00ffff,
-        [
-            0x000000, 0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff, 0x808080, 0xff0000,
-            0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
-        ],
-    ),
     // Amber phosphor; the terminal had no colors, so they're shades of it.
     (
         "DEC VT220",
@@ -426,32 +400,6 @@ const BUILT_IN: [BuiltIn; 15] = [
         [
             0x2a1a00, 0xff7a00, 0xffc040, 0xffd060, 0xc88a00, 0xff9a40, 0xffc880, 0xffb000, 0x6a4800, 0xff9a30,
             0xffd070, 0xffe090, 0xe0a020, 0xffb870, 0xffe0b0, 0xfff0d0,
-        ],
-    ),
-    // The 3279's seven field colors, green the default.
-    (
-        "IBM 3279",
-        0x000000,
-        0x00ff00,
-        0x00ff00,
-        0x1f4f1f,
-        0x40e0d0,
-        [
-            0x000000, 0xff3030, 0x00ff00, 0xffff00, 0x5b8cff, 0xff73ff, 0x40e0d0, 0xffffff, 0x4a4a4a, 0xff6060,
-            0x60ff60, 0xffff80, 0x7aa4ff, 0xff9aff, 0x70f0e0, 0xffffff,
-        ],
-    ),
-    // OpenWindows: dark text on the OPEN LOOK cream, Sun purple.
-    (
-        "Sun SPARCstation",
-        0xf3efe2,
-        0x1a1a1a,
-        0x1a1a1a,
-        0xc8bfe0,
-        0x5a3f9e,
-        [
-            0x1a1a1a, 0xb00000, 0x007000, 0x8a5a00, 0x0000b0, 0x8a008a, 0x007070, 0x707070, 0x404040, 0xd00000,
-            0x009000, 0x6a4a00, 0x5a3f9e, 0xa000a0, 0x009090, 0x202020,
         ],
     ),
     // IRIX on an Indy: winterm's light text on Indigo Magic slate.

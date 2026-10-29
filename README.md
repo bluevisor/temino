@@ -46,10 +46,9 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
   type (lowercase ignores case), marks the matches and scrolls to them;
   Enter or ↑ goes to the older match, Shift+Enter or ↓ to the newer one.
 - **Themes from real machines.** Settings ▸ Theme steps through the screens
-  of the Apple II, Macintosh, IBM PC, Commodore 64, Amiga 500, Atari 800,
-  ZX Spectrum, BBC Micro, DEC VT220, IBM 3279, a Sun SPARCstation, an SGI
-  Indy, a NeXTstation and Windows PowerShell's console, each in its own
-  palette. Ghostty theme files dropped into the
+  of the Apple II, Macintosh, IBM PC, Commodore 64, Amiga 500, ZX Spectrum,
+  DEC VT220, an SGI Indy, a NeXTstation and Windows PowerShell's console,
+  each in its own palette. Ghostty theme files dropped into the
   `themes` folder (next to the settings) join the list.
 - **Your own keys.** Every shortcut can be rebound in the `keys` file next to
   the settings (Settings ▸ Edit Key Bindings writes one listing each action):
