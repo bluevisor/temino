@@ -245,9 +245,13 @@ impl Recap {
 
 /// What the header over an agent's pane says.
 pub struct AgentInfo {
+    /// The agent, as its entry in agent::AGENTS.
+    pub program: Option<&'static str>,
     pub state: AgentState,
     pub prompt: Option<String>,
     pub subagents: usize,
+    /// Prompts waiting for the current turn to end.
+    pub queued: usize,
     pub name: Option<String>,
     /// How long the current turn has run, or the last one took.
     pub turn: Option<Duration>,
@@ -412,6 +416,9 @@ impl Pane {
         }
         let screen = self.screen.and_then(|(_, state)| state);
         let title = agent::title_state(&self.program_title);
+        // Claude Code's own record of whether it's mid-turn, for when a
+        // long tool call leaves the screen and title quiet.
+        let busy = self.watcher.as_ref().and_then(agent::Watcher::report).is_some_and(|report| report.busy);
         let input = self.session.input_at();
         let notified = self.notified_at.is_some_and(|at| input.is_none_or(|input| at > input));
         // Output that isn't just the echo of your typing.
@@ -423,7 +430,11 @@ impl Pane {
             || (screen == Some(AgentState::Waiting) && title != Some(AgentState::Running))
         {
             AgentState::Waiting
-        } else if title == Some(AgentState::Running) || self.progress || screen == Some(AgentState::Running) || printing
+        } else if title == Some(AgentState::Running)
+            || self.progress
+            || screen == Some(AgentState::Running)
+            || printing
+            || busy
         {
             AgentState::Running
         } else {
@@ -455,10 +466,13 @@ impl Pane {
         let state = self.agent_now?;
         let report = self.watcher.as_ref().and_then(agent::Watcher::report).unwrap_or_default();
         let started = self.session.active().map_or(now, |block| block.started);
+        let program = self.session.active().and_then(|block| agent::agent_program(&block.command));
         Some(AgentInfo {
+            program: program.or_else(|| agent::title_program(&self.program_title)),
             state,
             prompt: report.prompt.or_else(|| self.typed_prompt.clone()),
             subagents: report.subagents,
+            queued: report.queued,
             name: report.name,
             turn: self.turn.map(|start| now.duration_since(start)).or(self.last_turn),
             uptime: now.duration_since(started),

@@ -7,6 +7,7 @@
 #import <CoreText/CoreText.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/message.h>
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -493,6 +494,27 @@ temino_metal_attach(void* view_handle)
 // standard height whenever the window resizes, so they're placed again.
 static CGFloat sTitlebarHeight = 0;
 
+// A see-through window isn't clipped to its rounded corners, so the frames
+// would fill them out square. The layer is rounded to match the window,
+// whose radius grew in macOS 26 and has no public getter.
+static void
+round_corners(NSWindow* window)
+{
+	CAMetalLayer* layer = (__bridge CAMetalLayer*)atomic_load(&sLayer);
+	if (layer == nil)
+		return;
+	CGFloat radius = 0;
+	if ((window.styleMask & NSWindowStyleMaskFullScreen) == 0) {
+		radius = 10;
+		SEL getter = NSSelectorFromString(@"_cornerRadius");
+		if ([window respondsToSelector:getter])
+			radius = ((CGFloat (*)(id, SEL))objc_msgSend)(window, getter);
+	}
+	layer.cornerRadius = radius;
+	layer.cornerCurve = kCACornerCurveContinuous;
+	layer.masksToBounds = radius > 0;
+}
+
 static void
 place_traffic_lights(NSWindow* window)
 {
@@ -527,13 +549,16 @@ temino_titlebar(void* view_handle, double height)
 			return;
 		sTitlebarHeight = height;
 		place_traffic_lights(window);
+		round_corners(window);
 		NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
 		NSArray* names = @[NSWindowDidResizeNotification, NSWindowDidEndLiveResizeNotification,
-			NSWindowDidExitFullScreenNotification, NSWindowDidBecomeKeyNotification,
+			NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
+			NSWindowDidBecomeKeyNotification,
 			NSWindowDidResignKeyNotification];
 		for (NSNotificationName name in names) {
 			[center addObserverForName:name object:window queue:nil usingBlock:^(NSNotification* note) {
 				place_traffic_lights(note.object);
+				round_corners(note.object);
 			}];
 		}
 	}
