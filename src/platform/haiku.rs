@@ -203,6 +203,13 @@ pub fn set_background_menu(names: &[&str], selected: usize) {
     unsafe { temino_set_background_menu(pointers.as_ptr(), pointers.len() as i32, selected as i32) }
 }
 
+/// No quick terminal on Haiku: hotkeys from anywhere aren't the app's.
+pub const QUICK_TERMINAL: bool = false;
+pub fn set_quick_terminal(_combo: Option<&crate::bindings::Combo>) -> bool {
+    false
+}
+pub fn toggle_quick_terminal() {}
+
 /// Haiku windows are opaque, so there is nothing to blur.
 pub fn set_blur(_on: bool) {}
 

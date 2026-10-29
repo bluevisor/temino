@@ -109,6 +109,20 @@ pub struct Block {
     size: GridSize,
     /// `clear`: runs like any command, then wipes the block list.
     pub clears: bool,
+    /// Counts changes to the output, for searches to notice them.
+    pub generation: u64,
+    /// Images printed into the output, on the lines they cover.
+    pub pictures: Vec<Placement>,
+}
+
+/// An image in a block's output: from output line `line`, column
+/// `column`, `columns` x `rows` cells (the image keeps its aspect within).
+pub struct Placement {
+    pub picture: std::sync::Arc<crate::picture::Picture>,
+    pub line: usize,
+    pub column: usize,
+    pub columns: usize,
+    pub rows: usize,
 }
 
 impl Block {
@@ -138,6 +152,8 @@ impl Block {
             lines: None,
             size,
             clears,
+            generation: 0,
+            pictures: Vec::new(),
         }
     }
 
@@ -145,6 +161,7 @@ impl Block {
         let mut handler = crate::graphemes::Graphemes { term: &mut self.term, last: &mut self.last };
         self.parser.advance(&mut handler, bytes);
         self.lines = None;
+        self.generation += 1;
     }
 
     pub fn running(&self) -> bool {
@@ -192,9 +209,104 @@ impl Block {
         if self.running() && (cursor.column.0 > 0 || bottom >= 0) {
             bottom = bottom.max(cursor.line.0);
         }
-        let lines = grid.history_size() + (bottom + 1).max(0) as usize;
+        let pictures = self.pictures.iter().map(|p| p.line + p.rows).max().unwrap_or(0);
+        let lines = (grid.history_size() + (bottom + 1).max(0) as usize).max(pictures);
         self.lines = Some(lines);
         lines
+    }
+
+    /// Puts an image at the cursor, sized to the program's request or else
+    /// its own pixels (one per logical pixel, no wider than the screen),
+    /// and moves the cursor below it, as iTerm2 and Kitty do.
+    pub fn place_picture(&mut self, request: crate::picture::Request, cell: (f32, f32)) {
+        if self.alt_screen() {
+            return;
+        }
+        let picture = request.picture;
+        let grid = self.term.grid();
+        let point = grid.cursor.point;
+        let room = grid.columns().saturating_sub(point.column.0).max(1);
+        let aspect = picture.height as f32 / picture.width as f32;
+        let (columns, rows) = match (request.size.columns, request.size.rows) {
+            (Some(c), Some(r)) => (c.min(room), r),
+            (Some(c), None) => {
+                let c = c.min(room);
+                (c, ((c as f32 * cell.0 * aspect) / cell.1).ceil() as usize)
+            }
+            (None, Some(r)) => {
+                let c = ((r as f32 * cell.1 / aspect) / cell.0).ceil() as usize;
+                (c.clamp(1, room), r)
+            }
+            (None, None) => {
+                let c = ((picture.width as f32 / cell.0).ceil() as usize).clamp(1, room);
+                (c, ((c as f32 * cell.0 * aspect) / cell.1).ceil() as usize)
+            }
+        };
+        let rows = rows.clamp(1, 1000);
+        let line = (grid.history_size() as i32 + point.line.0) as usize;
+        self.pictures.push(Placement { picture, line, column: point.column.0, columns, rows });
+        // The image's rows, then the cursor on the line under it.
+        self.feed(&b"\r\n".repeat(rows));
+    }
+
+    /// The last `limit` lines of output as text with SGR colors, to be fed
+    /// back in after a relaunch.
+    pub fn output_ansi(&mut self, limit: usize) -> Vec<u8> {
+        use alacritty_terminal::vte::ansi::{Color as C, NamedColor};
+        let lines = self.output_lines();
+        let grid = self.term.grid();
+        let columns = grid.columns();
+        let sgr = |color: C, foreground: bool| -> String {
+            let base = if foreground { 30 } else { 40 };
+            match color {
+                C::Named(n) if (n as usize) < 8 => format!("{}", base + n as usize),
+                C::Named(n) if (n as usize) < 16 => format!("{}", base + 60 + n as usize - 8),
+                C::Named(NamedColor::Foreground | NamedColor::Background) | C::Named(_) => format!("{}", base + 9),
+                C::Indexed(i) => format!("{};5;{i}", base + 8),
+                C::Spec(rgb) => format!("{};2;{};{};{}", base + 8, rgb.r, rgb.g, rgb.b),
+            }
+        };
+        let mut out = Vec::new();
+        for index in lines.saturating_sub(limit)..lines {
+            let row = &grid[self.grid_line(index)];
+            let end = (0..columns)
+                .rposition(|c| row[Column(c)].c != ' ' || row[Column(c)].bg != C::Named(NamedColor::Background));
+            let mut style = String::new();
+            for column in 0..end.map_or(0, |e| e + 1) {
+                let cell = &row[Column(column)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let mut codes = vec!["0".to_owned(), sgr(cell.fg, true), sgr(cell.bg, false)];
+                for (flag, code) in [
+                    (Flags::BOLD, "1"),
+                    (Flags::DIM, "2"),
+                    (Flags::ITALIC, "3"),
+                    (Flags::UNDERLINE, "4"),
+                    (Flags::INVERSE, "7"),
+                    (Flags::STRIKEOUT, "9"),
+                ] {
+                    if cell.flags.contains(flag) {
+                        codes.push(code.to_owned());
+                    }
+                }
+                let next = codes.join(";");
+                if next != style {
+                    out.extend_from_slice(format!("\x1b[{next}m").as_bytes());
+                    style = next;
+                }
+                let c = if cell.c == '\t' { ' ' } else { cell.c };
+                out.extend_from_slice(c.to_string().as_bytes());
+                for &mark in cell.zerowidth().unwrap_or(&[]) {
+                    out.extend_from_slice(mark.to_string().as_bytes());
+                }
+            }
+            out.extend_from_slice(b"\x1b[0m");
+            if index + 1 < lines {
+                out.extend_from_slice(b"\r\n");
+            }
+        }
+        out
     }
 
     /// Grid line for output line `index` (0 = oldest scrollback line).
@@ -317,6 +429,7 @@ impl Block {
             self.term.resize(size);
             self.size = size;
             self.lines = None;
+            self.generation += 1;
         }
     }
 }
@@ -336,6 +449,10 @@ enum Segment {
     Progress(bool),
     /// The shell's $PATH, reported at each prompt.
     Path(String),
+    /// An inline image: iTerm2's OSC 1337 File= (its body), or a Kitty
+    /// graphics command (the APC body after `G`).
+    Iterm(String),
+    Kitty(String),
 }
 
 /// Pulls Temino's own OSC sequences out of the byte stream; everything else
@@ -343,11 +460,15 @@ enum Segment {
 #[derive(Default)]
 struct Scanner {
     pending_escape: bool,
+    /// An OSC (`]`) or APC (`_`) being collected, and which.
     osc: Option<Vec<u8>>,
+    kind: u8,
 }
 
 impl Scanner {
     const MAX_OSC: usize = 4096;
+    /// Inline images come base64 in one sequence.
+    const MAX_IMAGE: usize = 64 << 20;
 
     fn scan(&mut self, input: &[u8]) -> Vec<Segment> {
         let mut out = Vec::new();
@@ -361,7 +482,8 @@ impl Scanner {
                     let body = std::mem::take(osc);
                     self.osc = None;
                     self.pending_escape = false;
-                    match parse_osc(&body) {
+                    let parsed = if self.kind == b']' { parse_osc(&body) } else { parse_apc(&body) };
+                    match parsed {
                         Some(segment) => {
                             if !data.is_empty() {
                                 out.push(Segment::Data(std::mem::take(&mut data)));
@@ -369,7 +491,7 @@ impl Scanner {
                             out.push(segment);
                         }
                         None => {
-                            data.extend_from_slice(b"\x1b]");
+                            data.extend_from_slice(&[0x1b, self.kind]);
                             data.extend_from_slice(&body);
                             data.extend_from_slice(if byte == 0x07 { b"\x07" } else { b"\x1b\\" });
                         }
@@ -379,7 +501,7 @@ impl Scanner {
                     let body = std::mem::take(osc);
                     self.osc = None;
                     self.pending_escape = false;
-                    data.extend_from_slice(b"\x1b]");
+                    data.extend_from_slice(&[0x1b, self.kind]);
                     data.extend_from_slice(&body);
                     data.push(0x1b);
                     continue; // reprocess this byte normally
@@ -387,10 +509,11 @@ impl Scanner {
                     self.pending_escape = true;
                 } else {
                     osc.push(byte);
-                    if osc.len() > Self::MAX_OSC {
+                    let image = osc.starts_with(b"1337;File=") || osc.starts_with(b"G");
+                    if osc.len() > if image { Self::MAX_IMAGE } else { Self::MAX_OSC } {
                         let body = std::mem::take(osc);
                         self.osc = None;
-                        data.extend_from_slice(b"\x1b]");
+                        data.extend_from_slice(&[0x1b, self.kind]);
                         data.extend_from_slice(&body);
                     }
                 }
@@ -399,8 +522,9 @@ impl Scanner {
             }
             if self.pending_escape {
                 self.pending_escape = false;
-                if byte == b']' {
+                if byte == b']' || byte == b'_' {
                     self.osc = Some(Vec::new());
+                    self.kind = byte;
                     i += 1;
                     continue;
                 }
@@ -429,6 +553,12 @@ impl Scanner {
     }
 }
 
+/// An APC: Kitty graphics commands start with `G`.
+fn parse_apc(body: &[u8]) -> Option<Segment> {
+    let text = std::str::from_utf8(body.strip_prefix(b"G")?).ok()?;
+    Some(Segment::Kitty(text.to_owned()))
+}
+
 fn parse_osc(body: &[u8]) -> Option<Segment> {
     let text = std::str::from_utf8(body).ok()?;
     let (number, rest) = text.split_once(';').unwrap_or((text, ""));
@@ -449,6 +579,7 @@ fn parse_osc(body: &[u8]) -> Option<Segment> {
             Some(Segment::Cwd(percent_decode(path)))
         }
         "6973" if rest == "cont" => Some(Segment::Continuation),
+        "1337" if rest.starts_with("File=") => Some(Segment::Iterm(rest.to_owned())),
         "6973" => rest.strip_prefix("path;").map(|path| Segment::Path(path.to_owned())),
         "9" => match rest.strip_prefix("4;") {
             Some(progress) => Some(Segment::Progress(!matches!(progress.split(';').next(), Some("0" | "")))),
@@ -578,7 +709,11 @@ pub struct Session {
     pub branch: Option<String>,
     pub size: GridSize,
     cell: (u16, u16),
+    cell_width: f32,
+    cell_height: f32,
     scanner: Scanner,
+    /// Kitty graphics: images stored by id, and chunks still arriving.
+    kitty: crate::picture::Kitty,
     events: Rc<RefCell<Vec<Event>>>,
     next_id: u64,
     /// Bytes seen at the idle prompt, held back until we know whether a
@@ -608,7 +743,10 @@ impl Session {
             branch: git_branch(&home),
             size,
             cell: (8, 16),
+            cell_width: 8.0,
+            cell_height: 16.0,
             scanner: Scanner::default(),
+            kitty: Default::default(),
             events: Rc::new(RefCell::new(Vec::new())),
             next_id: 1,
             idle_output: Vec::new(),
@@ -625,6 +763,7 @@ impl Session {
 
     pub fn set_cell_size(&mut self, width: f32, height: f32) {
         self.cell = (width as u16, height as u16);
+        (self.cell_width, self.cell_height) = (width, height);
     }
 
     /// Starts `shell`; its output arrives as `Msg::Pty(id, ...)`.
@@ -749,6 +888,74 @@ impl Session {
         self.next_id += 1;
         self.blocks.push(block);
         self.blocks.last_mut().unwrap()
+    }
+
+    /// Writes the finished blocks down, to bring them back after a relaunch:
+    /// a header line per block, then its output.
+    pub fn save_blocks(&mut self, path: &str) {
+        const BLOCKS: usize = 50;
+        const LINES: usize = 2000;
+        let mut out = Vec::new();
+        let start = self.blocks.len().saturating_sub(BLOCKS);
+        for block in &mut self.blocks[start..] {
+            if block.running() || block.kind == BlockKind::Ai || block.alt_screen() {
+                continue;
+            }
+            let output = block.output_ansi(LINES);
+            let kind = if block.kind == BlockKind::Background { "B" } else { "C" };
+            let exit = block.exit.map(|c| c.to_string()).unwrap_or_default();
+            let fields = [
+                kind.to_owned(),
+                exit,
+                block.duration().as_millis().to_string(),
+                output.len().to_string(),
+                block.cwd.clone(),
+                block.branch.clone().unwrap_or_default(),
+                block.command.replace('\\', "\\\\").replace('\n', "\\n"),
+            ];
+            out.extend_from_slice(fields.join("\t").as_bytes());
+            out.push(b'\n');
+            out.extend_from_slice(&output);
+            out.push(b'\n');
+        }
+        let _ = std::fs::write(path, out);
+    }
+
+    /// The blocks `save_blocks` wrote, finished as they were.
+    pub fn restore_blocks(&mut self, path: &str) {
+        let Ok(saved) = std::fs::read(path) else { return };
+        let mut rest = &saved[..];
+        while let Some(end) = rest.iter().position(|&b| b == b'\n') {
+            let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+            rest = &rest[end + 1..];
+            let fields: Vec<&str> = header.splitn(7, '\t').collect();
+            let [kind, exit, millis, length, cwd, branch, command] = fields[..] else { return };
+            let Ok(length) = length.parse::<usize>() else { return };
+            if rest.len() < length + 1 {
+                return;
+            }
+            let output = &rest[..length];
+            rest = &rest[length + 1..];
+            let kind = if kind == "B" { BlockKind::Background } else { BlockKind::Command };
+            let mut unescaped = String::new();
+            let mut chars = command.chars();
+            while let Some(c) = chars.next() {
+                match (c, c == '\\') {
+                    (_, true) => unescaped.push(if chars.next() == Some('n') { '\n' } else { '\\' }),
+                    (c, false) => unescaped.push(c),
+                }
+            }
+            let command = unescaped;
+            let block = self.new_block(kind, command);
+            block.cwd = cwd.to_owned();
+            block.branch = Some(branch.to_owned()).filter(|b| !b.is_empty());
+            block.exit = exit.parse().ok();
+            block.feed(output);
+            let now = Instant::now();
+            block.started = now.checked_sub(Duration::from_millis(millis.parse().unwrap_or(0))).unwrap_or(now);
+            block.finished = Some(now);
+            block.clears = false;
+        }
     }
 
     /// The block whose program owns the keyboard, if any.
@@ -880,10 +1087,30 @@ impl Session {
                 Segment::Notify => notices.push(Notice::Notify),
                 Segment::Path(path) => self.path = Some(path),
                 Segment::Progress(busy) => notices.push(Notice::Progress(busy)),
+                Segment::Iterm(body) => self.show_picture(crate::picture::iterm(&body)),
+                Segment::Kitty(body) => {
+                    let outcome = self.kitty.command(&body);
+                    self.show_picture(outcome);
+                }
             }
         }
         self.drain_events(theme, &mut notices);
         notices
+    }
+
+    /// An image a program printed: placed at its block's cursor; and the
+    /// protocol's reply sent back.
+    fn show_picture(&mut self, outcome: crate::picture::Outcome) {
+        if let Some(reply) = outcome.reply {
+            self.reply(&reply);
+        }
+        let Some(request) = outcome.show else { return };
+        let cell = (self.cell_width.max(1.0), self.cell_height.max(1.0));
+        if self.phase == Phase::Running {
+            if let Some(block) = self.active_mut() {
+                block.place_picture(request, cell);
+            }
+        }
     }
 
     fn route(&mut self, data: &[u8], theme: &Theme) {
@@ -1361,6 +1588,28 @@ mod tests {
         assert_eq!(session.phase, Phase::Ready);
         session.tick(Instant::now() + IDLE_OUTPUT_DELAY);
         assert_eq!(session.deadline(), None);
+    }
+
+    #[test]
+    fn saved_blocks_come_back_with_their_colors() {
+        let size = GridSize { lines: 10, columns: 40 };
+        let mut session = Session::new(size);
+        let block = session.new_block(BlockKind::Command, "echo 'a\\b'\nls".into());
+        block.feed(b"\x1b[31mred\x1b[0m plain\r\nline two");
+        block.exit = Some(2);
+        block.finished = Some(Instant::now());
+        let path = std::env::temp_dir().join(format!("temino-restore-{}", std::process::id()));
+        let path = path.to_str().unwrap();
+        session.save_blocks(path);
+        let mut restored = Session::new(size);
+        restored.restore_blocks(path);
+        let _ = std::fs::remove_file(path);
+        let block = &mut restored.blocks[0];
+        assert_eq!(block.command, "echo 'a\\b'\nls");
+        assert_eq!(block.exit, Some(2));
+        assert_eq!(block.output_text(), "red plain\nline two");
+        let red = &block.term.grid()[block.grid_line(0)][Column(0)];
+        assert_eq!(red.fg, alacritty_terminal::vte::ansi::Color::Named(alacritty_terminal::vte::ansi::NamedColor::Red));
     }
 
     #[test]

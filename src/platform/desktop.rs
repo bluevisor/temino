@@ -36,6 +36,8 @@ extern "C" {
     fn temino_metal_attach(view: *mut std::ffi::c_void);
     /// Makes the title bar `height` points tall, traffic lights centered.
     fn temino_titlebar(view: *mut std::ffi::c_void, height: f64);
+    fn temino_hotkey(keycode: u32, modifiers: u32);
+    fn temino_toggle_window();
     fn temino_emoji(
         text: *const std::ffi::c_char,
         size: f32,
@@ -69,6 +71,11 @@ pub fn emoji(text: &str, size: f32, max_width: f32, max_height: f32) -> Option<(
 #[derive(Debug)]
 enum Request {
     Present,
+    /// The quick terminal's hotkey, as a macOS key code and Carbon modifiers.
+    #[allow(dead_code)]
+    Hotkey(Option<(u32, u32)>),
+    #[allow(dead_code)]
+    ToggleWindow,
     Title(String),
     Cursor(Cursor),
     Blur(bool),
@@ -166,6 +173,64 @@ pub fn set_background(_rgb: [u8; 3]) {}
 pub fn set_background_menu(_names: &[&str], _selected: usize) {}
 pub fn set_shell_menu(_names: &[String], _selected: usize) {}
 
+/// Whether a hotkey from anywhere can bring the window (macOS).
+pub const QUICK_TERMINAL: bool = cfg!(target_os = "macos");
+
+/// The quick terminal's hotkey, from anywhere on the desktop: it brings
+/// Temino's window to the front, and hides it again. False if the key
+/// can't be registered.
+pub fn set_quick_terminal(combo: Option<&crate::bindings::Combo>) -> bool {
+    let Some(combo) = combo else {
+        request(Request::Hotkey(None));
+        return true;
+    };
+    let Some(code) = mac_key_code(combo) else { return false };
+    // Carbon's modifier bits: cmd, shift, option, control.
+    let mut modifiers = 0;
+    for (bit, carbon) in [(mods::COMMAND, 0x100), (mods::SHIFT, 0x200), (mods::OPTION, 0x800), (mods::CONTROL, 0x1000)]
+    {
+        if combo.mods & bit != 0 {
+            modifiers |= carbon;
+        }
+    }
+    request(Request::Hotkey(Some((code, modifiers))));
+    QUICK_TERMINAL
+}
+
+pub fn toggle_quick_terminal() {
+    request(Request::ToggleWindow);
+}
+
+/// The macOS virtual key code (ANSI layout) of a key.
+fn mac_key_code(combo: &crate::bindings::Combo) -> Option<u32> {
+    if let Some(named) = combo.named {
+        return Some(match named {
+            Named::Enter => 0x24,
+            Named::Tab => 0x30,
+            Named::Escape => 0x35,
+            Named::Backspace => 0x33,
+            Named::Delete => 0x75,
+            Named::Home => 0x73,
+            Named::End => 0x77,
+            Named::PageUp => 0x74,
+            Named::PageDown => 0x79,
+            Named::Left => 0x7b,
+            Named::Right => 0x7c,
+            Named::Down => 0x7d,
+            Named::Up => 0x7e,
+            Named::F(n) => {
+                [0x7a, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6d, 0x67, 0x6f].get(n as usize - 1).copied()?
+            }
+            Named::Insert => return None,
+        });
+    }
+    const KEYS: &str = "asdfhgzxcv\0bqweryt123465=97-80]ou[ip\0lj'k;\\,/nm.\0\0`";
+    if combo.c == ' ' {
+        return Some(0x31);
+    }
+    KEYS.chars().position(|c| c == combo.c && c != '\0').map(|i| i as u32)
+}
+
 /// Blurs what shows through a see-through background (macOS).
 pub fn set_blur(on: bool) {
     BLUR.store(on, Ordering::Release);
@@ -215,6 +280,10 @@ mod menu {
         ("Edit", Some("Copy Command"), "c", SHIFT, None, 'c'),
         ("Edit", Some("Paste"), "v", 0, None, 'v'),
         ("Edit", Some("Select All"), "a", 0, None, 'a'),
+        ("Edit", None, "", 0, None, '\0'),
+        ("Edit", Some("Find…"), "f", 0, None, 'f'),
+        ("Edit", Some("Find Next"), "g", 0, None, 'g'),
+        ("Edit", Some("Find Previous"), "g", SHIFT, None, 'g'),
         ("Edit", None, "", 0, None, '\0'),
         ("Edit", Some("Clear"), "k", 0, None, 'k'),
         ("View", Some("Show/Hide Tabs"), "b", 0, None, 'b'),
@@ -694,6 +763,15 @@ impl ApplicationHandler<Request> for Handler {
                 }
             }
             Request::Quit => event_loop.exit(),
+            #[cfg(target_os = "macos")]
+            Request::Hotkey(key) => {
+                let (code, modifiers) = key.unwrap_or((u32::MAX, 0));
+                unsafe { temino_hotkey(code, modifiers) }
+            }
+            #[cfg(target_os = "macos")]
+            Request::ToggleWindow => unsafe { temino_toggle_window() },
+            #[cfg(not(target_os = "macos"))]
+            Request::Hotkey(_) | Request::ToggleWindow => {}
         }
     }
 

@@ -14,6 +14,7 @@ use crate::agent::{self, AgentState};
 use crate::ask::{self, Reply};
 use crate::complete::{self, Candidate, Commands, Completion, Kind};
 use crate::editor::{Editor, History};
+use crate::find::Find;
 use crate::keys::{self, Named};
 use crate::llm;
 use crate::platform::{self, buttons, Cursor, KeyEvent};
@@ -224,6 +225,9 @@ pub struct Pane {
     /// it was last asked for (folder and last command), and when.
     pub git_changes: Option<(String, usize)>,
     git_asked: Option<(String, Option<u64>, Instant)>,
+    /// Command+F: the search bar and its matches, and the last query.
+    find: Option<Find>,
+    last_query: String,
 }
 
 /// The model's reply to an AI-mode request, filled in by its thread.
@@ -329,6 +333,8 @@ impl Pane {
             recap: None,
             ai: false,
             asking: None,
+            find: None,
+            last_query: String::new(),
         })
     }
 
@@ -910,6 +916,9 @@ impl Pane {
             self.recap = None;
         }
         let named = keys::named(&key);
+        if self.find_key(&key, named) {
+            return;
+        }
         // At the prompt, ⌘←/→ and ⌘⌫ are line editing (see editor_key).
         let line_edit = key.line_mod()
             && self.session.editor_active()
@@ -935,6 +944,18 @@ impl Pane {
                 }
                 (_, Some('k')) => {
                     self.clear_blocks();
+                    true
+                }
+                (_, Some('f')) => {
+                    self.open_find();
+                    true
+                }
+                (_, Some('g')) => {
+                    // Find Next with the bar closed: the last search again.
+                    self.open_find();
+                    if let Some(find) = self.find.as_mut() {
+                        find.selected = false;
+                    }
                     true
                 }
                 (_, Some('a')) if self.session.editor_active() => {
@@ -984,6 +1005,117 @@ impl Pane {
                 }
             }
         }
+    }
+
+    /// Command+F: the search bar, or its query selected if it's open.
+    pub fn open_find(&mut self) {
+        match &mut self.find {
+            Some(find) => find.selected = !find.query.is_empty(),
+            None => self.find = Some(Find::new(self.last_query.clone())),
+        }
+    }
+
+    /// TEMINO_FIND_TEST: the search bar open on `query`, for screenshots.
+    pub fn find_test(&mut self, query: &str) {
+        let mut find = Find::new(query.to_owned());
+        find.selected = false;
+        self.find = Some(find);
+    }
+
+    pub fn close_find(&mut self) {
+        if let Some(find) = self.find.take() {
+            self.last_query = find.query;
+        }
+    }
+
+    /// A key while the search bar is open; false lets it through.
+    fn find_key(&mut self, key: &KeyEvent, named: Option<Named>) -> bool {
+        let Some(find) = self.find.as_mut() else { return false };
+        if key.cmd() && !key.ctrl() {
+            match key.base_char() {
+                Some('g') => find.step(!key.shift()),
+                Some('a') => find.selected = !find.query.is_empty(),
+                Some('v') => {
+                    let pasted = platform::clipboard_get().unwrap_or_default();
+                    if find.selected {
+                        find.query.clear();
+                    }
+                    find.query.push_str(pasted.lines().next().unwrap_or(""));
+                    find.selected = false;
+                }
+                Some('f') => find.selected = !find.query.is_empty(),
+                _ => return false,
+            }
+            return true;
+        }
+        match named {
+            Some(Named::Escape) => self.close_find(),
+            Some(Named::Enter) => find.step(!key.shift()),
+            Some(Named::Up) => find.step(true),
+            Some(Named::Down) => find.step(false),
+            Some(Named::Backspace) if find.selected => {
+                find.query.clear();
+                find.selected = false;
+            }
+            Some(Named::Backspace) => {
+                find.query.pop();
+            }
+            Some(Named::PageUp | Named::PageDown) => return false,
+            Some(_) => {}
+            None if key.ctrl() => {
+                if key.base_char() == Some('c') || key.base_char() == Some('g') {
+                    self.close_find();
+                }
+            }
+            None => {
+                let typed: String = String::from_utf8_lossy(&key.bytes).chars().filter(|c| !c.is_control()).collect();
+                if !typed.is_empty() {
+                    if find.selected {
+                        find.query.clear();
+                        find.selected = false;
+                    }
+                    find.query.push_str(&typed);
+                }
+            }
+        }
+        true
+    }
+
+    /// The search bar, over the pane's top-right corner.
+    fn draw_find(&mut self, scene: &mut Scene, ctx: &mut Ctx) {
+        let Some(find) = &self.find else { return };
+        let Ctx { text, theme, .. } = ctx;
+        let font = 12.5;
+        let width = (self.rect.w - 16.0).min(340.0);
+        let bar = Rect::new(self.rect.w - width - 8.0, 6.0, width, 30.0);
+        scene.set_layer(LAYER_OVERLAY);
+        scene.shadow(bar, Color::hex(0x000000).alpha(0.4), 8.0, 6.0);
+        scene.quad(Quad::new(bar, theme.background).radius(8.0));
+        scene.quad(Quad::new(bar, theme.raised).radius(8.0).border(1.0, theme.accent.alpha(0.6)));
+        let baseline = (bar.y + (bar.h + text.ui_ascent(font) * 0.72) / 2.0).round();
+        let status = find.status();
+        let status_w = text.measure(&status, UI, 11.5);
+        let status_color = if find.current.is_none() { theme.error } else { theme.text_dim };
+        text.draw_text(scene, &status, bar.right() - 12.0 - status_w, baseline, UI, 11.5, status_color);
+        let x = bar.x + 12.0;
+        let room = (bar.w - 36.0 - status_w).max(0.0);
+        scene.push_clip(Rect::new(x - 2.0, bar.y, room + 4.0, bar.h));
+        if find.query.is_empty() {
+            text.draw_text(scene, "Find in scrollback", x, baseline, UI, font, theme.text_faint);
+            scene.fill(Rect::new(x, bar.y + 8.0, 1.0, bar.h - 16.0), theme.cursor);
+        } else {
+            let w = text.measure(&find.query, UI, font);
+            let x = x - (w - room + 4.0).max(0.0);
+            if find.selected {
+                scene.quad(
+                    Quad::new(Rect::new(x - 1.0, bar.y + 7.0, w + 2.0, bar.h - 14.0), theme.selection).radius(2.0),
+                );
+            }
+            text.draw_text(scene, &find.query, x, baseline, UI, font, theme.text);
+            scene.fill(Rect::new(x + w + 1.0, bar.y + 8.0, 1.0, bar.h - 16.0), theme.cursor);
+        }
+        scene.pop_clip();
+        scene.set_layer(LAYER_CONTENT);
     }
 
     fn restart(&mut self, ctx: &mut Ctx) {
@@ -1849,6 +1981,7 @@ impl Pane {
         }
         self.draw_link(scene, ctx);
         self.draw_recap(scene, ctx, alt);
+        self.draw_find(scene, ctx);
         if self.bell.is_some() {
             scene.set_layer(LAYER_OVERLAY);
             let edge = Rect::new(0.0, 0.0, self.rect.w, self.rect.h);
@@ -1936,6 +2069,7 @@ impl Pane {
             cursor: true,
             focused,
             selection,
+            marks: Vec::new(),
             blink_on: blink,
         };
         ui::draw_grid(scene, &mut ctx.text, &ctx.theme, view);
@@ -1978,6 +2112,13 @@ impl Pane {
         }
         // Keep the view still when output grows while scrolled up.
         let list_max = (height - input_height).max(0.0);
+        let mut reveal = None;
+        if let Some(find) = self.find.as_mut() {
+            find.refresh(&self.session.blocks);
+            if std::mem::take(&mut find.reveal) {
+                reveal = find.current;
+            }
+        }
         if self.scroll_target > 0.0 && self.content_height > 0.0 && total > self.content_height {
             let grown = total - self.content_height;
             self.scroll += grown;
@@ -1985,6 +2126,26 @@ impl Pane {
         }
         self.content_height = total;
         let max_scroll = (total - list_max).max(0.0);
+        if let Some(found) = reveal {
+            // The match's line, a third of the way down the view.
+            let mut y = welcome_height;
+            for (block, (h, _)) in self.session.blocks.iter().zip(&heights) {
+                if block.id == found.block {
+                    let rows = if block.kind == BlockKind::Background {
+                        0
+                    } else {
+                        command_rows(&block.command, self.session.size.columns.max(1)).len()
+                    };
+                    let cell = ctx.text.cell.height;
+                    y += BLOCK_PAD_TOP + META_HEIGHT + rows as f32 * cell + OUTPUT_GAP + found.line as f32 * cell;
+                    let scroll = (total - y - list_max * 2.0 / 3.0).clamp(0.0, max_scroll);
+                    self.scroll = scroll;
+                    self.scroll_target = scroll;
+                    break;
+                }
+                y += h;
+            }
+        }
         self.scroll_target = self.scroll_target.min(max_scroll);
         self.scroll = self.scroll.min(max_scroll);
         let (top, input_y) =
@@ -2208,9 +2369,23 @@ impl Pane {
                     cursor: block.running() && block.kind == BlockKind::Command,
                     focused,
                     selection,
+                    marks: self.find.as_ref().map(|f| f.marks(id, first, last)).unwrap_or_default(),
                     blink_on: blink,
                 };
                 ui::draw_grid(scene, text, theme, view);
+            }
+            for placement in block.pictures.iter().filter(|p| p.line < last && p.line + p.rows > first) {
+                let room = Rect::new(
+                    PAD_X + placement.column as f32 * cell.width,
+                    output_y + placement.line as f32 * cell.height,
+                    placement.columns as f32 * cell.width,
+                    placement.rows as f32 * cell.height,
+                );
+                let picture = &placement.picture;
+                let aspect = picture.height as f32 / picture.width as f32;
+                let (w, h) =
+                    if room.w * aspect <= room.h { (room.w, room.w * aspect) } else { (room.h / aspect, room.h) };
+                text.draw_picture(scene, picture, Rect::new(room.x, room.y, w, h));
             }
         }
         scene.fill(Rect::new(0.0, y + block_height - 1.0, width, 1.0), theme.divider);

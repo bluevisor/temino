@@ -143,11 +143,11 @@ impl Theme {
     /// lifted from it by the same steps as on the default one.
     pub fn with_background(mut self, rgb: u32) -> Theme {
         let background = Color::hex(rgb);
-        let white = Color::hex(0xffffff);
         self.background = background;
-        self.surface = background.mix(white, SURFACE_LIFT);
-        self.raised = background.mix(white, 0.0625);
-        self.divider = background.mix(white, 0.083);
+        let lift = self.lift();
+        self.surface = background.mix(lift, SURFACE_LIFT);
+        self.raised = background.mix(lift, 0.0625);
+        self.divider = background.mix(lift, 0.083 * if self.light() { 1.6 } else { 1.0 });
         self
     }
 
@@ -167,7 +167,19 @@ impl Theme {
     /// color of `background.mix(white, lift)`, but only as opaque as the
     /// background under it.
     pub fn panel(&self, lift: f32) -> Color {
-        Color::hex(0xffffff).alpha(lift)
+        self.lift().alpha(lift)
+    }
+
+    /// A light background (the Macintosh's white): panels are lifted
+    /// toward black instead of white.
+    pub fn light(&self) -> bool {
+        let b = self.background;
+        0.2126 * b.r + 0.7152 * b.g + 0.0722 * b.b > 0.5
+    }
+
+    /// What panels are lifted toward: white, or black on a light background.
+    pub fn lift(&self) -> Color {
+        Color::hex(if self.light() { 0x000000 } else { 0xffffff })
     }
 
     pub fn dark() -> Theme {
@@ -274,5 +286,283 @@ impl Theme {
             _ => self.text,
         };
         color.to_term()
+    }
+}
+
+/// A terminal color scheme: what the theme library holds. The UI's
+/// colors are worked out from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Palette {
+    pub name: String,
+    pub background: u32,
+    pub foreground: u32,
+    pub cursor: Option<u32>,
+    pub selection: Option<u32>,
+    /// The UI's highlight color (ANSI 12 when unset).
+    pub accent: Option<u32>,
+    pub ansi: [u32; 16],
+}
+
+/// The built-in schemes, each the screen of a real machine: name,
+/// background, foreground, cursor, selection, UI accent (0: ANSI 12) and
+/// ANSI 0-15, from the machine's own palette where it had one. Temino's own
+/// comes first and is the default.
+type BuiltIn = (&'static str, u32, u32, u32, u32, u32, [u32; 16]);
+const BUILT_IN: [BuiltIn; 11] = [
+    ("Temino", 0x0f1117, 0xd8dee9, 0x6cb6ff, 0, 0, [0; 16]),
+    // Green phosphor (Monitor II), the lo-res colors for the rest.
+    (
+        "Apple II",
+        0x050c06,
+        0x41ff53,
+        0x41ff53,
+        0x1c4a22,
+        0x66aaff,
+        [
+            0x0c140d, 0xdd0033, 0x11dd00, 0xff6600, 0x2222ff, 0xdd22dd, 0x44ff99, 0xaaaaaa, 0x555555, 0xff9988,
+            0x41ff53, 0xffff00, 0x66aaff, 0xff88ff, 0x88ffcc, 0xffffff,
+        ],
+    ),
+    // The 1984 Macintosh: one bit, black on white. Its colors are the
+    // grays QuickDraw dithered them to, so red and green still differ.
+    (
+        "Macintosh",
+        0xffffff,
+        0x000000,
+        0x000000,
+        0x000000,
+        0x000000,
+        [
+            0x000000, 0x5a5a5a, 0x3c3c3c, 0x6e6e6e, 0x282828, 0x505050, 0x464646, 0x8c8c8c, //
+            0x646464, 0x2a2a2a, 0x1e1e1e, 0x3a3a3a, 0x141414, 0x323232, 0x282828, 0x000000,
+        ],
+    ),
+    // The CGA/VGA text palette, light grey on black.
+    (
+        "IBM PC (MS-DOS)",
+        0x000000,
+        0xaaaaaa,
+        0xaaaaaa,
+        0x0000aa,
+        0x5555ff,
+        [
+            0x000000, 0xaa0000, 0x00aa00, 0xaa5500, 0x0000aa, 0xaa00aa, 0x00aaaa, 0xaaaaaa, 0x555555, 0xff5555,
+            0x55ff55, 0xffff55, 0x5555ff, 0xff55ff, 0x55ffff, 0xffffff,
+        ],
+    ),
+    // Light blue on blue, the VIC-II's colors (Pepto's measurements).
+    (
+        "Commodore 64",
+        0x352879,
+        0x6c5eb5,
+        0x6c5eb5,
+        0x6c5eb5,
+        0x70a4b2,
+        [
+            0x000000, 0x9a6759, 0x588d43, 0xb8c76f, 0x6c5eb5, 0x8a5aa6, 0x70a4b2, 0x959595, 0x444444, 0xc28b7d,
+            0x9ad284, 0xd8e48f, 0xa497f0, 0xb07ccc, 0x9ad0dc, 0xffffff,
+        ],
+    ),
+    // Workbench 1.3: white on blue, orange and black.
+    (
+        "Amiga 500",
+        0x0055aa,
+        0xffffff,
+        0xff8800,
+        0xff8800,
+        0xff8800,
+        [
+            0x000022, 0xff6644, 0x66dd66, 0xff8800, 0x99ccff, 0xff88cc, 0x88eeff, 0xffffff, 0x335f8f, 0xff8877,
+            0x99ff99, 0xffaa33, 0xbbddff, 0xffaadd, 0xaaffff, 0xffffff,
+        ],
+    ),
+    // Black ink on white paper, the ULA's eight colors and their brights.
+    (
+        "ZX Spectrum",
+        0xd7d7d7,
+        0x000000,
+        0x000000,
+        0x00d7d7,
+        0x0000d7,
+        [
+            0x000000, 0xd70000, 0x008a00, 0x8a6a00, 0x0000d7, 0xd700d7, 0x008a8a, 0x5a5a5a, 0x3a3a3a, 0xff0000,
+            0x00a800, 0xa08800, 0x0000ff, 0xff00ff, 0x00a0a0, 0x000000,
+        ],
+    ),
+    // Amber phosphor; the terminal had no colors, so they're shades of it.
+    (
+        "DEC VT220",
+        0x140c00,
+        0xffb000,
+        0xffb000,
+        0x4a3000,
+        0,
+        [
+            0x2a1a00, 0xff7a00, 0xffc040, 0xffd060, 0xc88a00, 0xff9a40, 0xffc880, 0xffb000, 0x6a4800, 0xff9a30,
+            0xffd070, 0xffe090, 0xe0a020, 0xffb870, 0xffe0b0, 0xfff0d0,
+        ],
+    ),
+    // IRIX on an Indy: winterm's light text on Indigo Magic slate.
+    (
+        "SGI Indy",
+        0x1d2733,
+        0xe6e1cf,
+        0xa68ad6,
+        0x3d4a66,
+        0xa68ad6,
+        [
+            0x2b3640, 0xe0605a, 0x8fc36a, 0xe8c56a, 0x7d9fd6, 0xa68ad6, 0x6cc3c8, 0xd9d4c3, 0x5b6874, 0xf08078,
+            0xa8d888, 0xf2d890, 0x9cb8e8, 0xbfa6ea, 0x8ad8dc, 0xffffff,
+        ],
+    ),
+    // NeXTstation: black on the 2-bit gray of its windows; the Color
+    // model's muted tones for the rest.
+    (
+        "NeXTstation",
+        0xaaaaaa,
+        0x000000,
+        0x000000,
+        0x555555,
+        0x1a2f7a,
+        [
+            0x000000, 0x8b1a1a, 0x1f5f1f, 0x5a4a00, 0x1a2f7a, 0x6a1f6a, 0x1a5f5f, 0x555555, //
+            0x2a2a2a, 0xa52a2a, 0x2a7a2a, 0x6b5a00, 0x2a46a0, 0x8a2a8a, 0x2a7a7a, 0x333333,
+        ],
+    ),
+    // Windows PowerShell's console: light gray on its dark blue, the
+    // console's Campbell colors.
+    (
+        "Windows PowerShell",
+        0x012456,
+        0xcccccc,
+        0xfedba9,
+        0x264f78,
+        0x3b78ff,
+        [
+            0x0c0c0c, 0xc50f1f, 0x13a10e, 0xc19c00, 0x0037da, 0x881798, 0x3a96dd, 0xcccccc, //
+            0x767676, 0xe74856, 0x16c60c, 0xf9f1a5, 0x3b78ff, 0xb4009e, 0x61d6d6, 0xf2f2f2,
+        ],
+    ),
+];
+
+/// The theme library: the built-in schemes, then any Ghostty-format theme
+/// files in `dir` (one per file, named after it), alphabetically.
+pub fn library(dir: &str) -> Vec<Palette> {
+    let mut themes: Vec<Palette> = BUILT_IN
+        .iter()
+        .map(|&(name, background, foreground, cursor, selection, accent, ansi)| Palette {
+            name: name.to_owned(),
+            background,
+            foreground,
+            cursor: Some(cursor),
+            selection: (selection != 0).then_some(selection),
+            accent: (accent != 0).then_some(accent),
+            ansi,
+        })
+        .collect();
+    let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    files.sort();
+    for path in files {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| !n.starts_with('.')) else { continue };
+        let name = name.trim_end_matches(".conf").to_owned();
+        if let Some(palette) = std::fs::read_to_string(&path).ok().and_then(|text| parse_palette(&name, &text)) {
+            themes.retain(|t| t.name != palette.name);
+            themes.push(palette);
+        }
+    }
+    themes
+}
+
+/// A Ghostty theme file: `background = #282a36`, `foreground = …`,
+/// `cursor-color = …`, `selection-background = …`, `palette = 0=#21222c`.
+/// None without a background and foreground.
+pub fn parse_palette(name: &str, text: &str) -> Option<Palette> {
+    let hex = |value: &str| u32::from_str_radix(value.trim().trim_start_matches('#'), 16).ok();
+    let (mut background, mut foreground, mut cursor, mut selection) = (None, None, None, None);
+    let mut ansi = Theme::dark().ansi.map(|color| {
+        let [r, g, b] = color.to_rgb8();
+        (r as u32) << 16 | (g as u32) << 8 | b as u32
+    });
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else { continue };
+        match key.trim() {
+            "background" => background = hex(value),
+            "foreground" => foreground = hex(value),
+            "cursor-color" => cursor = hex(value),
+            "selection-background" => selection = hex(value),
+            "palette" => {
+                if let Some((index, color)) = value.split_once('=') {
+                    if let (Ok(index @ 0..=15), Some(color)) = (index.trim().parse::<usize>(), hex(color)) {
+                        ansi[index] = color;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(Palette {
+        name: name.to_owned(),
+        background: background?,
+        foreground: foreground?,
+        cursor,
+        selection,
+        accent: None,
+        ansi,
+    })
+}
+
+impl Palette {
+    /// The whole theme, UI included, in this scheme's colors.
+    pub fn theme(&self) -> Theme {
+        if self.name == BUILT_IN[0].0 && self.ansi == [0; 16] {
+            return Theme::dark();
+        }
+        let background = Color::hex(self.background);
+        let text = Color::hex(self.foreground);
+        let ansi = self.ansi.map(Color::hex);
+        let accent = Color::hex(self.accent.unwrap_or(self.ansi[12]));
+        let theme = Theme {
+            background,
+            surface: background,
+            raised: background,
+            divider: background,
+            text,
+            text_dim: text.mix(background, 0.38),
+            text_faint: text.mix(background, 0.6),
+            accent,
+            success: ansi[2],
+            error: ansi[1],
+            warning: ansi[3],
+            string: ansi[3],
+            variable: ansi[5],
+            selection: match self.selection {
+                Some(rgb) => Color::hex(rgb).alpha(0.75),
+                None => accent.alpha(0.3),
+            },
+            cursor: self.cursor.map(Color::hex).unwrap_or(accent),
+            opacity: 1.0,
+            ansi,
+        };
+        theme.with_background(self.background)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ghostty_theme_files_are_read() {
+        let text = "# a comment\nbackground = #101010\nforeground=ffffff\npalette = 1=#ff0000\npalette = 99=#00ff00\n";
+        let palette = parse_palette("Test", text).unwrap();
+        assert_eq!((palette.background, palette.foreground, palette.ansi[1]), (0x101010, 0xffffff, 0xff0000));
+        assert!(parse_palette("Bad", "foreground = #ffffff").is_none());
+    }
+
+    #[test]
+    fn the_default_theme_is_unchanged() {
+        let library = library("/nonexistent");
+        assert_eq!(library[0].theme().accent, Theme::dark().accent);
+        assert_eq!(library.len(), BUILT_IN.len());
     }
 }

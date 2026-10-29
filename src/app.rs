@@ -6,6 +6,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use crate::agent::{self, AgentState};
+use crate::bindings::{self, Bind, Bindings};
 use crate::complete::Commands;
 use crate::editor::History;
 use crate::gpu::Gpu;
@@ -16,7 +17,7 @@ use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::settings::{self, Action, Field};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
-use crate::theme::{Color, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
+use crate::theme::{self, Color, Palette, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
 use crate::ui;
 use crate::update::{self, Release};
 use crate::Msg;
@@ -374,7 +375,13 @@ pub struct App {
     installing: Option<(u64, shells::Kind)>,
     /// The Settings tab's page, and what it shows that the theme doesn't.
     settings: settings::Page,
-    background: usize,
+    /// The theme library, the scheme in use, and the background picked
+    /// over it (None: the scheme's own).
+    themes: Vec<Palette>,
+    /// The keys file, as last read.
+    bindings: Bindings,
+    palette: usize,
+    background: Option<usize>,
     opacity: usize,
     blur: bool,
     /// Which of KINDS are installed, as of the Settings tab opening.
@@ -520,9 +527,17 @@ fn user_host() -> String {
 }
 
 /// `background=<name>` in the settings file, as an index into BACKGROUNDS
-/// (the first when unset or unknown).
-fn load_background() -> usize {
-    crate::setting("background").and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name)).unwrap_or(0)
+/// (None, the theme's own, when unset or unknown).
+fn load_background() -> Option<usize> {
+    crate::setting("background").and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name))
+}
+
+/// The quick terminal's hotkey until the settings file names another.
+const QUICK_TERMINAL_KEY: &str = "ctrl+`";
+
+/// Where theme files go: Ghostty's format, one scheme per file.
+pub fn themes_dir() -> String {
+    format!("{}/themes", crate::settings_dir())
 }
 
 /// `opacity=<percent>` in the settings file, as an index into OPACITIES
@@ -538,14 +553,16 @@ fn load_opacity() -> usize {
 impl App {
     fn new(sender: Sender<Msg>, width: u32, height: u32) -> Result<App, String> {
         let gpu = Gpu::new()?;
-        let text = TextSystem::new(BASE_FONT_SIZE);
+        let mut text = TextSystem::new(BASE_FONT_SIZE);
+        text.ligatures = crate::setting("ligatures").as_deref() != Some("off");
         crate::trace("app: fonts ready");
         let background = load_background();
         let opacity = load_opacity();
-        let theme =
-            Theme::dark().with_background(BACKGROUNDS[background].1).with_opacity(OPACITIES[opacity] as f32 / 100.0);
+        let themes = theme::library(&themes_dir());
+        let palette = crate::setting("theme").and_then(|name| themes.iter().position(|t| t.name == name)).unwrap_or(0);
+        let theme = build_theme(&themes[palette], background, OPACITIES[opacity] as f32 / 100.0);
         platform::set_background(theme.background.to_rgb8());
-        platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), background);
+        platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), background.unwrap_or(usize::MAX));
         let shell = shells::default_shell();
         let (shell_names, selected) = shells::menu(&shell);
         platform::set_shell_menu(&shell_names, selected);
@@ -615,6 +632,9 @@ impl App {
             caret_sent: None,
             installing: None,
             settings: settings::Page::default(),
+            themes,
+            bindings: Bindings::default(),
+            palette,
             background,
             opacity,
             blur: crate::setting("blur").as_deref() == Some("on"),
@@ -629,6 +649,8 @@ impl App {
             relaunch: false,
         };
         app.apply_blur();
+        app.bindings.refresh();
+        app.apply_quick_terminal();
         app.set_zoom(
             crate::setting("zoom").and_then(|z| z.parse().ok()).unwrap_or(DEFAULT_FONT_SIZE / BASE_FONT_SIZE),
             false,
@@ -707,8 +729,39 @@ impl App {
         if self.tabs.is_empty() {
             return self.new_tab();
         }
+        if crate::setting("restore_output").as_deref() != Some("off") {
+            for (index, id) in self.saved_panes().into_iter().enumerate() {
+                if let Some(pane) = self.pane(id) {
+                    pane.session.restore_blocks(&format!("{}/{index}", sessions_dir()));
+                }
+            }
+        }
         self.switch_tab(active);
         Ok(())
+    }
+
+    /// Every shell pane, tab by tab, in the order the tabs file lists them.
+    fn saved_panes(&self) -> Vec<u64> {
+        let mut leaves = Vec::new();
+        for tab in self.tabs.iter().filter(|tab| tab.focus != SETTINGS) {
+            tab.root.leaves(&mut leaves);
+        }
+        leaves
+    }
+
+    /// Each pane's finished blocks, for `restore_tabs` to bring back.
+    fn save_sessions(&mut self) {
+        let dir = sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        if crate::setting("restore_output").as_deref() == Some("off") {
+            return;
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        for (index, id) in self.saved_panes().into_iter().enumerate() {
+            if let Some(pane) = self.pane(id) {
+                pane.session.save_blocks(&format!("{dir}/{index}"));
+            }
+        }
     }
 
     /// Rebuilds one node written by `save_node`, opening its panes. A bare
@@ -1160,8 +1213,13 @@ impl App {
         if self.recap_test.is_some_and(|at| now >= at) {
             self.recap_test = None;
             if let Some(id) = self.focused_id() {
+                // With TEMINO_FIND_TEST=<query>, the search bar instead.
+                let find = std::env::var("TEMINO_FIND_TEST").ok();
                 if let Some(pane) = self.pane(id) {
-                    pane.focus_gained(now, None);
+                    match find {
+                        Some(query) => pane.find_test(&query),
+                        None => pane.focus_gained(now, None),
+                    }
                 }
             }
             self.dirty = true;
@@ -1198,6 +1256,7 @@ impl App {
 
     fn quit(&mut self) {
         self.save_tabs();
+        self.save_sessions();
         for pane in &mut self.panes {
             pane.hangup();
         }
@@ -1278,12 +1337,47 @@ impl App {
     }
 
     fn set_background(&mut self, index: usize) {
-        let Some(&(name, rgb)) = BACKGROUNDS.get(index) else { return };
-        self.ctx.theme = Theme::dark().with_background(rgb).with_opacity(self.ctx.theme.opacity);
-        platform::set_background(self.ctx.theme.background.to_rgb8());
-        platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), index);
-        self.background = index;
+        let Some(&(name, _)) = BACKGROUNDS.get(index) else { return };
+        self.background = Some(index);
         crate::save_setting("background", name);
+        self.apply_theme();
+    }
+
+    /// Settings ▸ Theme: the scheme `step` places along the library; its
+    /// own background replaces one picked before.
+    fn step_theme(&mut self, step: i32) {
+        self.themes = theme::library(&themes_dir());
+        let n = self.themes.len() as i32;
+        self.palette = (self.palette as i32 + step).rem_euclid(n) as usize;
+        self.background = None;
+        crate::save_setting("background", "");
+        crate::save_setting("theme", &self.themes[self.palette].name);
+        self.apply_theme();
+    }
+
+    /// `quick_terminal=<keys>` in the settings file: the hotkey that brings
+    /// the window from anywhere (off when unset or `off`).
+    fn quick_terminal_key() -> Option<String> {
+        crate::setting("quick_terminal").filter(|keys| !keys.is_empty() && keys != "off")
+    }
+
+    fn apply_quick_terminal(&mut self) {
+        let Some(keys) = App::quick_terminal_key() else {
+            platform::set_quick_terminal(None);
+            return;
+        };
+        let combo = bindings::parse_combo(&keys);
+        let registered = combo.is_some() && platform::set_quick_terminal(combo.as_ref());
+        if !registered && platform::QUICK_TERMINAL {
+            self.ctx.show_toast(&format!("Quick terminal: can't use {keys} as a hotkey"));
+        }
+    }
+
+    fn apply_theme(&mut self) {
+        let palette = self.themes.get(self.palette).unwrap_or(&self.themes[0]);
+        self.ctx.theme = build_theme(palette, self.background, self.ctx.theme.opacity);
+        platform::set_background(self.ctx.theme.background.to_rgb8());
+        platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), self.background.unwrap_or(usize::MAX));
         self.dirty = true;
     }
 
@@ -1397,8 +1491,59 @@ impl App {
         }
     }
 
-    /// Window shortcuts (tabs, splits, font size); the rest go to the pane.
+    /// A key: the keys file's binding for it, else the default.
     fn key(&mut self, key: KeyEvent) {
+        if self.renaming.is_none() && self.field.is_none() {
+            if self.bindings.refresh() && !self.bindings.errors.is_empty() {
+                let errors = &self.bindings.errors;
+                self.ctx.show_toast(&format!("Keys file: {} not understood ({})", errors.len(), errors[0]));
+            }
+            if let Some(bind) = self.bindings.find(&key).cloned() {
+                self.dirty = true;
+                match bind {
+                    Bind::Ignore => {}
+                    Bind::Action(action) => self.run_action(action),
+                    Bind::Text(text) => self.type_text(&text),
+                }
+                return;
+            }
+        }
+        self.default_key(key);
+    }
+
+    /// A bound action: its default shortcut, sent past the bindings.
+    fn run_action(&mut self, action: &str) {
+        match action {
+            "quick_terminal" => platform::toggle_quick_terminal(),
+            _ => {
+                if let Some(event) = bindings::default_event(action) {
+                    self.default_key(event);
+                }
+            }
+        }
+    }
+
+    /// A `text:` binding: typed into the focused pane; a line end at the
+    /// prompt runs the line.
+    fn type_text(&mut self, text: &str) {
+        let Some(id) = self.focused_id() else { return };
+        let Self { panes, ctx, .. } = self;
+        let Some(pane) = panes.iter_mut().find(|p| p.id == id) else { return };
+        if pane.session.editor_active() {
+            for (i, line) in text.split(['\r', '\n']).enumerate() {
+                if i > 0 {
+                    let enter = KeyEvent { named: Some(Named::Enter), mods: 0, raw_char: 13, bytes: vec![b'\r'] };
+                    pane.key(ctx, enter);
+                }
+                pane.text_input(line);
+            }
+        } else {
+            pane.text_input(text);
+        }
+    }
+
+    /// Window shortcuts (tabs, splits, font size); the rest go to the pane.
+    fn default_key(&mut self, key: KeyEvent) {
         if self.tab_menu.take().is_some() && key.named == Some(Named::Escape) {
             return;
         }
@@ -1577,6 +1722,11 @@ impl App {
     fn settings_values(&self) -> settings::Values {
         settings::Values {
             background: self.background,
+            theme: self.themes.get(self.palette).map(|t| t.name.clone()).unwrap_or_default(),
+            themes: self.themes.len(),
+            bindings: self.bindings.list.len(),
+            ligatures: self.ctx.text.ligatures,
+            quick_terminal: platform::QUICK_TERMINAL.then(App::quick_terminal_key),
             opacity: self.opacity,
             blur: self.blur,
             shell: shells::Kind::of_path(&self.ctx.shell).and_then(|kind| KINDS.iter().position(|&k| k == kind)),
@@ -1595,6 +1745,29 @@ impl App {
         self.dirty = true;
         match action {
             Action::Background(index) => self.set_background(index),
+            Action::Theme(step) => self.step_theme(step),
+            Action::QuickTerminal(on) => {
+                let keys = crate::setting("quick_terminal").filter(|k| !k.is_empty() && k != "off");
+                let keys = if on { keys.unwrap_or_else(|| QUICK_TERMINAL_KEY.to_owned()) } else { "off".to_owned() };
+                crate::save_setting("quick_terminal", &keys);
+                self.apply_quick_terminal();
+            }
+            Action::Ligatures(on) => {
+                self.ctx.text.ligatures = on;
+                crate::save_setting("ligatures", if on { "on" } else { "off" });
+            }
+            Action::EditKeys => {
+                let path = bindings::path();
+                if !std::path::Path::new(&path).exists() {
+                    let _ = std::fs::create_dir_all(crate::settings_dir());
+                    let _ = std::fs::write(&path, bindings::template());
+                }
+                platform::open_url(&path);
+            }
+            Action::OpenThemes => {
+                let _ = std::fs::create_dir_all(themes_dir());
+                platform::open_url(&themes_dir());
+            }
             Action::Opacity(index) => self.set_opacity(index),
             Action::Blur(on) => {
                 self.blur = on;
@@ -2348,7 +2521,8 @@ impl App {
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
                 // Only the current tab grows its lines; the rest stay one row.
-                let lines = if extended && index == self.active { self.pane_lines(index, &leaves, now) } else { Vec::new() };
+                let lines =
+                    if extended && index == self.active { self.pane_lines(index, &leaves, now) } else { Vec::new() };
                 TabView {
                     lines,
                     agent: agents[index],
@@ -2952,6 +3126,21 @@ impl App {
 /// How long a pane sits idle before coming back to it shows a recap:
 /// `TEMINO_RECAP_MINUTES`, else the `recap_minutes` setting, else 10.
 /// Zero turns it off (Command+I still shows one).
+/// A scheme from the library, on the picked background if there is one.
+fn build_theme(palette: &Palette, background: Option<usize>, opacity: f32) -> Theme {
+    let theme = palette.theme();
+    let theme = match background.and_then(|i| BACKGROUNDS.get(i)) {
+        Some(&(_, rgb)) => theme.with_background(rgb),
+        None => theme,
+    };
+    theme.with_opacity(opacity)
+}
+
+/// Where each pane's output is kept between launches.
+fn sessions_dir() -> String {
+    format!("{}/sessions", crate::settings_dir())
+}
+
 fn recap_idle() -> Duration {
     let minutes = std::env::var("TEMINO_RECAP_MINUTES")
         .ok()
