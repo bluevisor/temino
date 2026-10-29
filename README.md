@@ -91,7 +91,7 @@ macOS, Ctrl+Shift (or Super) on Linux.
 | Cmd+[ / Cmd+], Cmd+Option+arrows | previous / next pane, the pane in that direction |
 | Cmd+\` / Cmd+Shift+\` | the agent waiting on you longest / most recently; with none, the pane you were in before |
 | Cmd+Enter | zoom the pane to the whole tab, and back |
-| Cmd+1…8, Cmd+9 | a tab, the last tab |
+| Cmd+1…8, Cmd+9 | a tab, the last tab (Settings aside) |
 | Cmd+B | hide / show the tab list |
 | Ctrl+PageUp / PageDown, Ctrl+Tab / Ctrl+Shift+Tab | previous / next tab (on Haiku Ctrl+Tab stays the window switcher) |
 | Cmd+C, Cmd+Shift+C, Cmd+V | copy (selection, else the selected block's output), copy the block's command, paste |
