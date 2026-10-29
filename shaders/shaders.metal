@@ -160,11 +160,16 @@ vertex GlyphOut glyphVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     return out;
 }
 
-fragment float4 glyphFragment(GlyphOut in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
+fragment float4 glyphFragment(GlyphOut in [[stage_in]], texture2d<float> atlas [[texture(0)]],
+                              texture2d<float> colorAtlas [[texture(1)]]) {
     float2 frag = in.position.xy;
     if (frag.x < in.clip.x || frag.y < in.clip.y || frag.x >= in.clip.z || frag.y >= in.clip.w)
         discard_fragment();
     constexpr sampler nearest(filter::nearest, address::clamp_to_edge);
+    // A negative red marks a color emoji: premultiplied RGBA from the color
+    // atlas, faded by alpha.
+    if (in.color.r < 0.0)
+        return colorAtlas.sample(nearest, in.uv) * in.color.a;
     // A slight gamma lift: grayscale coverage blended in sRGB space reads thin.
     float coverage = pow(atlas.sample(nearest, in.uv).r, 0.8);
     float alpha = in.color.a * coverage;

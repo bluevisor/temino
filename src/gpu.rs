@@ -422,7 +422,13 @@ impl Gpu {
 
     /// Renders `scene` and returns the frame as tightly packed BGRA rows
     /// (always: the platform shows them, so `readback` changes nothing).
-    pub fn render(&mut self, scene: &Scene, atlas: &mut Atlas, _readback: bool) -> Result<Option<&[u8]>> {
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        atlas: &mut Atlas,
+        _color: &mut Atlas,
+        _readback: bool,
+    ) -> Result<Option<&[u8]>> {
         let (width, height) = scene.pixel_size();
         self.ensure_target(width, height)?;
 

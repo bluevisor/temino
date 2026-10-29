@@ -34,6 +34,33 @@ use crate::Msg;
 extern "C" {
     /// Gives the view the Metal layer that src/metal.rs renders into.
     fn temino_metal_attach(view: *mut std::ffi::c_void);
+    fn temino_emoji(
+        text: *const std::ffi::c_char,
+        size: f32,
+        max_width: f32,
+        max_height: f32,
+        out: *mut u8,
+        capacity: usize,
+        width: *mut u32,
+        height: *mut u32,
+    ) -> bool;
+}
+
+/// `text` in Apple Color Emoji at `size` pixels, shrunk to fit: its width,
+/// height and premultiplied RGBA rows, or `None` if it isn't an emoji.
+#[cfg(target_os = "macos")]
+pub fn emoji(text: &str, size: f32, max_width: f32, max_height: f32) -> Option<(usize, usize, Vec<u8>)> {
+    let text = std::ffi::CString::new(text).ok()?;
+    let mut out = vec![0u8; 512 * 512 * 4];
+    let (mut width, mut height) = (0u32, 0u32);
+    let ok = unsafe {
+        temino_emoji(text.as_ptr(), size, max_width, max_height, out.as_mut_ptr(), out.len(), &mut width, &mut height)
+    };
+    if !ok {
+        return None;
+    }
+    out.truncate(width as usize * height as usize * 4);
+    Some((width as usize, height as usize, out))
 }
 
 /// What the core thread asks of the window thread.

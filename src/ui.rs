@@ -95,12 +95,7 @@ pub fn draw_grid(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, view: 
             let span = if c.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
             if !c.flags.contains(Flags::HIDDEN) {
                 let style = Style { bold: c.flags.contains(Flags::BOLD), italic: c.flags.contains(Flags::ITALIC) };
-                text.draw_cell(scene, c.c, x, y, style, fg, span);
-                if let Some(marks) = c.zerowidth() {
-                    for &mark in marks {
-                        text.draw_cell(scene, mark, x, y, style, fg, span);
-                    }
-                }
+                text.draw_cluster(scene, c.c, c.zerowidth().unwrap_or(&[]), x, y, style, fg, span);
             }
             let width = cell.width * span as f32;
             if c.flags.intersects(Flags::ALL_UNDERLINES) {
