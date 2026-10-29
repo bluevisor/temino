@@ -61,11 +61,12 @@ const RECAP_BLOCKS: usize = 5;
 const RECAP_LINES: usize = 30;
 const RECAP_CHARS: usize = 6000;
 /// The launch banner: 5-pixel-tall block letters packed two pixel rows per
-/// cell with half blocks, so it's 29x3 cells.
+/// cell with half blocks, so it's 30x3 cells. Every stroke is one pixel
+/// wide.
 const BANNER: &[&str] = &[
-    "▀██▀ █▀▀▀ █▄ ▄█ ▀█▀ █▄ █ █▀▀█",
-    " ██  █▀▀  █ ▀ █  █  █ ▀█ █  █",
-    " ▀▀  ▀▀▀▀ ▀   ▀ ▀▀▀ ▀  ▀ ▀▀▀▀",
+    "▀▀█▀▀ █▀▀▀ █▄ ▄█ ▀█▀ █▄ █ █▀▀█",
+    "  █   █▀▀  █ ▀ █  █  █ ▀█ █  █",
+    "  ▀   ▀▀▀▀ ▀   ▀ ▀▀▀ ▀  ▀ ▀▀▀▀",
 ];
 /// The big banner for very wide panes, in figlet's "ANSI Shadow" style.
 const BANNER_LARGE: &[&str] = &[
@@ -2225,13 +2226,15 @@ impl Pane {
         if let Some(banner) = banner {
             // The three leaves of the Haiku logo, left to right: green,
             // orange, peach, blended by hue so green turns yellow on its way
-            // to orange. Top rows catch a little light like the leaves'
-            // upper edges; the big banner's box-drawing "shadow" strokes sit
-            // darker.
+            // to orange. The big banner's top rows catch a little light like
+            // the leaves' upper edges, and its box-drawing "shadow" strokes
+            // sit darker. The small one stays flat: with only three rows the
+            // light steps show as seams inside its strokes.
             let leaves = [Color::hex(0x5ae202), Color::hex(0xff8203), Color::hex(0xffc468)];
             let columns = banner[0].chars().count() as f32 - 1.0;
+            let shine = if banner.len() > BANNER.len() { 0.22 } else { 0.0 };
             for (row, line) in banner.iter().enumerate() {
-                let light = 0.22 * (1.0 - row as f32 / (banner.len() - 1) as f32);
+                let light = shine * (1.0 - row as f32 / (banner.len() - 1) as f32);
                 for (column, c) in line.chars().enumerate() {
                     let t = column as f32 / columns * 2.0;
                     let leaf =
