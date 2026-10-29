@@ -18,7 +18,7 @@ use crate::pane::{AgentInfo, Ctx, MarkNote, Pane};
 use crate::picture::Picture;
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
-use crate::settings::{self, Action, Field};
+use crate::settings::{self, Action, Field, Headers};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{self, Color, Palette, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
@@ -448,8 +448,9 @@ pub struct App {
     /// The Settings text field being typed in, its text, and whether
     /// that's all selected.
     field: Option<(Field, String, bool)>,
-    /// Whether panes running an agent (or a listed program) get a header.
-    headers: bool,
+    /// Which panes get a header: those running an agent (or a listed
+    /// program), every terminal, or none.
+    headers: Headers,
     hover_tab: Option<usize>,
     /// When the pointer came onto the hovered tab, for its path's label.
     hover_at: Instant,
@@ -671,7 +672,7 @@ impl App {
             toast: None,
             shell,
             composing: false,
-            headers: crate::setting("headers").as_deref() != Some("off"),
+            headers: Headers::parse(crate::setting("headers").as_deref()) != Headers::Off,
         };
         let mut app = App {
             gpu,
@@ -720,7 +721,7 @@ impl App {
             tab_menu: None,
             renaming: None,
             field: None,
-            headers: crate::setting("headers").as_deref() != Some("off"),
+            headers: Headers::parse(crate::setting("headers").as_deref()),
             hover_tab: None,
             hover_at: Instant::now(),
             mouse: (0.0, 0.0),
@@ -1343,19 +1344,24 @@ impl App {
             tab.root.layout(rect, &mut Vec::new(), &mut panes, &mut dividers);
         }
         // A pane with an agent (or a listed program) in it gives its top
-        // to the header.
+        // to the header; with headers on, every terminal does.
         for (id, rect) in &mut panes {
-            let header = self.headers
-                && self
-                    .panes
-                    .iter()
-                    .any(|pane| pane.id == *id && (pane.agent_now.is_some() || pane.program_now.is_some()));
+            let header = self.panes.iter().any(|pane| pane.id == *id && self.has_header(pane));
             if header && rect.h > 3.0 * AGENT_HEADER {
                 rect.y += AGENT_HEADER;
                 rect.h -= AGENT_HEADER;
             }
         }
         (panes, dividers)
+    }
+
+    /// Whether `pane` gets a header over it, by Settings ▸ Status header.
+    fn has_header(&self, pane: &Pane) -> bool {
+        match self.headers {
+            Headers::Off => false,
+            Headers::Auto => pane.agent_now.is_some() || pane.program_now.is_some(),
+            Headers::On => true,
+        }
     }
 
     fn visible_panes(&self) -> Vec<(u64, Rect)> {
@@ -2108,10 +2114,10 @@ impl App {
             Action::CheckForUpdates => {
                 self.check_for_updates();
             }
-            Action::Headers(on) => {
-                self.headers = on;
-                self.ctx.headers = on;
-                crate::save_setting("headers", if on { "on" } else { "off" });
+            Action::Headers(headers) => {
+                self.headers = headers;
+                self.ctx.headers = headers != Headers::Off;
+                crate::save_setting("headers", headers.key());
                 self.relayout();
             }
             Action::Edit(field) => {
@@ -2895,30 +2901,46 @@ impl App {
 
     /// The bar over each pane with an agent: what it's doing and for how
     /// long, what you last asked it, its subagents and its session. A
-    /// listed program gets its name and how long it has run.
+    /// listed program gets its name and how long it has run; any other
+    /// terminal (headers on) its running command, or its folder at rest.
     fn draw_agent_headers(&mut self, visible: &[(u64, Rect)]) {
-        if !self.headers {
+        if self.headers == Headers::Off {
             return;
         }
         let now = Instant::now();
         let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
         let focus = self.focused_id();
+        let sender = self.ctx.sender.clone();
         for &(id, rect) in visible {
-            let Some(pane) = self.panes.iter().find(|pane| pane.id == id) else { continue };
-            let info = pane.agent_info(now);
-            let program = pane.program_now.clone();
-            if (info.is_none() && program.is_none()) || rect.h <= 2.0 * AGENT_HEADER {
+            let Some(index) = self.panes.iter().position(|pane| pane.id == id) else { continue };
+            if !self.has_header(&self.panes[index]) || rect.h <= 2.0 * AGENT_HEADER {
                 continue;
             }
+            let pane = &mut self.panes[index];
+            let info = pane.agent_info(now);
+            let program = pane.program_now.clone();
+            let shell = (info.is_none() && program.is_none()).then(|| {
+                pane.refresh_git(&sender, now);
+                let (busy, line) = pane.activity();
+                let detail = if busy {
+                    ui::short_path(&pane.session.cwd)
+                } else {
+                    pane.idle_line(&pane.session.cwd, now)
+                };
+                (busy, pane.last_failed(), line, detail)
+            });
             let bar = Rect::new(rect.x, rect.y - AGENT_HEADER, rect.w, AGENT_HEADER);
             let Self { scene, ctx, pane_hits, .. } = self;
             let Ctx { text, theme, .. } = ctx;
-            match (info, program) {
-                (Some(info), _) => draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, t),
-                (None, Some((name, started))) => {
+            match (info, program, shell) {
+                (Some(info), _, _) => draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, t),
+                (None, Some((name, started)), _) => {
                     draw_program_header(scene, text, theme, bar, &name, now.duration_since(started))
                 }
-                (None, None) => {}
+                (None, None, Some((busy, failed, line, detail))) => {
+                    draw_shell_header(scene, text, theme, bar, busy, failed, &line, &detail)
+                }
+                (None, None, None) => {}
             }
             pane_hits.push((bar, self.active, id));
         }
@@ -3723,7 +3745,7 @@ fn draw_tab_background(
     let (fill, border) = match (color, current) {
         (Some(color), true) => (theme.raised.mix(color, 0.42), color.mix(theme.text, 0.15)),
         (Some(color), false) => (color.alpha(0.22), color.alpha(0.0)),
-        (None, true) => (theme.raised, theme.divider),
+        (None, true) => (theme.raised.mix(theme.text, 0.06), theme.divider),
         (None, false) => return,
     };
     let fill = if dragged { fill.mix(theme.text, 0.06) } else { fill };
@@ -4019,6 +4041,45 @@ fn draw_program_header(
     let uptime = format!("up {}", ui::short_duration(uptime));
     let w = text.measure(&uptime, UI, 11.0);
     text.draw_text(scene, &uptime, bar.right() - 12.0 - w, baseline, UI, 11.0, theme.text_faint);
+}
+
+/// The bar over a plain terminal (headers on): a dot (lit while a command
+/// runs, red after one failed), the command or the folder, then the folder
+/// or the last command and the git branch.
+#[allow(clippy::too_many_arguments)]
+fn draw_shell_header(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    bar: Rect,
+    busy: bool,
+    failed: bool,
+    line: &str,
+    detail: &str,
+) {
+    scene.fill(bar, theme.panel(SURFACE_LIFT));
+    scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
+    let font = 12.0;
+    let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
+    let cy = bar.y + bar.h / 2.0;
+    let mut x = bar.x + 12.0;
+    let dot = if busy {
+        theme.accent
+    } else if failed {
+        theme.error.alpha(0.85)
+    } else {
+        theme.text_faint
+    };
+    scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), dot).radius(4.0));
+    x += 16.0;
+    let right = bar.right() - 12.0;
+    let shown = text.elide(line, UI_BOLD, font, (right - x - 14.0).max(0.0));
+    text.draw_text(scene, &shown, x, baseline, UI_BOLD, font, theme.text);
+    x += text.measure(&shown, UI_BOLD, font) + 14.0;
+    if !detail.is_empty() && detail != line && right - x > 40.0 {
+        let shown = text.elide(detail, UI, font, right - x - 14.0);
+        text.draw_text(scene, &shown, x, baseline, UI, font, theme.text_dim);
+    }
 }
 
 fn write_ppm(path: &std::ffi::OsStr, bgra: &[u8], width: u32, height: u32) {

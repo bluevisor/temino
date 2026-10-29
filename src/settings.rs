@@ -48,12 +48,52 @@ pub struct Values {
     pub updates: bool,
     /// The window can be see-through (macOS).
     pub see_through: bool,
-    /// The header over a pane running an agent (or a listed program).
-    pub headers: bool,
+    /// Which panes get a status header.
+    pub headers: Headers,
     /// What each text field holds now, in `Field::ALL` order.
     pub fields: [String; Field::ALL.len()],
     /// The field being typed in, its text, and whether that's all selected.
     pub editing: Option<(Field, String, bool)>,
+}
+
+/// Which panes get a status header: none, those running an agent (or a
+/// listed program), or every terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Headers {
+    Off,
+    Auto,
+    On,
+}
+
+impl Headers {
+    pub const ALL: [Headers; 3] = [Headers::Off, Headers::Auto, Headers::On];
+
+    /// From its line in the settings file. "on" meant agents only before
+    /// there was a third choice, so every terminal is "all".
+    pub fn parse(value: Option<&str>) -> Headers {
+        match value {
+            Some("off") => Headers::Off,
+            Some("all") => Headers::On,
+            _ => Headers::Auto,
+        }
+    }
+
+    /// Its line in the settings file.
+    pub fn key(self) -> &'static str {
+        match self {
+            Headers::Off => "off",
+            Headers::Auto => "auto",
+            Headers::On => "all",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Headers::Off => "Off",
+            Headers::Auto => "Auto",
+            Headers::On => "On",
+        }
+    }
 }
 
 /// A setting typed in rather than picked: the model server and the keys.
@@ -108,7 +148,7 @@ pub enum Action {
     Zoom(i32),
     Updates(bool),
     CheckForUpdates,
-    Headers(bool),
+    Headers(Headers),
     /// Start typing in a text field.
     Edit(Field),
 }
@@ -293,7 +333,15 @@ impl Ui<'_> {
             Row::Blur => ("Blur behind the window", "Soften what shows through".to_owned()),
             Row::Zoom => ("Size", format!("{:.0}% · Command+plus and Command+minus too", values.zoom)),
             Row::Shell => ("Default shell", "For new tabs and panes; a missing one is installed".to_owned()),
-            Row::Headers => ("Status header", "Over a pane running an agent: what it's doing, for how long".to_owned()),
+            Row::Headers => (
+                "Status header",
+                match values.headers {
+                    Headers::Off => "None over any pane",
+                    Headers::Auto => "Over a pane running an agent: what it's doing, for how long",
+                    Headers::On => "Over every terminal: an agent's status, or the shell's command and folder",
+                }
+                .to_owned(),
+            ),
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
@@ -353,7 +401,11 @@ impl Ui<'_> {
             }
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::CheckForUpdates => self.button(right, control_y, "Check for Updates", Action::CheckForUpdates),
-            Row::Headers => self.toggle(right, rect.y, values.headers, Action::Headers(!values.headers)),
+            Row::Headers => {
+                let labels = Headers::ALL.map(|h| h.label().to_owned());
+                let selected = Headers::ALL.iter().position(|&h| h == values.headers);
+                self.segments(right, control_y, &labels, selected, |i| Action::Headers(Headers::ALL[i]));
+            }
             Row::Field(field) => self.field(right, control_y, field, values),
         }
     }
@@ -583,7 +635,7 @@ mod tests {
             zoom: 100.0,
             updates: true,
             see_through: true,
-            headers: true,
+            headers: Headers::Auto,
             fields: Default::default(),
             editing: None,
         };
@@ -607,7 +659,9 @@ mod tests {
         expected.extend([
             Action::TabsTop(false),
             Action::TabsTop(true),
-            Action::Headers(false),
+            Action::Headers(Headers::Off),
+            Action::Headers(Headers::Auto),
+            Action::Headers(Headers::On),
         ]);
         expected.extend(Field::ALL.map(Action::Edit));
         expected.extend([Action::Updates(false), Action::CheckForUpdates]);
