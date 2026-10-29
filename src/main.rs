@@ -83,14 +83,41 @@ pub fn save_setting(key: &str, value: &str) {
         .map(str::to_owned)
         .collect();
     lines.push(format!("{prefix}{value}"));
-    let _ = std::fs::create_dir_all(settings_dir());
+    create_private_dir(&settings_dir());
     let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+/// Makes `dir` (and its parents) and leaves it readable only by you, as
+/// it holds saved terminal output and command history.
+pub fn create_private_dir(dir: &str) {
+    let _ = std::fs::create_dir_all(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// Writes `path` readable only by you, including when it already exists.
+pub fn write_private(path: &str, contents: impl AsRef<[u8]>) {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Ok(mut file) = options.open(path) {
+        let _ = file.write_all(contents.as_ref());
+    }
 }
 
 /// Reports a fatal error the way native apps do, with an alert.
 pub fn fatal(message: &str) {
     eprintln!("temino: {message}");
-    let _ = std::fs::create_dir_all(settings_dir());
+    create_private_dir(&settings_dir());
     let _ = std::fs::write(format!("{}/crash.log", settings_dir()), format!("{message}\n"));
     platform::alert(&format!("Temino: {message}"));
 }
@@ -104,7 +131,7 @@ pub fn trace(message: &str) {
     let Some(start) = START.get_or_init(|| std::env::var_os("TEMINO_TRACE").map(|_| std::time::Instant::now())) else {
         return;
     };
-    let _ = std::fs::create_dir_all(settings_dir());
+    create_private_dir(&settings_dir());
     let path = format!("{}/trace.log", settings_dir());
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{:9.3} {message}", start.elapsed().as_secs_f64());

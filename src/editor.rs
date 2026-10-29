@@ -356,8 +356,8 @@ impl History {
 
     fn save(&self) {
         let text: String = self.entries.iter().map(|e| e.replace('\\', "\\\\").replace('\n', "\\n") + "\n").collect();
-        let _ = std::fs::create_dir_all(crate::settings_dir());
-        let _ = std::fs::write(&self.path, text);
+        crate::create_private_dir(&crate::settings_dir());
+        crate::write_private(&self.path, text);
     }
 }
 
