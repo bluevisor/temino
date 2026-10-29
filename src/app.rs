@@ -11,7 +11,7 @@ use crate::complete::Commands;
 use crate::editor::History;
 use crate::gpu::Gpu;
 use crate::keys::Named;
-use crate::pane::{AgentInfo, Ctx, Pane};
+use crate::pane::{AgentInfo, Ctx, MarkNote, Pane};
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::settings::{self, Action, Field};
@@ -70,6 +70,65 @@ const MENU_ROW: f32 = 26.0;
 
 /// The colors a tab can be marked with, from its menu.
 const TAB_COLORS: [u32; 6] = [0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5];
+
+/// What a tab is waiting on you for, set by hand so a glance at the list
+/// says what to do with it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Mark {
+    /// Deal with it first.
+    Important,
+    /// Done for now, held up by something else.
+    Waiting,
+    /// Set aside to come back to.
+    Later,
+}
+
+impl Mark {
+    const ALL: [Mark; 3] = [Mark::Important, Mark::Waiting, Mark::Later];
+
+    fn label(self) -> &'static str {
+        match self {
+            Mark::Important => "Important",
+            Mark::Waiting => "Waiting",
+            Mark::Later => "Later",
+        }
+    }
+
+    fn color(self, theme: &Theme) -> Color {
+        match self {
+            Mark::Important => theme.error,
+            Mark::Waiting => theme.warning,
+            Mark::Later => theme.text_faint,
+        }
+    }
+
+    /// What it means, for the model writing a recap.
+    fn meaning(self) -> &'static str {
+        match self {
+            Mark::Important => "important, to deal with first",
+            Mark::Waiting => "waiting: done for now and held up by something else",
+            Mark::Later => "set aside to come back to later",
+        }
+    }
+
+    /// Set aside: ⌘` passes it by, and typing in it clears the mark.
+    fn aside(self) -> bool {
+        self != Mark::Important
+    }
+
+    /// How it's written in the saved tabs file.
+    fn code(self) -> &'static str {
+        match self {
+            Mark::Important => "important",
+            Mark::Waiting => "waiting",
+            Mark::Later => "later",
+        }
+    }
+
+    fn from_code(code: &str) -> Option<Mark> {
+        Mark::ALL.into_iter().find(|mark| mark.code() == code)
+    }
+}
 
 /// Separates the panes of a tab in the saved tabs file.
 const LAYOUT_SEPARATOR: char = '\u{1f}';
@@ -223,6 +282,9 @@ struct Tab {
     /// tabs are reordered.
     shown: Option<(f32, f32)>,
     slide: Option<((f32, f32), Instant)>,
+    mark: Option<Mark>,
+    /// When the mark was set, this run; a restored mark doesn't know.
+    marked_at: Option<Instant>,
 }
 
 /// What a row of the tab menu does.
@@ -230,6 +292,7 @@ struct Tab {
 enum MenuAction {
     Rename,
     Color(Option<usize>),
+    Mark(Mark),
     Close,
     CloseOthers,
     // A pane's menu: these act on the focused pane.
@@ -291,6 +354,7 @@ struct TabView {
     lines: Vec<PaneLine>,
     /// Its focused pane's folder, in full.
     path: String,
+    mark: Option<Mark>,
 }
 
 /// One pane's line in the extended sidebar.
@@ -707,7 +771,17 @@ impl App {
 
     fn new_tab(&mut self) -> Result<(), String> {
         let id = self.make_pane()?;
-        self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoomed: false, name: None, color: None, shown: None, slide: None });
+        self.tabs.push(Tab {
+            root: Node::Leaf(id),
+            focus: id,
+            zoomed: false,
+            name: None,
+            color: None,
+            shown: None,
+            slide: None,
+            mark: None,
+            marked_at: None,
+        });
         self.switch_tab(self.tabs.len() - 1);
         self.save_tabs();
         Ok(())
@@ -719,10 +793,10 @@ impl App {
         let saved = std::fs::read_to_string(tabs_path()).unwrap_or_default();
         let mut active = 0;
         for line in saved.lines() {
-            // active?, color, panes, name — separated by tabs.
-            let mut fields = line.splitn(4, '\t');
-            let (Some(current), Some(color), Some(layout), name) =
-                (fields.next(), fields.next(), fields.next(), fields.next())
+            // active?, color, panes, name, mark — separated by tabs.
+            let mut fields = line.splitn(5, '\t');
+            let (Some(current), Some(color), Some(layout), name, mark) =
+                (fields.next(), fields.next(), fields.next(), fields.next(), fields.next())
             else {
                 continue;
             };
@@ -738,6 +812,8 @@ impl App {
                 color: color.parse().ok().filter(|&c: &usize| c < TAB_COLORS.len()),
                 shown: None,
                 slide: None,
+                mark: mark.and_then(Mark::from_code),
+                marked_at: None,
             });
             if current == "*" {
                 active = self.tabs.len() - 1;
@@ -827,7 +903,8 @@ impl App {
                 let current = if index == self.active { "*" } else { "" };
                 let color = tab.color.map(|c| c.to_string()).unwrap_or_default();
                 let name = tab.name.as_deref().unwrap_or("");
-                format!("{current}\t{color}\t{layout}\t{name}\n")
+                let mark = tab.mark.map_or("", Mark::code);
+                format!("{current}\t{color}\t{layout}\t{name}\t{mark}\n")
             })
             .collect();
         let _ = std::fs::create_dir_all(crate::settings_dir());
@@ -944,10 +1021,11 @@ impl App {
             pane.focus_changed(false);
             pane.focus_lost(now);
         }
+        let note = after.and_then(|id| self.mark_note(id, now));
         if let Some(pane) = after.and_then(|id| self.panes.iter_mut().find(|p| p.id == id)) {
             pane.focus_changed(window);
             if window {
-                pane.focus_gained(now, Some(idle));
+                pane.focus_gained(now, Some(idle), note);
             }
         }
     }
@@ -971,9 +1049,18 @@ impl App {
             .panes
             .iter()
             .filter(|pane| Some(pane.id) != focus)
+            // Tabs set aside by hand wait their turn.
+            .filter(|pane| !self.mark_of(pane.id).is_some_and(Mark::aside))
             .filter_map(|pane| pane.needs_since.map(|(state, at)| (state, at, pane.id)))
             .collect();
-        needs.sort_by(|a, b| b.0.cmp(&a.0).then(if newest { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) }));
+        let important = |id: u64| self.mark_of(id) == Some(Mark::Important);
+        needs.sort_by(|a, b| {
+            important(b.2).cmp(&important(a.2)).then(b.0.cmp(&a.0)).then(if newest {
+                b.1.cmp(&a.1)
+            } else {
+                a.1.cmp(&b.1)
+            })
+        });
         let back = self.last_focus.filter(|id| Some(*id) != focus && self.panes.iter().any(|pane| pane.id == *id));
         match needs.first().map(|need| need.2).or(back) {
             Some(id) => self.reveal_pane(id),
@@ -1232,10 +1319,11 @@ impl App {
             if let Some(id) = self.focused_id() {
                 // With TEMINO_FIND_TEST=<query>, the search bar instead.
                 let find = std::env::var("TEMINO_FIND_TEST").ok();
+                let note = self.mark_note(id, now);
                 if let Some(pane) = self.pane(id) {
                     match find {
                         Some(query) => pane.find_test(&query),
-                        None => pane.focus_gained(now, None),
+                        None => pane.focus_gained(now, None, note),
                     }
                 }
             }
@@ -1302,11 +1390,12 @@ impl App {
                 self.focused = focused;
                 self.ctx.blink_epoch = now;
                 if let Some(id) = self.focused_id() {
+                    let note = self.mark_note(id, now);
                     if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
                         pane.focus_changed(focused);
                         // Back from another app counts as coming back to the pane.
                         if focused {
-                            pane.focus_gained(now, Some(recap_idle()));
+                            pane.focus_gained(now, Some(recap_idle()), note);
                         } else {
                             pane.focus_lost(now);
                         }
@@ -1632,11 +1721,25 @@ impl App {
                     }
                     true
                 }
+                (_, Some('i')) if key.shift() => {
+                    self.toggle_mark(self.active, Mark::Important);
+                    true
+                }
+                (_, Some('l')) if key.shift() => {
+                    self.toggle_mark(self.active, Mark::Later);
+                    true
+                }
+                (_, Some('l')) => {
+                    self.toggle_mark(self.active, Mark::Waiting);
+                    true
+                }
                 (_, Some('i')) => {
                     // "Where was I?" on demand.
                     if let Some(id) = self.focused_id() {
+                        let now = Instant::now();
+                        let note = self.mark_note(id, now);
                         if let Some(pane) = self.pane(id) {
-                            pane.focus_gained(Instant::now(), None);
+                            pane.focus_gained(now, None, note);
                         }
                     }
                     true
@@ -1723,6 +1826,11 @@ impl App {
             }
         }
         let Some(id) = self.focused_id() else { return };
+        // Typing in a tab set aside means it's being dealt with.
+        if let Some(tab) = self.tabs.get_mut(self.active).filter(|tab| tab.mark.is_some_and(Mark::aside)) {
+            tab.mark = None;
+            self.save_tabs();
+        }
         let Self { panes, ctx, .. } = self;
         if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
             pane.key(ctx, key);
@@ -1736,7 +1844,17 @@ impl App {
             self.switch_tab(index);
             return;
         }
-        self.tabs.push(Tab { root: Node::Leaf(SETTINGS), focus: SETTINGS, zoomed: false, name: None, color: None, shown: None, slide: None });
+        self.tabs.push(Tab {
+            root: Node::Leaf(SETTINGS),
+            focus: SETTINGS,
+            zoomed: false,
+            name: None,
+            color: None,
+            shown: None,
+            slide: None,
+            mark: None,
+            marked_at: None,
+        });
         self.switch_tab(self.tabs.len() - 1);
     }
 
@@ -1930,6 +2048,51 @@ impl App {
     }
 
     /// Moves tab `from` to position `to` in the list; the active tab stays active.
+    /// Sets tab `index`'s mark to `mark`, or clears it when it's already set.
+    fn toggle_mark(&mut self, index: usize, mark: Mark) {
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        tab.mark = if tab.mark == Some(mark) { None } else { Some(mark) };
+        tab.marked_at = tab.mark.map(|_| Instant::now());
+        let toast = match tab.mark {
+            Some(mark) => format!("Marked {}", mark.label()),
+            None => "Mark cleared".to_owned(),
+        };
+        self.ctx.show_toast(&toast);
+        self.save_tabs();
+        self.dirty = true;
+    }
+
+    /// The tab holding pane `id`.
+    fn tab_of(&self, id: u64) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| {
+            let mut leaves = Vec::new();
+            tab.root.leaves(&mut leaves);
+            leaves.contains(&id)
+        })
+    }
+
+    /// The mark on the tab holding pane `id`.
+    fn mark_of(&self, id: u64) -> Option<Mark> {
+        self.tab_of(id).and_then(|tab| tab.mark)
+    }
+
+    /// What the mark on pane `id`'s tab adds to its recap.
+    fn mark_note(&self, id: u64, now: Instant) -> Option<MarkNote> {
+        let tab = self.tab_of(id)?;
+        let mark = tab.mark?;
+        let ago = tab.marked_at.map(|at| ui::short_duration(now.duration_since(at)));
+        Some(MarkNote {
+            fact: match &ago {
+                Some(ago) => format!("{} · marked {ago} ago", mark.label()),
+                None => mark.label().to_owned(),
+            },
+            context: match &ago {
+                Some(ago) => format!("The user marked this tab {} {ago} ago.", mark.meaning()),
+                None => format!("The user marked this tab {}.", mark.meaning()),
+            },
+        })
+    }
+
     fn move_tab(&mut self, from: usize, to: usize) {
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
@@ -1961,8 +2124,14 @@ impl App {
     fn finish_rename(&mut self) {
         let Some(rename) = self.renaming.take() else { return };
         if let Some(tab) = self.tabs.get_mut(rename.tab) {
-            let name = rename.name.trim();
-            tab.name = (!name.is_empty()).then(|| name.to_owned());
+            let name = rename.name.trim().to_owned();
+            // Left as it was, the title keeps following the panes.
+            let typed = !name.is_empty() && tab.name.as_deref() != Some(&name);
+            if typed || name.is_empty() {
+                let auto = self.auto_title(rename.tab);
+                let tab = &mut self.tabs[rename.tab];
+                tab.name = (typed && name != auto).then_some(name);
+            }
         }
         self.save_tabs();
     }
@@ -2020,6 +2189,7 @@ impl App {
                 }
                 self.save_tabs();
             }
+            MenuAction::Mark(mark) => self.toggle_mark(tab, mark),
             MenuAction::Close => self.close_tab(tab),
             MenuAction::CloseOthers => {
                 for index in (0..self.tabs.len()).rev().filter(|&i| i != tab) {
@@ -2440,9 +2610,29 @@ impl App {
         if tab.focus == SETTINGS {
             return "Settings".to_owned();
         }
-        tab.name
-            .clone()
-            .unwrap_or_else(|| self.panes.iter().find(|p| p.id == tab.focus).map(Pane::title).unwrap_or_default())
+        tab.name.clone().unwrap_or_else(|| self.auto_title(index))
+    }
+
+    /// A tab's title when it isn't named: its panes' folders, in layout
+    /// order and each once, then what the focused pane has been running.
+    fn auto_title(&self, index: usize) -> String {
+        let tab = &self.tabs[index];
+        let mut leaves = Vec::new();
+        tab.root.leaves(&mut leaves);
+        let mut folders: Vec<String> = Vec::new();
+        for pane in leaves.iter().filter_map(|id| self.panes.iter().find(|p| p.id == *id)) {
+            let folder = pane.folder();
+            if !folders.contains(&folder) {
+                folders.push(folder);
+            }
+        }
+        let recent = self.panes.iter().find(|p| p.id == tab.focus).map(Pane::recent_commands).unwrap_or_default();
+        let folders = folders.join(" + ");
+        if recent.is_empty() {
+            folders
+        } else {
+            format!("{folders} · {}", recent.join(", "))
+        }
     }
 
     /// Reads what every pane's agent is doing, once a frame; a pane whose
@@ -2598,6 +2788,7 @@ impl App {
                         .unwrap_or_default(),
                     panes: leaves.len(),
                     color: self.tabs[index].color.map(|c| Color::hex(TAB_COLORS[c])),
+                    mark: self.tabs[index].mark,
                     editing: self
                         .renaming
                         .as_ref()
@@ -2696,22 +2887,39 @@ impl App {
             text.draw_text(scene, &label, badge.x + 5.0, badge.y + 12.0, UI, 10.0, theme.text_dim);
             right = badge.x - 6.0;
         }
+        if let Some(mark) = tab.mark {
+            let ink = mark.color(theme);
+            let w = text.measure(mark.label(), UI_BOLD, 10.0) + 12.0;
+            let chip = Rect::new(right - w, rect.y + (rect.h - 16.0) / 2.0, w, 16.0);
+            scene.quad(Quad::new(chip, ink.alpha(0.16)).radius(8.0).border(1.0, ink.alpha(0.45)));
+            text.draw_text(scene, mark.label(), chip.x + 6.0, chip.y + 12.0, UI_BOLD, 10.0, ink);
+            right = chip.x - 6.0;
+        }
         if let Some((name, selected)) = &tab.editing {
-            let field = Rect::new(x - 4.0, rect.y + 4.0, (close.x - x).max(0.0), rect.h - 8.0);
-            scene.quad(Quad::new(field, theme.background).radius(4.0).border(1.0, theme.accent));
-            scene.push_clip(field.inset(2.0, 0.0));
+            // Just taller than the text, centered on it.
+            let h = (font + 6.0).round();
+            let top = (baseline - ascent * 0.36 - h / 2.0).round();
+            let field = Rect::new(x - 3.0, top, (close.x - x - 1.0).max(0.0), h);
+            scene.quad(Quad::new(field, theme.background).radius(3.0).border(1.0, theme.accent));
+            scene.push_clip(field.inset(1.0, 0.0));
             let w = text.measure(name, UI, font);
             if *selected && !name.is_empty() {
                 scene.quad(
-                    Quad::new(Rect::new(x - 1.0, field.y + 3.0, w + 2.0, field.h - 6.0), theme.selection).radius(2.0),
+                    Quad::new(Rect::new(x - 1.0, field.y + 2.0, w + 2.0, field.h - 4.0), theme.selection).radius(2.0),
                 );
             }
             text.draw_text(scene, name, x, baseline, UI, font, theme.text);
-            scene.fill(Rect::new(x + w + 1.0, field.y + 4.0, 1.0, field.h - 8.0), theme.cursor);
+            scene.fill(Rect::new(x + w + 1.0, field.y + 3.0, 1.0, field.h - 6.0), theme.cursor);
             scene.pop_clip();
         } else {
             scene.push_clip(Rect::new(x, rect.y, (right - x).max(0.0), rect.h));
-            let color = if current { theme.text } else { theme.text_dim };
+            let color = if tab.mark.is_some_and(Mark::aside) {
+                theme.text_faint
+            } else if current {
+                theme.text
+            } else {
+                theme.text_dim
+            };
             text.draw_text(scene, &tab.title, x, baseline, UI, font, color);
             scene.pop_clip();
         }
@@ -2899,6 +3107,10 @@ impl App {
         let center = (rect.x + rect.w / 2.0 + 1.0, rect.y + rect.h / 2.0);
         let t = blink_epoch.elapsed().as_secs_f32();
         draw_tab_number(scene, text, theme, index, center, 24.0, tab.agent, tab.done_for, t);
+        if let Some(mark) = tab.mark {
+            let dot = Rect::new(rect.right() - 9.0, rect.y + 3.0, 6.0, 6.0);
+            scene.quad(Quad::new(dot, mark.color(theme)).radius(3.0));
+        }
         tab_hits.push((rect, index));
     }
 
@@ -2951,8 +3163,9 @@ impl App {
         }
         let Some(tab) = self.tabs.get(menu.tab) else { return };
         let selected = tab.color;
+        let marked = tab.mark;
         let several = self.tabs.len() > 1;
-        let rows = if several { 4.0 } else { 3.0 };
+        let rows = if several { 5.0 } else { 4.0 };
         let h = rows * MENU_ROW + 12.0 + 9.0;
         let x = menu.x.min(self.width - MENU_WIDTH - 8.0).max(4.0);
         let y = menu.y.min(self.height - h - 8.0).max(4.0);
@@ -3003,12 +3216,34 @@ impl App {
             }
             swatches.push((hit, MenuAction::Color(choice)));
         }
+        row_y += MENU_ROW;
+        // The marks go here, drawn once the rows are done with the text.
+        let marks_y = row_y;
         row_y += MENU_ROW + 4.0;
         scene.fill(Rect::new(x + 10.0, row_y, MENU_WIDTH - 20.0, 1.0), theme.divider);
         row_y += 5.0;
         item(scene, "Close Tab", MenuAction::Close, row_y);
         if several {
             item(scene, "Close Other Tabs", MenuAction::CloseOthers, row_y + MENU_ROW);
+        }
+        // The marks, each a chip that toggles.
+        let mut chip_x = x + 10.0;
+        for mark in Mark::ALL {
+            let ink = mark.color(theme);
+            let w = text.measure(mark.label(), UI_BOLD, 10.5) + 14.0;
+            let chip = Rect::new(chip_x, marks_y + (MENU_ROW - 18.0) / 2.0, w, 18.0);
+            let on = marked == Some(mark);
+            let fill = if on {
+                ink.alpha(0.3)
+            } else if chip.contains(mx, my) {
+                ink.alpha(0.14)
+            } else {
+                theme.background
+            };
+            scene.quad(Quad::new(chip, fill).radius(9.0).border(1.0, ink.alpha(if on { 0.9 } else { 0.4 })));
+            text.draw_text(scene, mark.label(), chip.x + 7.0, chip.y + 13.0, UI_BOLD, 10.5, ink);
+            swatches.push((chip, MenuAction::Mark(mark)));
+            chip_x += w + 6.0;
         }
         menu_hits.extend(swatches);
         scene.set_layer(LAYER_CONTENT);
