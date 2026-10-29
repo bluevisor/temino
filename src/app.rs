@@ -1587,7 +1587,7 @@ impl App {
             UiEvent::Wheel { dy, x, y, precise, .. } => {
                 let (x, y) = (x / self.zoom, y / self.zoom);
                 if let Some((SETTINGS, _)) = self.pane_at(x, y) {
-                    self.settings.wheel(dy);
+                    self.settings.wheel(dy, x, y);
                 } else if let Some((id, rect)) = self.pane_at(x, y) {
                     let Self { panes, ctx, .. } = self;
                     if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
@@ -1815,6 +1815,11 @@ impl App {
             return;
         }
         if key.named == Some(Named::Escape) {
+            if self.settings.themes_open {
+                self.settings.themes_open = false;
+                self.dirty = true;
+                return;
+            }
             if let Some(offer) = self.update.as_mut().filter(|offer| offer.open) {
                 offer.open = false;
                 return;
@@ -2025,6 +2030,8 @@ impl App {
             background: self.background,
             theme: self.themes.get(self.palette).map(|t| t.name.clone()).unwrap_or_default(),
             themes: self.themes.len(),
+            palettes: if self.settings.themes_open { self.themes.clone() } else { Vec::new() },
+            palette: self.palette,
             bindings: self.bindings.list.len(),
             ligatures: self.ctx.text.ligatures,
             quick_terminal: platform::QUICK_TERMINAL.then(App::quick_terminal_key),
@@ -2047,6 +2054,14 @@ impl App {
         match action {
             Action::Background(index) => self.set_background(index),
             Action::Theme(step) => self.step_theme(step),
+            Action::ThemeList => {
+                self.themes = theme::library(&themes_dir());
+                self.settings.toggle_themes();
+            }
+            Action::PickTheme(index) => {
+                self.settings.themes_open = false;
+                self.step_theme(index as i32 - self.palette as i32);
+            }
             Action::QuickTerminal(on) => {
                 let keys = crate::setting("quick_terminal").filter(|k| !k.is_empty() && k != "off");
                 let keys = if on { keys.unwrap_or_else(|| QUICK_TERMINAL_KEY.to_owned()) } else { "off".to_owned() };
@@ -2399,6 +2414,16 @@ impl App {
             && matches!(self.settings.action_at(x, y), Some(Action::Edit(_)));
         if !on_field {
             self.finish_field();
+        }
+        // A click off the theme list closes it, and does nothing else.
+        if self.settings.themes_open {
+            let on_list = matches!(self.pane_at(x, y), Some((SETTINGS, _)))
+                && matches!(self.settings.action_at(x, y), Some(Action::PickTheme(_) | Action::ThemeList));
+            if !on_list {
+                self.settings.themes_open = false;
+                self.dirty = true;
+                return;
+            }
         }
         if let Some(menu) = self.tab_menu.take() {
             // A click anywhere else only closes the menu.

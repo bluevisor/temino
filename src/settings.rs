@@ -2,10 +2,10 @@
 //! rest of the window. The page only draws and says what a click asks for;
 //! app.rs applies it and remembers it in the settings file.
 
-use crate::scene::{Quad, Rect, Scene};
+use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::shells::KINDS;
 use crate::text::{TextSystem, UI, UI_BOLD};
-use crate::theme::{Color, Theme, BACKGROUNDS, OPACITIES};
+use crate::theme::{Color, Palette, Theme, BACKGROUNDS, OPACITIES};
 
 /// The page's column, at most this wide, centered in the tab.
 const COLUMN: f32 = 640.0;
@@ -16,6 +16,9 @@ const SWATCH: f32 = 22.0;
 const FIELD_WIDTH: f32 = 260.0;
 /// How far one wheel line scrolls the page.
 const WHEEL_STEP: f32 = 48.0;
+/// The theme list: one line per theme, at most this tall before it scrolls.
+const LIST_ROW: f32 = 28.0;
+const LIST_HEIGHT: f32 = 340.0;
 
 /// What the settings are now, for drawing them.
 pub struct Values {
@@ -24,6 +27,9 @@ pub struct Values {
     /// The theme's name, and how many the library holds.
     pub theme: String,
     pub themes: usize,
+    /// The whole library, and which of it is in use, for the theme list.
+    pub palettes: Vec<Palette>,
+    pub palette: usize,
     /// How many key bindings the keys file holds.
     pub bindings: usize,
     pub ligatures: bool,
@@ -85,6 +91,10 @@ impl Field {
 pub enum Action {
     /// The theme this many places along the library.
     Theme(i32),
+    /// Open or close the list of every theme.
+    ThemeList,
+    /// The theme at this place in the library, picked from the list.
+    PickTheme(usize),
     OpenThemes,
     EditKeys,
     Ligatures(bool),
@@ -111,16 +121,33 @@ pub struct Page {
     /// How tall the page was last drawn, and the tab it was drawn in.
     content_height: f32,
     view_height: f32,
+    /// The theme list is open (a click on the theme's name), where it was
+    /// last drawn, and how far it's scrolled.
+    pub themes_open: bool,
+    list: Rect,
+    list_scroll: f32,
 }
 
 impl Page {
+    /// The last drawn wins, so the theme list takes clicks over the rows under it.
     pub fn action_at(&self, x: f32, y: f32) -> Option<Action> {
-        self.hits.iter().find(|(rect, _)| rect.contains(x, y)).map(|&(_, action)| action)
+        self.hits.iter().rev().find(|(rect, _)| rect.contains(x, y)).map(|&(_, action)| action)
     }
 
-    pub fn wheel(&mut self, dy: f32) {
+    /// Scrolls the theme list when the mouse is over it, the page otherwise.
+    pub fn wheel(&mut self, dy: f32, x: f32, y: f32) {
+        if self.themes_open && self.list.contains(x, y) {
+            self.list_scroll += dy * LIST_ROW;
+            return;
+        }
         let most = (self.content_height - self.view_height).max(0.0);
         self.scroll = (self.scroll + dy * WHEEL_STEP).clamp(0.0, most);
+    }
+
+    /// Opens the theme list scrolled to the theme in use, or closes it.
+    pub fn toggle_themes(&mut self) {
+        self.themes_open = !self.themes_open;
+        self.list_scroll = f32::NAN;
     }
 
     pub fn draw(
@@ -163,6 +190,15 @@ impl Page {
         let version = format!("Temino {}", env!("CARGO_PKG_VERSION"));
         ui.text.draw_text(ui.scene, &version, x, y + 4.0, UI, 11.5, theme.text_faint);
         y += 24.0;
+
+        let anchor = ui.hits.iter().find(|&&(_, action)| action == Action::ThemeList).map(|&(rect, _)| rect);
+        match anchor {
+            Some(anchor) if self.themes_open => {
+                let (list, scroll) = ui.theme_list(anchor, values, self.list_scroll);
+                (self.list, self.list_scroll) = (list, scroll);
+            }
+            _ => self.themes_open = false,
+        }
 
         self.content_height = y + self.scroll - rect.y + PAD;
         scene.pop_clip();
@@ -273,7 +309,10 @@ impl Ui<'_> {
         match row {
             Row::Theme => {
                 let labels = ["‹".to_owned(), values.theme.clone(), "›".to_owned()];
-                self.segments(right, control_y, &labels, None, |i| Action::Theme(i as i32 - 1));
+                self.segments(right, control_y, &labels, None, |i| match i {
+                    1 => Action::ThemeList,
+                    _ => Action::Theme(i as i32 - 1),
+                });
             }
             Row::Ligatures => self.toggle(right, rect.y, values.ligatures, Action::Ligatures(!values.ligatures)),
             Row::QuickTerminal => {
@@ -369,6 +408,64 @@ impl Ui<'_> {
         }
         self.scene.pop_clip();
         self.hit(rect, Action::Edit(field));
+    }
+
+    /// Every theme in a list dropped under `anchor` (the theme's name), the
+    /// one in use lit, each with its background and a few of its colors.
+    /// `scroll` NaN starts it on the one in use; returns where the list is
+    /// and the scroll kept in range.
+    fn theme_list(&mut self, anchor: Rect, values: &Values, scroll: f32) -> (Rect, f32) {
+        let theme = self.theme;
+        let size = 12.5;
+        let widest = values.palettes.iter().map(|p| self.text.measure(&p.name, UI, size)).fold(0.0, f32::max);
+        let w = (widest + 96.0).max(220.0);
+        let content = LIST_ROW * values.palettes.len() as f32;
+        let h = content.min(LIST_HEIGHT) + 8.0;
+        let below = self.clip.bottom() - anchor.bottom() - 12.0;
+        let y = if below >= h || below >= anchor.y - self.clip.y { anchor.bottom() + 6.0 } else { anchor.y - 6.0 - h };
+        let x = (anchor.x + anchor.w / 2.0 - w / 2.0).min(self.clip.right() - w - 12.0).max(self.clip.x + 12.0);
+        let list = Rect::new(x, y, w, h);
+        let most = (content - (h - 8.0)).max(0.0);
+        let scroll =
+            if scroll.is_nan() { LIST_ROW * values.palette as f32 - (h - 8.0 - LIST_ROW) / 2.0 } else { scroll };
+        let scroll = scroll.clamp(0.0, most);
+
+        self.scene.set_layer(LAYER_OVERLAY);
+        let shadow = Rect::new(list.x - 1.0, list.y + 5.0, list.w + 2.0, list.h + 2.0);
+        self.scene.quad(Quad::new(shadow, Color::hex(0x000000).alpha(0.28)).radius(12.0));
+        self.scene.quad(Quad::new(list, theme.raised).radius(10.0).border(1.0, theme.divider));
+        // The list's padding takes clicks too, rather than the rows under it.
+        self.hit(list, Action::PickTheme(values.palette));
+        let inner = list.inset(4.0, 4.0);
+        self.scene.push_clip(inner);
+        let ascent = self.text.ui_ascent(size);
+        for (index, palette) in values.palettes.iter().enumerate() {
+            let line = Rect::new(inner.x, inner.y + index as f32 * LIST_ROW - scroll, inner.w, LIST_ROW);
+            if line.bottom() < inner.y || line.y > inner.bottom() {
+                continue;
+            }
+            let on = index == values.palette;
+            if on {
+                self.scene.quad(Quad::new(line, theme.accent.alpha(0.85)).radius(6.0));
+            } else if self.hovered(line) && inner.contains(self.mouse.0, self.mouse.1) {
+                self.scene.quad(Quad::new(line, Color::hex(0xffffff).alpha(0.07)).radius(6.0));
+            }
+            let chip = Rect::new(line.x + 8.0, line.y + 6.0, 44.0, LIST_ROW - 12.0);
+            let chip_quad = Quad::new(chip, Color::hex(palette.background)).radius(4.0);
+            self.scene.quad(chip_quad.border(1.0, Color::hex(0xffffff).alpha(0.18)));
+            for (i, &ansi) in [1, 2, 4, 5].iter().enumerate() {
+                let dot = Rect::new(chip.x + 5.0 + i as f32 * 9.0, chip.y + chip.h / 2.0 - 3.0, 6.0, 6.0);
+                self.scene.quad(Quad::new(dot, Color::hex(palette.ansi[ansi])).radius(3.0));
+            }
+            let baseline = (line.y + (line.h + ascent * 0.72) / 2.0).round();
+            let color = if on { Color::hex(0x0b0d12) } else { theme.text };
+            self.text.draw_text(self.scene, &palette.name, chip.right() + 12.0, baseline, UI, size, color);
+            let (top, bottom) = (line.y.max(inner.y), line.bottom().min(inner.bottom()));
+            self.hit(Rect::new(line.x, top, line.w, bottom - top), Action::PickTheme(index));
+        }
+        self.scene.pop_clip();
+        self.scene.set_layer(LAYER_CONTENT);
+        (list, scroll)
     }
 
     /// The backgrounds as color dots, right-aligned at `right`.
@@ -473,6 +570,8 @@ mod tests {
             background: Some(0),
             theme: "Temino".into(),
             themes: 12,
+            palettes: Vec::new(),
+            palette: 0,
             bindings: 0,
             ligatures: true,
             quick_terminal: Some(None),
@@ -493,7 +592,7 @@ mod tests {
         scene.reset(1100.0, 2000.0, 1.0, theme.background);
         page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
         let actions: Vec<Action> = page.hits.iter().map(|&(_, a)| a).collect();
-        let mut expected = vec![Action::Theme(-1), Action::Theme(0), Action::Theme(1), Action::OpenThemes];
+        let mut expected = vec![Action::Theme(-1), Action::ThemeList, Action::Theme(1), Action::OpenThemes];
         expected.extend((0..BACKGROUNDS.len()).map(Action::Background));
         expected.extend((0..OPACITIES.len()).map(Action::Opacity));
         expected.extend([
@@ -524,9 +623,9 @@ mod tests {
     #[test]
     fn the_page_scrolls_only_as_far_as_it_goes() {
         let mut page = Page { content_height: 900.0, view_height: 600.0, ..Page::default() };
-        page.wheel(100.0);
+        page.wheel(100.0, 0.0, 0.0);
         assert_eq!(page.scroll, 300.0);
-        page.wheel(-100.0);
+        page.wheel(-100.0, 0.0, 0.0);
         assert_eq!(page.scroll, 0.0);
     }
 }
