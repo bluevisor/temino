@@ -279,6 +279,8 @@ struct TabView {
     editing: Option<(String, bool)>,
     /// The most urgent state of the agents in the tab's panes.
     agent: Option<AgentState>,
+    /// How long ago its newest unseen finish came in, for the green to pop.
+    done_for: f32,
     /// In the extended sidebar: a line on what each of its panes is doing.
     lines: Vec<PaneLine>,
     /// Its focused pane's folder, in full.
@@ -2472,7 +2474,9 @@ impl App {
     fn wake_for_agents(&mut self, agents: &[Option<AgentState>]) {
         let now = Instant::now();
         let wake = match agents.iter().flatten().max() {
-            Some(AgentState::Running | AgentState::Waiting) => Some(now + Duration::from_millis(50)),
+            // Smooth frames while something animates: a turning ring, an
+            // amber pulse, a green pop and its heartbeat.
+            Some(AgentState::Running | AgentState::Waiting | AgentState::Done) => Some(now + Duration::from_millis(33)),
             Some(_) => Some(now + Duration::from_millis(400)),
             None => None,
         };
@@ -2554,9 +2558,20 @@ impl App {
                 // Only the current tab grows its lines; the rest stay one row.
                 let lines =
                     if extended && index == self.active { self.pane_lines(index, &leaves, now) } else { Vec::new() };
+                let done_for = self
+                    .panes
+                    .iter()
+                    .filter(|pane| leaves.contains(&pane.id))
+                    .filter_map(|pane| match pane.needs_since {
+                        Some((AgentState::Done, at)) => Some(now.duration_since(at).as_secs_f32()),
+                        _ => None,
+                    })
+                    .reduce(f32::min)
+                    .unwrap_or(f32::MAX);
                 TabView {
                     lines,
                     agent: agents[index],
+                    done_for,
                     title: self.tab_title(index),
                     path: self
                         .panes
@@ -2642,7 +2657,7 @@ impl App {
         let mut x = rect.x + if left { 10.0 } else { 8.0 };
         if index < 9 || tab.agent.is_some() {
             let center = (x + number / 2.0, rect.y + rect.h / 2.0);
-            draw_tab_number(scene, text, theme, index, center, number, tab.agent, t);
+            draw_tab_number(scene, text, theme, index, center, number, tab.agent, tab.done_for, t);
             x += number + 8.0;
         }
         let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
@@ -2834,7 +2849,7 @@ impl App {
         draw_tab_background(scene, theme, rect, tab.color, current, dragged);
         let center = (rect.x + rect.w / 2.0 + 1.0, rect.y + rect.h / 2.0);
         let t = blink_epoch.elapsed().as_secs_f32();
-        draw_tab_number(scene, text, theme, index, center, 24.0, tab.agent, t);
+        draw_tab_number(scene, text, theme, index, center, 24.0, tab.agent, tab.done_for, t);
         tab_hits.push((rect, index));
     }
 
@@ -3221,6 +3236,7 @@ fn draw_tab_number(
     (cx, cy): (f32, f32),
     size: f32,
     agent: Option<AgentState>,
+    done_for: f32,
     t: f32,
 ) {
     let r = size / 2.0;
@@ -3249,7 +3265,7 @@ fn draw_tab_number(
             ink
         }
         Some(AgentState::Done) => {
-            scene.quad(Quad::new(circle, Color::hex(AGENT_DONE)).radius(r));
+            draw_done_pop(scene, circle, done_for);
             ink
         }
     };
@@ -3262,6 +3278,46 @@ fn draw_tab_number(
     } else if agent.is_some() {
         scene.quad(Quad::new(Rect::new(cx - 2.0, cy - 2.0, 4.0, 4.0), color).radius(2.0));
     }
+}
+
+/// A finished turn you haven't seen: the green badge springs in, flashes
+/// and sends out rings, then keeps a heartbeat (a bump and a ring every
+/// couple of seconds) until you look.
+fn draw_done_pop(scene: &mut Scene, circle: Rect, age: f32) {
+    let green = Color::hex(AGENT_DONE);
+    let r = circle.w / 2.0;
+    let (cx, cy) = (circle.x + r, circle.y + r);
+    let ring = |scene: &mut Scene, grow: f32, alpha: f32, width: f32| {
+        let rr = r + grow;
+        let rect = Rect::new(cx - rr, cy - rr, 2.0 * rr, 2.0 * rr);
+        scene.quad(Quad::new(rect, Color::TRANSPARENT).radius(rr).border(width, green.alpha(alpha)));
+    };
+    // Rings: a burst of three on arrival, then one a beat.
+    const BEAT: f32 = 2.2;
+    let rings: &[f32] = if age < BEAT { &[0.0, 0.18, 0.36] } else { &[0.0] };
+    let since_beat = if age < BEAT { age } else { (age - BEAT) % BEAT };
+    let strength = if age < BEAT { 1.0 } else { 0.7 };
+    for &delay in rings {
+        let p = (since_beat - delay) / 0.9;
+        if (0.0..1.0).contains(&p) {
+            let ease = 1.0 - (1.0 - p).powi(3);
+            ring(scene, 1.0 + ease * r * 1.4, strength * (1.0 - p), 2.5 - 1.5 * p);
+        }
+    }
+    // A soft glow under the badge, breathing with the beat.
+    let breath = 0.5 + 0.5 * (since_beat / BEAT * std::f32::consts::TAU).cos();
+    let glow = r + 3.0 + 2.0 * breath;
+    let halo = Rect::new(cx - glow, cy - glow, 2.0 * glow, 2.0 * glow);
+    scene.quad(Quad::new(halo, green.alpha(0.18 + 0.12 * breath)).radius(glow));
+    // The badge: a springy overshoot on arrival, a small bump each beat.
+    let spring = 1.0 + 0.55 * (-5.0 * age).exp() * (13.0 * age).cos();
+    let bump = if age >= BEAT { 1.0 + 0.12 * (-9.0 * since_beat).exp() * (since_beat * 18.0).sin().abs() } else { 1.0 };
+    let scale = spring * bump;
+    let br = r * scale;
+    let badge = Rect::new(cx - br, cy - br, 2.0 * br, 2.0 * br);
+    // White-hot at first, settling to green.
+    let flash = (-4.0 * age).exp();
+    scene.quad(Quad::new(badge, green.mix(Color::hex(0xffffff), 0.7 * flash)).radius(br));
 }
 
 /// An agent state's color: the accent while it works, amber while it
