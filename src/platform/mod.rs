@@ -133,8 +133,10 @@ pub enum UiEvent {
     #[allow(dead_code)]
     Background(usize),
     /// An input method committed this text.
+    #[allow(dead_code)]
     Text(String),
     /// An input method is composing this (empty: nothing).
+    #[allow(dead_code)]
     Preedit(String),
     /// Settings ▸ Shell picked this entry of `shells::KINDS` (Haiku's menu).
     #[allow(dead_code)]
