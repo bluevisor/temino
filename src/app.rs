@@ -439,6 +439,10 @@ pub struct App {
     extend_hit: Rect,
     /// The extended sidebar's pane lines and the agent headers, by pane.
     pane_hits: Vec<(Rect, usize, u64)>,
+    /// Each agent header, with its extension while open: a click there
+    /// opens or closes it. And the one under the pointer.
+    header_hits: Vec<(Rect, u64)>,
+    header_hover: Option<u64>,
     more_hits: Vec<(Rect, usize)>,
     menu_hits: Vec<(Rect, MenuAction)>,
     menu_rect: Rect,
@@ -714,6 +718,8 @@ impl App {
             collapse_hit: Rect::default(),
             extend_hit: Rect::default(),
             pane_hits: Vec::new(),
+            header_hits: Vec::new(),
+            header_hover: None,
             more_hits: Vec::new(),
             menu_hits: Vec::new(),
             menu_rect: Rect::default(),
@@ -2466,6 +2472,18 @@ impl App {
             self.pointer = Pointer::Sidebar;
             return;
         }
+        if let Some(&(_, id)) = self.header_hits.iter().find(|(r, _)| r.contains(x, y)) {
+            // An agent's header, or its extension: open or close it, and go
+            // to that pane.
+            if let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == id) {
+                pane.header_open = !pane.header_open;
+            }
+            if self.focused_id() != Some(id) {
+                self.set_focus(id);
+            }
+            self.dirty = true;
+            return;
+        }
         if let Some(&(_, tab, id)) = self.pane_hits.iter().find(|(r, _, _)| r.contains(x, y)) {
             // A pane's line in the extended sidebar, or its agent header:
             // go to that pane.
@@ -2661,6 +2679,16 @@ impl App {
         if let Some(divider) = self.dividers.iter().find(|d| d.grab_area().contains(x, y)) {
             let cursor = if divider.axis == Axis::Row { Cursor::ResizeColumn } else { Cursor::ResizeRow };
             self.set_cursor(cursor);
+            return;
+        }
+        let header = self.header_hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, id)| id);
+        if header != self.header_hover {
+            // The header's toggle lights up under the pointer.
+            self.header_hover = header;
+            self.dirty = true;
+        }
+        if header.is_some() {
+            self.set_cursor(Cursor::Arrow);
             return;
         }
         let Some((id, rect)) = self.pane_at(x, y) else { return };
@@ -2904,6 +2932,7 @@ impl App {
     /// listed program gets its name and how long it has run; any other
     /// terminal (headers on) its running command, or its folder at rest.
     fn draw_agent_headers(&mut self, visible: &[(u64, Rect)]) {
+        self.header_hits.clear();
         if self.headers == Headers::Off {
             return;
         }
@@ -2930,10 +2959,17 @@ impl App {
                 (busy, pane.last_failed(), line, detail)
             });
             let bar = Rect::new(rect.x, rect.y - AGENT_HEADER, rect.w, AGENT_HEADER);
-            let Self { scene, ctx, pane_hits, .. } = self;
+            let hover = self.header_hover == Some(id);
+            let Self { scene, ctx, pane_hits, header_hits, .. } = self;
             let Ctx { text, theme, .. } = ctx;
             match (info, program, shell) {
-                (Some(info), _, _) => draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, t),
+                (Some(info), _, _) => {
+                    // Extended, it reaches over the top of the pane, at most
+                    // most of the way down.
+                    let room = (rect.h * 0.6).floor();
+                    let reach = draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, hover, room, t);
+                    header_hits.push((Rect::new(bar.x, bar.y, bar.w, bar.h + reach), id));
+                }
                 (None, Some((name, started)), _) => {
                     draw_program_header(scene, text, theme, bar, &name, now.duration_since(started))
                 }
@@ -3861,6 +3897,38 @@ fn agent_color(theme: &Theme, state: AgentState, t: f32) -> Color {
     }
 }
 
+/// The ground of an agent's header, colored by what it's doing: plain at
+/// rest, blue while it works, amber (breathing) while it waits on you,
+/// green when it's done and you haven't looked.
+fn agent_ground(theme: &Theme, state: AgentState, t: f32) -> Color {
+    let ground = theme.panel(SURFACE_LIFT);
+    let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU / 1.4).sin();
+    match state {
+        AgentState::Idle => ground,
+        AgentState::Running => ground.mix(theme.accent, 0.17),
+        AgentState::Waiting => ground.mix(Color::hex(AGENT_WAITING), 0.16 + 0.06 * pulse),
+        AgentState::Done => ground.mix(Color::hex(AGENT_DONE), 0.16),
+    }
+}
+
+/// How long the running header's band of light takes to cross it.
+const SWEEP_PERIOD: f32 = 2.2;
+
+/// While the agent works, a soft band of light drifts across its header,
+/// left to right, over and over.
+fn draw_running_sweep(scene: &mut Scene, theme: &Theme, area: Rect, t: f32) {
+    let band = (area.w * 0.22).clamp(70.0, 220.0);
+    let soft = band * 0.35;
+    // From wholly off the left edge to wholly off the right, blur and all.
+    let travel = area.w + band + 6.0 * soft;
+    let x = area.x - band - 3.0 * soft + (t / SWEEP_PERIOD).fract() * travel;
+    // Far taller than the area, so only its sides are soft: a stripe.
+    let stripe = Rect::new(x, area.y - 4.0 * soft, band, area.h + 8.0 * soft);
+    scene.push_clip(area);
+    scene.shadow(stripe, theme.accent.alpha(0.28), 0.0, soft);
+    scene.pop_clip();
+}
+
 /// "Running 2m 14s", "Waiting for you", "Done in 3m 02s", "Idle".
 fn agent_summary(info: &AgentInfo) -> String {
     match (info.state, info.turn) {
@@ -3945,7 +4013,9 @@ fn draw_agent_icon(
 /// The bar over an agent's pane. Left: the agent's mark and name, then a
 /// dot and what it's doing, with the turn's clock; then your last prompt.
 /// Right: its subagents, the prompts queued behind this turn, its
-/// session's name and how long it has run.
+/// session's name and how long it has run, and the toggle that extends it
+/// over the top of the pane (`header_details`), up to `room` tall. Returns
+/// how far it reaches below the bar.
 fn draw_agent_header(
     scene: &mut Scene,
     text: &mut TextSystem,
@@ -3953,15 +4023,27 @@ fn draw_agent_header(
     bar: Rect,
     info: &AgentInfo,
     focused: bool,
+    hover: bool,
+    room: f32,
     t: f32,
-) {
+) -> f32 {
     let color = agent_color(theme, info.state, t);
-    let fill = theme.panel(SURFACE_LIFT).mix(color, if info.state == AgentState::Waiting { 0.12 } else { 0.04 });
-    scene.fill(bar, fill);
-    scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
-    if focused && info.state != AgentState::Idle {
-        scene.fill(Rect::new(bar.x, bar.bottom() - 2.0, bar.w, 2.0), color.alpha(0.6));
+    let ground = agent_ground(theme, info.state, t);
+    scene.fill(bar, ground);
+    if info.state == AgentState::Running {
+        draw_running_sweep(scene, theme, bar, t);
     }
+    let reach = if info.open { draw_header_details(scene, text, theme, bar, info, ground, room, t) } else { 0.0 };
+    // The edge under it all, lit while the pane is focused and the agent busy.
+    let edge = bar.bottom() + reach;
+    if reach > 0.0 {
+        scene.set_layer(LAYER_OVERLAY);
+    }
+    scene.fill(Rect::new(bar.x, edge - 1.0, bar.w, 1.0), theme.divider);
+    if focused && info.state != AgentState::Idle {
+        scene.fill(Rect::new(bar.x, edge - 2.0, bar.w, 2.0), color.alpha(0.6));
+    }
+    scene.set_layer(LAYER_CONTENT);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
@@ -3984,9 +4066,12 @@ fn draw_agent_header(
     };
     text.draw_text(scene, &summary, x, baseline, UI_BOLD, font, ink);
     x += text.measure(&summary, UI_BOLD, font) + 14.0;
+    // The toggle at the right end: a triangle pointing the way it goes.
+    let toggle = if hover { theme.text } else { theme.text_faint };
+    draw_triangle(scene, bar.right() - 16.0, cy, if info.open { -1.0 } else { 1.0 }, toggle);
     // The right side, laid out from the edge in: the subagents whenever
     // they fit, the rest only while the prompt keeps some room.
-    let mut right = bar.right() - 12.0;
+    let mut right = bar.right() - 32.0;
     let subagents = (info.subagents > 0)
         .then(|| format!("{} subagent{}", info.subagents, if info.subagents == 1 { "" } else { "s" }));
     let queued = (info.queued > 0).then(|| format!("{} queued", info.queued));
@@ -4018,6 +4103,143 @@ fn draw_agent_header(
         let room = right - x - 14.0;
         let shown = text.elide(&line, UI, font, room);
         text.draw_text(scene, &shown, x, baseline, UI, font, ink);
+    }
+    reach
+}
+
+/// The extended header, under the bar and over the top of the pane, on the
+/// same ground: the recap and your prompt whole, what each subagent was
+/// sent to do, the prompts queued, and where the session runs. At most
+/// `room` tall, cut short with an ellipsis. Returns its height.
+fn draw_header_details(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    bar: Rect,
+    info: &AgentInfo,
+    ground: Color,
+    room: f32,
+    t: f32,
+) -> f32 {
+    const PAD: f32 = 12.0;
+    const LINE: f32 = 18.0;
+    const LABEL: f32 = 20.0;
+    let width = bar.w - 2.0 * PAD;
+    // Rows as drawn: an indent, the text, its font and size, its ink, and
+    // the height it takes.
+    let mut rows: Vec<(f32, String, crate::text::FontId, f32, Color, f32)> = Vec::new();
+    let mut wrapped = |rows: &mut Vec<_>, lead: &str, body: &str, ink: Color| {
+        let indent = text.measure(lead, UI, 12.0);
+        for (i, line) in wrap(text, body, UI, 12.0, width - indent).into_iter().enumerate() {
+            let line = if i == 0 { format!("{lead}{line}") } else { line };
+            rows.push((if i == 0 { 0.0 } else { indent }, line, UI, 12.0, ink, LINE));
+        }
+    };
+    if let Some(recap) = &info.recap {
+        wrapped(&mut rows, "", recap, theme.text);
+    }
+    if let Some(prompt) = &info.prompt {
+        wrapped(&mut rows, "› ", prompt, theme.text);
+    }
+    for (label, items) in [("Subagents", &info.subagent_tasks), ("Queued", &info.queue)] {
+        if items.is_empty() {
+            continue;
+        }
+        rows.push((0.0, label.to_owned(), UI_BOLD, 11.0, theme.text_faint, LABEL));
+        for item in items {
+            let item = if item.is_empty() { "Subagent" } else { item.as_str() };
+            wrapped(&mut rows, "• ", item, theme.text_dim);
+        }
+    }
+    let mut facts = vec![agent_summary(info)];
+    facts.extend(info.name.clone());
+    facts.push(format!("up {}", ui::short_duration(info.uptime)));
+    if !info.cwd.is_empty() {
+        facts.push(ui::short_path(&info.cwd));
+    }
+    facts.extend(info.branch.clone());
+    let facts = text.elide(&facts.join(" · "), UI, 11.0, width);
+    let facts_h = LABEL + 2.0;
+    // Cut short to fit, the last row kept ending in an ellipsis.
+    let budget = room - 2.0 * PAD + 4.0 - facts_h;
+    let mut used = 0.0;
+    let mut shown = 0;
+    while shown < rows.len() && used + rows[shown].5 <= budget {
+        used += rows[shown].5;
+        shown += 1;
+    }
+    if shown < rows.len() {
+        if let Some(row) = shown.checked_sub(1).map(|last| &mut rows[last]) {
+            row.1 = text.elide(&format!("{}…", row.1.trim_end_matches('…')), row.2, row.3, width - row.0);
+        }
+    }
+    rows.truncate(shown);
+    let height = (PAD - 4.0 + used + facts_h + PAD - 4.0).min(room).max(0.0);
+    if height < LINE {
+        return 0.0;
+    }
+    let panel = Rect::new(bar.x, bar.bottom(), bar.w, height);
+    scene.set_layer(LAYER_OVERLAY);
+    scene.shadow(Rect::new(panel.x, panel.y + 8.0, panel.w, panel.h - 8.0), Color::hex(0x000000).alpha(0.3), 0.0, 8.0);
+    // Opaque first: the ground is a see-through tint, and the pane's text
+    // is underneath.
+    scene.fill(panel, theme.background);
+    scene.fill(panel, ground);
+    // Where the bar meets its extension, a hairline.
+    scene.fill(Rect::new(panel.x + PAD, panel.y, panel.w - 2.0 * PAD, 1.0), theme.divider.alpha(0.6));
+    if info.state == AgentState::Running {
+        draw_running_sweep(scene, theme, panel, t);
+    }
+    scene.push_clip(panel);
+    let mut y = panel.y + PAD - 4.0;
+    for (indent, line, font, size, ink, h) in &rows {
+        let baseline = (y + h / 2.0 + text.ui_ascent(*size) * 0.36).round();
+        text.draw_text(scene, line, panel.x + PAD + indent, baseline, *font, *size, *ink);
+        y += h;
+    }
+    let baseline = (y + facts_h / 2.0 + text.ui_ascent(11.0) * 0.36).round();
+    text.draw_text(scene, &facts, panel.x + PAD, baseline, UI, 11.0, theme.text_faint);
+    scene.pop_clip();
+    scene.set_layer(LAYER_CONTENT);
+    height
+}
+
+/// `line` broken at spaces into lines at most `width` wide; a word (or a
+/// run of text without spaces, as in Chinese) too wide on its own is
+/// broken between characters.
+fn wrap(text: &mut TextSystem, line: &str, font: crate::text::FontId, size: f32, width: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let joined = if current.is_empty() { word.to_owned() } else { format!("{current} {word}") };
+        if text.measure(&joined, font, size) <= width {
+            current = joined;
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        for c in word.chars() {
+            current.push(c);
+            if text.measure(&current, font, size) > width && current.chars().count() > 1 {
+                current.pop();
+                lines.push(std::mem::replace(&mut current, c.to_string()));
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// A small filled triangle centered at (`cx`, `cy`), pointing down for
+/// `dir` 1 and up for -1.
+fn draw_triangle(scene: &mut Scene, cx: f32, cy: f32, dir: f32, color: Color) {
+    for row in 0..4 {
+        let half = 4.0 - row as f32;
+        let y = cy - 2.0 * dir + row as f32 * dir - if dir < 0.0 { 1.0 } else { 0.0 };
+        scene.fill(Rect::new(cx - half, y, half * 2.0, 1.0), color);
     }
 }
 
