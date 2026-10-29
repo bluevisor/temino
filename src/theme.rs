@@ -308,7 +308,7 @@ pub struct Palette {
 /// ANSI 0-15, from the machine's own palette where it had one. Temino's own
 /// comes first and is the default.
 type BuiltIn = (&'static str, u32, u32, u32, u32, u32, [u32; 16]);
-const BUILT_IN: [BuiltIn; 13] = [
+const BUILT_IN: [BuiltIn; 15] = [
     ("Temino", 0x0f1117, 0xd8dee9, 0x6cb6ff, 0, 0, [0; 16]),
     // Green phosphor (Monitor II), the lo-res colors for the rest.
     (
@@ -323,17 +323,18 @@ const BUILT_IN: [BuiltIn; 13] = [
             0x41ff53, 0xffff00, 0x66aaff, 0xff88ff, 0x88ffcc, 0xffffff,
         ],
     ),
-    // Black on white, in the Macintosh II's 16-color system palette.
+    // The 1984 Macintosh: one bit, black on white. Its colors are the
+    // grays QuickDraw dithered them to, so red and green still differ.
     (
-        "Macintosh II",
+        "Macintosh",
         0xffffff,
         0x000000,
         0x000000,
-        0xb4c8f0,
-        0x0000d3,
+        0x000000,
+        0x000000,
         [
-            0x000000, 0xdd0907, 0x006412, 0x90713a, 0x0000d3, 0xf20884, 0x02abea, 0x808080, 0x404040, 0xff6403,
-            0x1fb714, 0x562c05, 0x4700a5, 0xf20884, 0x02abea, 0x404040,
+            0x000000, 0x5a5a5a, 0x3c3c3c, 0x6e6e6e, 0x282828, 0x505050, 0x464646, 0x8c8c8c, //
+            0x646464, 0x2a2a2a, 0x1e1e1e, 0x3a3a3a, 0x141414, 0x323232, 0x282828, 0x000000,
         ],
     ),
     // The CGA/VGA text palette, light grey on black.
@@ -464,6 +465,34 @@ const BUILT_IN: [BuiltIn; 13] = [
         [
             0x2b3640, 0xe0605a, 0x8fc36a, 0xe8c56a, 0x7d9fd6, 0xa68ad6, 0x6cc3c8, 0xd9d4c3, 0x5b6874, 0xf08078,
             0xa8d888, 0xf2d890, 0x9cb8e8, 0xbfa6ea, 0x8ad8dc, 0xffffff,
+        ],
+    ),
+    // NeXTstation: black on the 2-bit gray of its windows; the Color
+    // model's muted tones for the rest.
+    (
+        "NeXTstation",
+        0xaaaaaa,
+        0x000000,
+        0x000000,
+        0x555555,
+        0x1a2f7a,
+        [
+            0x000000, 0x8b1a1a, 0x1f5f1f, 0x5a4a00, 0x1a2f7a, 0x6a1f6a, 0x1a5f5f, 0x555555, //
+            0x2a2a2a, 0xa52a2a, 0x2a7a2a, 0x6b5a00, 0x2a46a0, 0x8a2a8a, 0x2a7a7a, 0x333333,
+        ],
+    ),
+    // Windows PowerShell's console: light gray on its dark blue, the
+    // console's Campbell colors.
+    (
+        "Windows PowerShell",
+        0x012456,
+        0xcccccc,
+        0xfedba9,
+        0x264f78,
+        0x3b78ff,
+        [
+            0x0c0c0c, 0xc50f1f, 0x13a10e, 0xc19c00, 0x0037da, 0x881798, 0x3a96dd, 0xcccccc, //
+            0x767676, 0xe74856, 0x16c60c, 0xf9f1a5, 0x3b78ff, 0xb4009e, 0x61d6d6, 0xf2f2f2,
         ],
     ),
 ];
