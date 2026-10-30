@@ -27,7 +27,7 @@ const store = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 
-// ---- this device's key: made once, kept in IndexedDB, never readable
+// ---- this device's key: made once, kept in IndexedDB
 function idb() {
   return new Promise((resolve, reject) => {
     const open = indexedDB.open("temino", 1);
@@ -39,17 +39,26 @@ function idb() {
 async function loadKeys() {
   const db = await idb();
   const get = (k) => new Promise((r) => { const q = db.transaction("keys").objectStore("keys").get(k); q.onsuccess = () => r(q.result); q.onerror = () => r(null); });
-  const found = await get("device");
+  const usable = async (found) => {
+    if (!found || !(found.public instanceof Uint8Array) || found.public.length !== 32) return null;
+    if (found.pkcs8) {
+      const privateKey = await crypto.subtle.importKey("pkcs8", found.pkcs8, { name: "X25519" }, false, ["deriveBits"]).catch(() => null);
+      return privateKey && { privateKey, public: found.public };
+    }
+    return found.privateKey instanceof CryptoKey ? found : null;
+  };
+  const found = await usable(await get("device"));
   if (found) return found;
-  // add, not put: two tabs opening at once must end up with the same key,
-  // so the loser of the race reads back the winner's.
-  const fresh = await generateKeys(false);
+  // Safari can't read an X25519 CryptoKey back out of IndexedDB after a
+  // reload, so the key is kept as bytes and imported, non-extractable, on load.
+  const made = await generateKeys(true);
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", made.privateKey));
   await new Promise((r) => {
     const t = db.transaction("keys", "readwrite");
-    t.objectStore("keys").add(fresh, "device").onerror = (e) => e.preventDefault();
+    t.objectStore("keys").put({ pkcs8, public: made.public }, "device");
     t.oncomplete = r; t.onerror = r; t.onabort = r;
   });
-  return (await get("device")) || fresh;
+  return (await usable(await get("device"))) || made;
 }
 
 // ---- signing in
