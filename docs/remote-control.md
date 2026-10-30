@@ -30,8 +30,9 @@ with a team.
   Mac only lets a phone in once you approve it **on the Mac**, after
   checking both screens show the same six digits. They're drawn from the
   handshake hash and two random values fixed commit-then-reveal (the
-  phone sends SHA-256 of its value in message 1, the Mac its value in
-  message 2, the phone its value in message 3), so a relay in the middle
+  phone sends SHA-256 of its value and its long-term key in message 1,
+  the Mac its value in message 2, the phone its value in message 3, where
+  the Mac checks both against the hash), so a relay in the middle
   can't grind keys until both sessions' digits match: one guess in a
   million per attempt, and each attempt is a prompt you see.
   Approved keys live in `remote_peers`. The Mac also refuses a phone whose
