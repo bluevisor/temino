@@ -37,6 +37,18 @@ impl Value {
         *self == Value::Bool(true)
     }
 
+    pub fn num(&self) -> Option<f64> {
+        match self {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// The number at `key`, if there is one.
+    pub fn num_at(&self, key: &str) -> Option<f64> {
+        self.get(key).and_then(Value::num)
+    }
+
     /// The string at `key`, if there is one.
     pub fn str_at(&self, key: &str) -> Option<&str> {
         self.get(key).and_then(Value::str)

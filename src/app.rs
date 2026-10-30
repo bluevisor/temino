@@ -17,6 +17,7 @@ use crate::keys::Named;
 use crate::pane::{AgentInfo, Ctx, MarkNote, Pane};
 use crate::picture::Picture;
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
+use crate::remote;
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::settings::{self, Action, Field, Headers};
 use crate::shells::{self, KINDS};
@@ -76,6 +77,8 @@ const MENU_WIDTH: f32 = 200.0;
 const MENU_ROW: f32 = 26.0;
 
 /// The colors a tab can be marked with, from its menu.
+/// How often a window's state is rebuilt for remotes watching it.
+const REMOTE_EVERY: Duration = Duration::from_millis(150);
 const TAB_COLORS: [u32; 6] = [0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5];
 
 /// What a tab is waiting on you for, set by hand so a glance at the list
@@ -499,6 +502,8 @@ pub struct App {
     /// `TEMINO_OPEN_TEST=<link>`: open it from the focused pane two
     /// seconds after launch, as a click on it would, for screenshots.
     open_test: Option<(Instant, String)>,
+    /// When the state for remotes is next built, while any watch.
+    remote_at: Instant,
 }
 
 /// How a window starts: with the tabs the last launch left (the first
@@ -509,6 +514,8 @@ pub enum Start {
 }
 
 pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32, start: Start) {
+    remote::register(platform::window_no(), sender.clone());
+    remote::start();
     let mut app = match App::new(sender, width, height, start) {
         Ok(app) => app,
         Err(error) => {
@@ -533,6 +540,7 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
                     Msg::Update(..) => "loop: update",
                     Msg::Git(..) => "loop: git",
                     Msg::Viewer(..) => "loop: viewer",
+                    Msg::Remote(..) => "loop: remote",
                 });
                 app.handle(message)
             }
@@ -555,6 +563,7 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
             app.render();
         }
     }
+    remote::unregister(platform::window_no());
 }
 
 /// Renders one frame without a window and writes it as a PPM: checks the
@@ -612,7 +621,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
     0
 }
 
-fn host_name() -> Option<String> {
+pub fn host_name() -> Option<String> {
     #[cfg(not(target_os = "haiku"))]
     {
         let mut buffer = [0u8; 256];
@@ -761,6 +770,7 @@ impl App {
             update: None,
             update_hits: Vec::new(),
             update_card: Rect::default(),
+            remote_at: Instant::now(),
             open_test: std::env::var("TEMINO_OPEN_TEST")
                 .ok()
                 .map(|link| (Instant::now() + Duration::from_secs(2), link)),
@@ -1028,6 +1038,114 @@ impl App {
         tab.root.split(from, id, Axis::Row, false);
         tab.zoomed = false;
         self.set_focus(id);
+    }
+
+    /// This window as remotes see it: its tabs and their panes, what each
+    /// agent is doing, and the screens of the panes a remote watches.
+    fn remote_state(&mut self) -> String {
+        let no = platform::window_no();
+        let agents: Vec<Option<AgentState>> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let mut leaves = Vec::new();
+                tab.root.leaves(&mut leaves);
+                self.panes.iter().filter(|p| leaves.contains(&p.id)).filter_map(|p| p.agent_now).max()
+            })
+            .collect();
+        let tabs: Vec<String> = (0..self.tabs.len())
+            .map(|index| {
+                let tab = &self.tabs[index];
+                let mut leaves = Vec::new();
+                tab.root.leaves(&mut leaves);
+                let panes: Vec<String> = leaves
+                    .iter()
+                    .filter_map(|&id| {
+                        let pane = self.panes.iter_mut().find(|p| p.id == id)?;
+                        let screen = if remote::watching(no, id) {
+                            let lines: Vec<String> = pane.remote_lines().iter().map(|l| remote::quote(l)).collect();
+                            format!(r#","columns":{},"lines":[{}]"#, pane.session.size.columns, lines.join(","))
+                        } else {
+                            String::new()
+                        };
+                        Some(format!(
+                            r#"{{"id":{id},"title":{},"cwd":{},"agent":{}{screen}}}"#,
+                            remote::quote(&pane.title()),
+                            remote::quote(&pane.session.cwd),
+                            agent_name(pane.agent_now),
+                        ))
+                    })
+                    .collect();
+                format!(
+                    r#"{{"index":{index},"title":{},"color":{},"agent":{},"focus":{},"panes":[{}]}}"#,
+                    remote::quote(&self.tab_title(index)),
+                    tab.color.map_or("null".to_owned(), |c| format!("\"#{:06x}\"", TAB_COLORS[c])),
+                    agent_name(agents[index]),
+                    tab.focus,
+                    panes.join(","),
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"no":{no},"title":{},"active":{},"tabs":[{}]}}"#,
+            remote::quote(&self.title),
+            self.active,
+            tabs.join(",")
+        )
+    }
+
+    /// Carries out what a remote asked, as this window's own keyboard
+    /// would have.
+    fn remote_command(&mut self, command: remote::Command) {
+        self.dirty = true;
+        // The pane's tab comes forward and the pane takes the keyboard.
+        let focus = |app: &mut App, id: u64| -> bool {
+            let Some(index) = app.tabs.iter().position(|tab| {
+                let mut leaves = Vec::new();
+                tab.root.leaves(&mut leaves);
+                leaves.contains(&id)
+            }) else {
+                return false;
+            };
+            if index != app.active {
+                app.switch_tab(index);
+            }
+            if app.focused_id() != Some(id) {
+                app.set_focus(id);
+            }
+            true
+        };
+        match command {
+            remote::Command::Tab(index) => self.switch_tab(index),
+            remote::Command::Focus(id) => {
+                focus(self, id);
+            }
+            remote::Command::Text(id, text) => {
+                if focus(self, id) {
+                    self.ui_event(UiEvent::Text(text));
+                }
+            }
+            remote::Command::Key(id, key) => {
+                if focus(self, id) {
+                    self.ui_event(UiEvent::Key(key));
+                }
+            }
+            remote::Command::NewTab => {
+                if let Err(error) = self.new_tab() {
+                    self.ctx.show_toast(&error);
+                }
+            }
+            remote::Command::CloseTab(index) => {
+                if index < self.tabs.len() {
+                    self.close_tab(index);
+                }
+            }
+            remote::Command::Refresh => self.remote_at = Instant::now(),
+            remote::Command::NewWindow => {
+                let cwd = self.focused_id().and_then(|id| self.panes.iter().find(|p| p.id == id));
+                platform::new_window(cwd.map(|pane| pane.session.cwd.clone()));
+            }
+        }
     }
 
     /// The theme, for a viewer's native view: its see-through colors
@@ -1465,6 +1583,7 @@ impl App {
                 self.dirty = true;
             }
             Msg::Viewer(id, event) => self.viewer_event(id, event),
+            Msg::Remote(command) => self.remote_command(command),
             Msg::Notice(message) => {
                 self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(6)));
                 self.dirty = true;
@@ -1506,6 +1625,10 @@ impl App {
         if self.animation_at.is_some_and(|at| now >= at) {
             self.dirty = true;
         }
+        if remote::watched() && now >= self.remote_at {
+            self.remote_at = now + REMOTE_EVERY;
+            remote::publish(platform::window_no(), self.remote_state());
+        }
         if self.open_test.as_ref().is_some_and(|(at, _)| now >= *at) {
             let (_, link) = self.open_test.take().unwrap();
             if let Some(id) = self.focused_id() {
@@ -1536,6 +1659,7 @@ impl App {
         times.push(self.recap_test);
         times.push(self.open_test.as_ref().map(|(at, _)| *at));
         times.push(self.ctx.toast.as_ref().map(|(_, at)| *at));
+        times.push(remote::watched().then_some(self.remote_at));
         times.into_iter().flatten().min()
     }
 
@@ -4029,6 +4153,17 @@ fn draw_running_sweep(scene: &mut Scene, theme: &Theme, area: Rect, t: f32) {
     scene.push_clip(area);
     scene.shadow(stripe, theme.accent.alpha(0.28), 0.0, soft);
     scene.pop_clip();
+}
+
+/// An agent's state for remotes: a JSON string, or null with no agent.
+fn agent_name(state: Option<AgentState>) -> &'static str {
+    match state {
+        None => "null",
+        Some(AgentState::Idle) => "\"idle\"",
+        Some(AgentState::Running) => "\"running\"",
+        Some(AgentState::Waiting) => "\"waiting\"",
+        Some(AgentState::Done) => "\"done\"",
+    }
 }
 
 /// "Running 2m 14s", "Waiting for you", "Done in 3m 02s", "Idle".

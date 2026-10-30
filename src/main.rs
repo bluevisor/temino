@@ -24,6 +24,7 @@ mod llm;
 mod pane;
 mod picture;
 mod platform;
+mod remote;
 mod scene;
 mod session;
 mod settings;
@@ -49,6 +50,8 @@ pub enum Msg {
     Git(u64, String, usize),
     /// News from the viewer with this id.
     Viewer(u64, platform::ViewerEvent),
+    /// What a remote (the phone) asks this window to do.
+    Remote(remote::Command),
 }
 
 /// History, the shell integration script and logs: ~/config/settings/Temino

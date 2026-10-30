@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Temino Remote</title>
+<style>
+  :root {
+    --bg: #111317; --panel: #1a1d23; --raised: #22262e; --line: #2c313a;
+    --text: #e6e8ec; --dim: #9aa1ad; --faint: #6b7280; --accent: #67b0e8;
+    --waiting: #f0a35e; --done: #8ccf7e;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px -apple-system, system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; height: 100dvh; width: 100%; overflow: hidden;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  #crumbs { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+  #crumbs b { color: var(--text); font-weight: 600; }
+  button { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; }
+  button:active { background: var(--line); }
+  header, main, footer { min-width: 0; }
+  main { flex: 1; overflow: auto; padding: 12px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+  .dot.running { background: var(--accent); } .dot.waiting { background: var(--waiting); }
+  .dot.done { background: var(--done); } .dot.none { visibility: hidden; }
+  .card { display: flex; align-items: center; gap: 10px; padding: 12px; margin-bottom: 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .card .t { flex: 1; min-width: 0; }
+  .card .t div:first-child { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .t div + div { color: var(--faint); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card.current { border-color: var(--accent); }
+  .swatch { width: 4px; align-self: stretch; border-radius: 2px; flex: none; }
+  pre { margin: 0; font: 11px ui-monospace, Menlo, monospace; line-height: 1.25; white-space: pre; }
+  #screen { background: #0c0d10; border-radius: 8px; padding: 6px; overflow: hidden; }
+  .grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .mini { background: #0c0d10; border: 1px solid var(--line); border-radius: 8px; padding: 6px; height: 160px; overflow: hidden; }
+  .mini .h { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); margin-bottom: 4px;
+    white-space: nowrap; overflow: hidden; }
+  .mini pre { font-size: 6px; }
+  footer { padding: 8px 8px 10px; background: var(--panel); border-top: 1px solid var(--line); }
+  #keys { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 8px; }
+  #keys button { flex: none; padding: 6px 12px; }
+  form { display: flex; gap: 6px; }
+  input { flex: 1; min-width: 0; font: 16px ui-monospace, Menlo, monospace; color: var(--text);
+    background: #0c0d10; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  #status { color: var(--faint); font-size: 13px; text-align: center; padding: 24px; }
+  .user { color: var(--faint); font-size: 13px; padding: 4px 2px 12px; }
+  #side { display: none; }
+  /* iPad and other wide screens: the pane keeps a list of the window's
+     tabs and panes beside it, and the zoomed-out views spread wider. */
+  @media (min-width: 768px) {
+    body { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr auto; }
+    header { grid-column: 1 / -1; }
+    #side { display: block; grid-row: 2 / 4; overflow: auto; padding: 12px 0 12px 12px; border-right: 1px solid var(--line); }
+    body.wide-off #side { display: none; }
+    body.wide-off main, body.wide-off footer { grid-column: 1 / -1; }
+    #side .card { padding: 9px 10px; margin-bottom: 6px; margin-right: 12px; }
+    #side .pane { margin-left: 18px; font-size: 13px; }
+    main { padding: 16px; }
+    pre { font-size: 13px; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+    .mini { height: 260px; }
+    .mini pre { font-size: 8px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 0 12px; }
+    footer { padding: 10px 16px 14px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <button id="out" aria-label="Zoom out">⤢</button>
+  <div id="crumbs">Connecting…</div>
+</header>
+<nav id="side"></nav>
+<main id="main"><div id="status">Connecting…</div></main>
+<footer id="footer" hidden>
+  <div id="keys"></div>
+  <form id="send"><input id="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type, then Return"><button>Send</button></form>
+</footer>
+<script>
+"use strict";
+// Zoom levels, innermost first: one pane (the default), its tab, the
+// window, the machine. The user level (every machine signed in as you)
+// comes with the relay.
+const LEVELS = ["pane", "tab", "window", "machine"];
+// ?level=tab and so on opens zoomed out (for checking the layouts).
+let level = LEVELS.includes(new URLSearchParams(location.search).get("level"))
+  ? new URLSearchParams(location.search).get("level") : "pane";
+let at = null;            // {window, tab, pane} being looked at
+let device = "";
+let windows = [];
+let socket = null;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const send = (message) => socket && socket.readyState === 1 && socket.send(JSON.stringify(message));
+
+function token() {
+  let t = location.hash.slice(1);
+  try {
+    if (t) localStorage.setItem("temino-token", t);
+    else t = localStorage.getItem("temino-token") || "";
+  } catch {}
+  return t || prompt("Remote token (remote_token in Temino's settings)") || "";
+}
+
+function connect() {
+  socket = new WebSocket(`ws://${location.host}/`);
+  socket.onopen = () => send({ type: "hello", token: token() });
+  socket.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === "hello") { device = message.device; watch(); }
+    else if (message.type === "error") { $("main").innerHTML = `<div id="status">${esc(message.error)}</div>`; try { localStorage.removeItem("temino-token"); } catch {} }
+    else if (message.type === "state") { windows = message.windows; settle(); render(); }
+  };
+  socket.onclose = () => { $("crumbs").textContent = "Reconnecting…"; setTimeout(connect, 1500); };
+}
+
+const win = (no) => windows.find((w) => w.no === no);
+const tabOf = (w, index) => w && w.tabs[index];
+const paneOf = (t, id) => t && t.panes.find((p) => p.id === id);
+
+// Keeps `at` pointing at something that exists: at first, the focused
+// pane of the first window's current tab.
+function settle() {
+  const w = (at && win(at.window)) || windows[0];
+  if (!w) { at = null; return; }
+  let t = at && at.window === w.no ? tabOf(w, at.tab) : null;
+  if (!t) t = tabOf(w, w.active) || w.tabs[0];
+  let p = at && at.window === w.no ? paneOf(t, at.pane) : null;
+  if (!p) p = paneOf(t, t.focus) || t.panes[0];
+  const next = { window: w.no, tab: t.index, pane: p ? p.id : null };
+  const moved = !at || next.window !== at.window || next.tab !== at.tab || next.pane !== at.pane;
+  at = next;
+  if (moved) watch();
+}
+
+// Only the panes on screen send their text.
+function watch() {
+  if (!at) return send({ type: "watch", panes: [] });
+  const t = tabOf(win(at.window), at.tab);
+  const panes = level === "pane" ? [[at.window, at.pane]]
+    : level === "tab" && t ? t.panes.map((p) => [at.window, p.id]) : [];
+  send({ type: "watch", panes });
+}
+
+function go(newLevel, where) {
+  level = newLevel;
+  if (where) at = { ...at, ...where };
+  watch();
+  render();
+}
+
+function dot(state) { return `<span class="dot ${state || "none"}"></span>`; }
+
+function render() {
+  if (!at) { $("main").innerHTML = `<div id="status">No windows open.</div>`; return; }
+  const w = win(at.window), t = tabOf(w, at.tab), p = paneOf(t, at.pane);
+  const crumbs = [device || "Temino", `Window ${w.no}`, t && t.title, p && p.title];
+  const depth = LEVELS.length - LEVELS.indexOf(level);
+  $("crumbs").innerHTML = crumbs.slice(0, depth).map((c, i) => i === depth - 1 ? `<b>${esc(c)}</b>` : esc(c)).join(" › ");
+  $("out").disabled = level === "machine";
+  $("footer").hidden = level !== "pane";
+  // The sidebar only beside a single pane; zoomed out, the page is the list.
+  document.body.classList.toggle("wide-off", level !== "pane");
+  side(w);
+  const main = $("main");
+  if (level === "pane") {
+    main.innerHTML = `<div id="screen"><pre>${esc((p && p.lines || []).join("\n"))}</pre></div>`;
+    fit(main.querySelector("pre"), p && p.columns);
+    main.scrollTop = main.scrollHeight;
+  } else if (level === "tab") {
+    main.innerHTML = `<div class="grid">${t.panes.map((q) => `
+      <div class="mini" data-pane="${q.id}"><div class="h">${dot(q.agent)}${esc(q.title)}</div>
+      <pre>${esc((q.lines || []).slice(-24).join("\n"))}</pre></div>`).join("")}</div>`;
+    main.querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));
+  } else if (level === "window") {
+    main.innerHTML = `<div class="cards">` + w.tabs.map((u) => `
+      <div class="card ${u.index === w.active ? "current" : ""}" data-tab="${u.index}">
+        <span class="swatch" style="background:${u.color || "transparent"}"></span>${dot(u.agent)}
+        <div class="t"><div>${u.index + 1}. ${esc(u.title)}</div><div>${u.panes.length} pane${u.panes.length === 1 ? "" : "s"} · ${esc(u.panes[0] && u.panes[0].cwd)}</div></div>
+      </div>`).join("") + `</div><button id="newtab">New Tab</button>`;
+    main.querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => {
+      const u = w.tabs[+el.dataset.tab];
+      go("tab", { tab: u.index, pane: u.focus });
+    });
+    $("newtab").onclick = () => send({ type: "new_tab", window: w.no });
+  } else {
+    main.innerHTML = `<div class="user">Signed-in machines come with the relay; this is ${esc(device)}.</div><div class="cards">` +
+      windows.map((v) => `
+      <div class="card" data-window="${v.no}">${dot(v.tabs.map((u) => u.agent).sort(urgency).pop())}
+        <div class="t"><div>Window ${v.no}</div><div>${v.tabs.length} tab${v.tabs.length === 1 ? "" : "s"} · ${esc(v.title)}</div></div>
+      </div>`).join("") + `</div><button id="newwin">New Window</button>`;
+    main.querySelectorAll("[data-window]").forEach((el) => el.onclick = () => {
+      const v = win(+el.dataset.window);
+      const u = tabOf(v, v.active);
+      go("window", { window: v.no, tab: u.index, pane: u.focus });
+    });
+    $("newwin").onclick = () => send({ type: "new_window", window: at.window });
+  }
+}
+
+// The window's tabs, and the current tab's panes under it, for wide screens.
+function side(w) {
+  $("side").innerHTML = w.tabs.map((u) => `
+    <div class="card ${u.index === at.tab ? "current" : ""}" data-tab="${u.index}">${dot(u.agent)}
+      <div class="t"><div>${u.index + 1}. ${esc(u.title)}</div></div></div>` +
+    (u.index === at.tab && u.panes.length > 1 ? u.panes.map((q) => `
+    <div class="card pane ${q.id === at.pane ? "current" : ""}" data-pane="${q.id}">${dot(q.agent)}
+      <div class="t"><div>${esc(q.title)}</div></div></div>`).join("") : "")).join("");
+  $("side").querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => {
+    const u = w.tabs[+el.dataset.tab];
+    go("pane", { tab: u.index, pane: u.focus });
+  });
+  $("side").querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));
+}
+
+const RANK = { idle: 1, running: 2, waiting: 3, done: 3 };
+const urgency = (a, b) => (RANK[a] || 0) - (RANK[b] || 0);
+
+// The pane's width fills the phone's.
+function fit(pre, columns) {
+  if (!columns) return;
+  const width = pre.parentElement.clientWidth - 12;
+  pre.style.fontSize = Math.max(5, Math.min(14, width / (columns * 0.6))) + "px";
+}
+
+$("out").onclick = () => {
+  const next = LEVELS[LEVELS.indexOf(level) + 1];
+  if (next) go(next);
+};
+// Pinch out to zoom out a level, in to zoom back in.
+let pinch = 1;
+document.addEventListener("gesturestart", (e) => { e.preventDefault(); pinch = 1; });
+document.addEventListener("gesturechange", (e) => { e.preventDefault(); pinch = e.scale; });
+document.addEventListener("gestureend", (e) => {
+  e.preventDefault();
+  const i = LEVELS.indexOf(level);
+  if (pinch < 0.7 && i < LEVELS.length - 1) go(LEVELS[i + 1]);
+  if (pinch > 1.4 && i > 0) go(LEVELS[i - 1]);
+});
+
+const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["↑", "Up"], ["↓", "Down"], ["←", "Left"], ["→", "Right"],
+  ["^C", "c", ["ctrl"]], ["⌫", "Backspace"], ["⏎", "Enter"]];
+$("keys").innerHTML = KEYS.map(([label], i) => `<button data-key="${i}">${label}</button>`).join("");
+$("keys").onclick = (e) => {
+  const i = e.target.dataset.key;
+  if (i === undefined || !at) return;
+  const [, key, mods] = KEYS[i];
+  send({ type: "key", window: at.window, pane: at.pane, key, mods: mods || [] });
+};
+$("send").onsubmit = (e) => {
+  e.preventDefault();
+  if (!at) return;
+  const text = $("text").value;
+  if (text) send({ type: "text", window: at.window, pane: at.pane, text });
+  send({ type: "key", window: at.window, pane: at.pane, key: "Enter" });
+  $("text").value = "";
+};
+addEventListener("resize", render);
+connect();
+</script>
+</body>
+</html>

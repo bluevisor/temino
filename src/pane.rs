@@ -810,6 +810,35 @@ impl Pane {
         Some(block.text_between((lines.saturating_sub(AGENT_SCAN_LINES), 0), (lines - 1, usize::MAX)))
     }
 
+    /// What a remote shows of the pane, a screenful of lines: a full-screen
+    /// program's screen as it is, or else the last commands with their
+    /// output, then the prompt with what's typed at it.
+    pub fn remote_lines(&mut self) -> Vec<String> {
+        let rows = self.session.size.lines.max(1);
+        if let Some(block) = self.session.active_mut().filter(|block| block.alt_screen()) {
+            let top = block.term.grid().history_size();
+            let text = block.text_between((top, 0), (top + rows - 1, usize::MAX));
+            return text.lines().map(str::to_owned).collect();
+        }
+        let mut lines = Vec::new();
+        let start = self.session.blocks.len().saturating_sub(8);
+        for block in &mut self.session.blocks[start..] {
+            if block.kind == BlockKind::Command && !block.command.is_empty() {
+                lines.push(format!("$ {}", block.command));
+            }
+            let n = block.output_lines();
+            if n > 0 {
+                let text = block.text_between((n.saturating_sub(rows), 0), (n - 1, usize::MAX));
+                lines.extend(text.lines().map(str::to_owned));
+            }
+        }
+        if self.session.editor_active() {
+            lines.push(format!("› {}", self.editor.text));
+        }
+        let skip = lines.len().saturating_sub(rows);
+        lines.split_off(skip)
+    }
+
     /// Advances animations; true when the pane needs a new frame.
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut dirty = self.session.tick(now) | self.take_answer();

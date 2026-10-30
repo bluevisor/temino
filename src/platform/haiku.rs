@@ -209,6 +209,11 @@ pub fn close_window() {
     quit();
 }
 
+/// Each window is its own team here, so always the first.
+pub fn window_no() -> u32 {
+    1
+}
+
 pub fn window_count() -> usize {
     1
 }
