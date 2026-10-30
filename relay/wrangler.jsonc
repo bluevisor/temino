@@ -10,8 +10,8 @@
   "kv_namespaces": [{ "binding": "ACCOUNTS", "id": "f8a12d0a02864bb4ba29d1bf7e01cbb6" }],
   "vars": {
     "GOOGLE_CLIENT_ID": "313030212279-d693u625001cfnlhmf5sgdj8ih7aifgg.apps.googleusercontent.com",
-    "APPLE_CLIENT_ID": "",
+    "APPLE_CLIENT_ID": "com.bluevisor.temino.signin",
     "APPLE_TEAM_ID": "CKGXYS3R8N",
-    "APPLE_KEY_ID": ""
+    "APPLE_KEY_ID": "VXYLHDH8MA"
   }
 }
