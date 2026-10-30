@@ -18,11 +18,11 @@
 //! million keys of its own until both sessions' digits matched. So the
 //! digits also come from two random values fixed in turn (commit, then
 //! reveal, as Bluetooth's numeric comparison does): the phone sends only
-//! the hash of its value in the first message, this machine sends its
-//! value in the second, and the phone reveals its own in the third, which
-//! must match the hash. Each side's value is set before it sees the
-//! other's, so a relay can't steer the digits: it gets one guess in a
-//! million, and you see each try.
+//! the hash of its value and its long-term key in the first message, this
+//! machine sends its value in the second, and the phone reveals its value
+//! and key in the third, which must match the hash. Everything the digits
+//! depend on is set before the other side's value is seen, so a relay
+//! can't steer them: it gets one guess in a million, and you see each try.
 //!
 //! Messages bigger than a Noise frame go in pieces: each piece's first
 //! byte says whether more follow.
@@ -83,7 +83,8 @@ pub enum Session {
 pub struct Commit {
     /// This end's random value.
     mine: [u8; 32],
-    /// The phone's hash of its value (this machine's end), until revealed.
+    /// The phone's hash of its value and its long-term key (this machine's
+    /// end), until revealed.
     promise: Option<Vec<u8>>,
     /// The other end's value, once known.
     theirs: Option<Vec<u8>>,
@@ -114,7 +115,7 @@ impl Session {
         let mut state = builder().local_private_key(&keys.private).build_initiator().map_err(|e| e.to_string())?;
         let commit = Commit::new(true)?;
         let mut out = vec![0u8; 1024];
-        let promise = Sha256::digest(commit.mine);
+        let promise = Sha256::new().chain_update(commit.mine).chain_update(&keys.public).finalize();
         let n = state.write_message(&promise, &mut out).map_err(|e| e.to_string())?;
         out.truncate(n);
         Ok((Session::Handshake(Box::new(state), commit), out))
@@ -142,7 +143,10 @@ impl Session {
             (true, _) => commit.theirs = Some(payload),
             (false, None) => commit.promise = Some(payload),
             (false, Some(promise)) => {
-                if Sha256::digest(&payload).as_slice() != promise.as_slice() {
+                // Its value, and the key it just proved, as promised before
+                // it saw this machine's value.
+                let key = state.get_remote_static().ok_or("no key from the phone")?;
+                if Sha256::new().chain_update(&payload).chain_update(key).finalize().as_slice() != promise.as_slice() {
                     return Err("the phone's value doesn't keep its promise".into());
                 }
                 commit.theirs = Some(payload);
@@ -309,6 +313,24 @@ mod tests {
         }
         let third = phone.handshake(&second).unwrap().unwrap();
         assert!(mac.handshake(&third).is_err());
+    }
+
+    #[test]
+    fn a_phone_that_swaps_its_key_is_refused() {
+        // A relay posing as the phone would pick its key after seeing the
+        // Mac's value, to steer the digits: the promise covers the key, so
+        // the same value with another key than promised is turned away.
+        let (promised, used, mac_keys) = (Keys::generate().unwrap(), Keys::generate().unwrap(), Keys::generate().unwrap());
+        let mine = [7u8; 32];
+        let promise = Sha256::new().chain_update(mine).chain_update(&promised.public).finalize();
+        let mut phone = builder().local_private_key(&used.private).build_initiator().unwrap();
+        let (mut out, mut scratch) = ([0u8; 1024], [0u8; 1024]);
+        let n = phone.write_message(&promise, &mut out).unwrap();
+        let mut mac = Session::respond(&mac_keys).unwrap();
+        let second = mac.handshake(&out[..n]).unwrap().unwrap();
+        phone.read_message(&second, &mut scratch).unwrap();
+        let n = phone.write_message(&mine, &mut out).unwrap();
+        assert!(mac.handshake(&out[..n]).is_err());
     }
 
     #[test]

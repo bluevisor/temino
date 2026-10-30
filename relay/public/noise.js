@@ -8,9 +8,10 @@
 //
 // The payloads carry the values the six-digit code is drawn from, fixed
 // in turn so a relay in the middle can't grind keys until both sessions'
-// digits match: the phone's first message holds only the SHA-256 of its
-// random value, the desktop's reply its own value, the phone's last
-// message its value, which must match. The code is the first four bytes
+// digits match: the phone's first message holds only SHA-256 of its random
+// value and its long-term public key, the desktop's reply its own value,
+// the phone's last message its value; with the key it proved there, it
+// must match. The code is the first four bytes
 // of SHA-256(handshake hash ‖ phone's value ‖ desktop's value), mod 10⁶.
 //
 // Then each message is sealed in pieces of at most 65518 bytes, each
@@ -128,7 +129,7 @@ export class Session {
     session.e = await generateKeys(false);
     session.mine = randomValue();
     await session.sym.mixHash(session.e.public);
-    const promise = await sha256(session.mine);
+    const promise = await sha256(concat(session.mine, keys.public));
     await session.sym.encryptAndHash(promise);
     session.step = 1;
     return [session, concat(session.e.public, promise)];
@@ -183,7 +184,7 @@ export class Session {
       this.rs = await sym.decryptAndHash(message.slice(0, 48));
       await sym.mixKey(await dh(this.e.privateKey, this.rs));
       const theirs = await sym.decryptAndHash(message.slice(48));
-      if (!same(await sha256(theirs), this.promise)) throw new Error("the value doesn't keep its promise");
+      if (!same(await sha256(concat(theirs, this.rs)), this.promise)) throw new Error("the value doesn't keep its promise");
       [this.recv, this.send] = await sym.split();
       await this.finish(theirs, this.mine);
       return null;
