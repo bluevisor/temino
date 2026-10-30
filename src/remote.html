@@ -37,7 +37,7 @@
   .card.current { border-color: var(--accent); }
   .swatch { width: 4px; align-self: stretch; border-radius: 2px; flex: none; }
   pre { margin: 0; font: 11px ui-monospace, Menlo, monospace; line-height: 1.25; white-space: pre; }
-  #screen { background: #0c0d10; border-radius: 8px; padding: 6px; overflow: hidden; }
+  #screen { background: #0c0d10; border-radius: 8px; padding: 6px; overflow-x: auto; }
   .grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .mini { background: #0c0d10; border: 1px solid var(--line); border-radius: 8px; padding: 6px; height: 160px; overflow: hidden; }
   .mini .h { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); margin-bottom: 4px;
@@ -227,8 +227,11 @@ const urgency = (a, b) => (RANK[a] || 0) - (RANK[b] || 0);
 // The pane's width fills the phone's.
 function fit(pre, columns) {
   if (!columns) return;
+  // As wide as the longest line on screen, not the pane: a wide desktop
+  // pane's text stays readable; past the smallest size it scrolls sideways.
+  const used = Math.max(40, ...pre.textContent.split("\n").map((l) => l.length));
   const width = pre.parentElement.clientWidth - 12;
-  pre.style.fontSize = Math.max(5, Math.min(14, width / (columns * 0.6))) + "px";
+  pre.style.fontSize = Math.max(9, Math.min(14, width / (Math.min(columns, used) * 0.6))) + "px";
 }
 
 $("out").onclick = () => {
