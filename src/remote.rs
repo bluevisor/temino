@@ -16,6 +16,7 @@
 //! The wire format is JSON text frames; docs/remote-control.md has it all,
 //! and the plan for the relay, accounts and the iPhone app.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,6 +64,8 @@ pub struct Client {
     id: u64,
     /// The hub's version this client last got the state of.
     sent: u64,
+    /// The screen lines it has, by key: a hash of each one's JSON.
+    lines: HashMap<String, u64>,
 }
 
 impl Client {
@@ -76,7 +79,7 @@ impl Client {
             id
         };
         refresh();
-        Client { id, sent: u64::MAX }
+        Client { id, sent: u64::MAX, lines: HashMap::new() }
     }
 
     /// What a client hears first.
@@ -100,11 +103,39 @@ impl Client {
     /// Every window's state, if it changed since the client last got it.
     pub fn state(&mut self) -> Option<String> {
         let hub = HUB.lock().unwrap();
-        (hub.version != self.sent).then(|| {
-            self.sent = hub.version;
-            let windows: Vec<&str> = hub.windows.iter().map(|(_, _, s)| s.as_str()).filter(|s| !s.is_empty()).collect();
-            format!(r#"{{"type":"state","windows":[{}]}}"#, windows.join(","))
-        })
+        if hub.version == self.sent {
+            return None;
+        }
+        self.sent = hub.version;
+        // Screen lines stand in the windows' JSON as LINE-key-LINE; each goes
+        // out whole the first time (and when it changes), then as just its key.
+        let mut kept = HashMap::new();
+        let mut windows = Vec::new();
+        for (_, _, state, lines) in hub.windows.iter().filter(|w| !w.2.is_empty()) {
+            let mut out = String::with_capacity(state.len());
+            for (i, piece) in state.split(LINE).enumerate() {
+                if i % 2 == 0 {
+                    out.push_str(piece);
+                    continue;
+                }
+                let json = lines.get(piece).map_or("[]", String::as_str);
+                let hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    json.hash(&mut h);
+                    h.finish()
+                };
+                if self.lines.get(piece) == Some(&hash) {
+                    out.push_str(&format!(r#"{{"k":{}}}"#, quote(piece)));
+                } else {
+                    out.push_str(&format!(r#"{{"k":{},"v":{json}}}"#, quote(piece)));
+                }
+                kept.insert(piece.to_owned(), hash);
+            }
+            windows.push(out);
+        }
+        self.lines = kept;
+        Some(format!(r#"{{"type":"state","windows":[{}]}}"#, windows.join(",")))
     }
 }
 
@@ -118,7 +149,7 @@ impl Drop for Client {
 /// Shows `text` briefly in the first window.
 pub fn notice(text: &str) {
     let hub = HUB.lock().unwrap();
-    if let Some((_, sender, _)) = hub.windows.iter().min_by_key(|(no, _, _)| *no) {
+    if let Some((_, sender, _, _)) = hub.windows.iter().min_by_key(|w| w.0) {
         let _ = sender.send(Msg::Notice(text.to_owned()));
     }
 }
@@ -126,14 +157,19 @@ pub fn notice(text: &str) {
 /// Asks the first window to show `command` (an approval) to you.
 pub fn ask(command: Command) {
     let hub = HUB.lock().unwrap();
-    if let Some((_, sender, _)) = hub.windows.iter().min_by_key(|(no, _, _)| *no) {
+    if let Some((_, sender, _, _)) = hub.windows.iter().min_by_key(|w| w.0) {
         let _ = sender.send(Msg::Remote(command));
     }
 }
 
+/// Marks a screen line's key in a window's state: never in JSON text,
+/// where control characters are escaped.
+pub const LINE: char = '\u{1}';
+
 struct Hub {
-    /// Each window: its number, its core, and its last state as JSON.
-    windows: Vec<(u32, Sender<Msg>, String)>,
+    /// Each window: its number, its core, its last state as JSON, and the
+    /// screen lines that state refers to by key.
+    windows: Vec<(u32, Sender<Msg>, String, HashMap<String, String>)>,
     /// Bumped whenever any window's state changes.
     version: u64,
     /// Each client's watched panes, by (window, pane), keyed by client.
@@ -150,14 +186,14 @@ static STARTED: OnceLock<Option<String>> = OnceLock::new();
 /// A window's core joins: commands for window `no` go to `sender`.
 pub fn register(no: u32, sender: Sender<Msg>) {
     let mut hub = HUB.lock().unwrap();
-    hub.windows.retain(|(n, _, _)| *n != no);
-    hub.windows.push((no, sender, String::new()));
+    hub.windows.retain(|w| w.0 != no);
+    hub.windows.push((no, sender, String::new(), HashMap::new()));
     hub.version += 1;
 }
 
 pub fn unregister(no: u32) {
     let mut hub = HUB.lock().unwrap();
-    hub.windows.retain(|(n, _, _)| *n != no);
+    hub.windows.retain(|w| w.0 != no);
     hub.version += 1;
 }
 
@@ -173,11 +209,12 @@ pub fn watching(no: u32, pane: u64) -> bool {
 }
 
 /// Window `no`'s state, as a JSON object; clients hear of it if it changed.
-pub fn publish(no: u32, state: String) {
+pub fn publish(no: u32, state: String, lines: HashMap<String, String>) {
     let mut hub = HUB.lock().unwrap();
-    let Some(slot) = hub.windows.iter_mut().find(|(n, _, _)| *n == no) else { return };
-    if slot.2 != state {
+    let Some(slot) = hub.windows.iter_mut().find(|w| w.0 == no) else { return };
+    if slot.2 != state || slot.3 != lines {
         slot.2 = state;
+        slot.3 = lines;
         hub.version += 1;
     }
 }
@@ -321,7 +358,7 @@ fn watch(client: u64, message: &Value) {
 /// Wakes every window to build its state: a window at rest sleeps until
 /// something happens.
 fn refresh() {
-    for (_, sender, _) in &HUB.lock().unwrap().windows {
+    for (_, sender, _, _) in &HUB.lock().unwrap().windows {
         let _ = sender.send(Msg::Remote(Command::Refresh));
     }
 }
@@ -355,8 +392,8 @@ fn command(message: &Value) {
     let Some(command) = command else { return };
     let hub = HUB.lock().unwrap();
     // A new window comes from any window; everything else from its own.
-    let target = hub.windows.iter().find(|(n, _, _)| *n == window).or(hub.windows.first());
-    if let Some((_, sender, _)) = target {
+    let target = hub.windows.iter().find(|w| w.0 == window).or(hub.windows.first());
+    if let Some((_, sender, _, _)) = target {
         let _ = sender.send(Msg::Remote(command));
     }
 }
@@ -449,11 +486,34 @@ mod tests {
         let (sender, _receiver) = std::sync::mpsc::channel();
         register(91, sender);
         let version = |no| {
-            publish(no, r#"{"no":91}"#.to_owned());
+            publish(no, r#"{"no":91}"#.to_owned(), HashMap::new());
             HUB.lock().unwrap().version
         };
         let first = version(91);
         assert_eq!(version(91), first);
         unregister(91);
+    }
+
+    #[test]
+    fn a_client_gets_each_screen_line_once() {
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        register(92, sender);
+        let state = |title: &str, line: &str| {
+            let lines = HashMap::from([("92:1:g0".to_owned(), line.to_owned())]);
+            publish(92, format!(r#"{{"no":92,"title":"{title}","lines":[{LINE}92:1:g0{LINE}]}}"#), lines);
+        };
+        let mut client = Client::join();
+        state("a", r##"[["hi","#fff",null,0]]"##);
+        let first = client.state().unwrap();
+        assert!(first.contains(r##"{"k":"92:1:g0","v":[["hi","#fff",null,0]]}"##), "{first}");
+        // Something else changed: the line goes as its key alone.
+        state("b", r##"[["hi","#fff",null,0]]"##);
+        let second = client.state().unwrap();
+        assert!(second.contains(r#"{"k":"92:1:g0"}"#) && !second.contains(r#""v""#), "{second}");
+        // The line changed: whole again.
+        state("b", r##"[["ho","#fff",null,0]]"##);
+        assert!(client.state().unwrap().contains(r#""v":[["ho""#));
+        drop(client);
+        unregister(92);
     }
 }

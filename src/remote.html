@@ -117,7 +117,7 @@ function connect() {
     const message = JSON.parse(event.data);
     if (message.type === "hello") { device = message.device; watch(); }
     else if (message.type === "error") { $("main").innerHTML = `<div id="status">${esc(message.error)}</div>`; try { localStorage.removeItem("temino-token"); } catch {} }
-    else if (message.type === "state") { windows = message.windows; settle(); render(); }
+    else if (message.type === "state") { windows = plain(message.windows); settle(); render(); }
   };
   socket.onclose = () => { $("crumbs").textContent = "Reconnecting…"; setTimeout(connect, 1500); };
 }
@@ -155,6 +155,28 @@ function go(newLevel, where) {
   if (where) at = { ...at, ...where };
   watch();
   render();
+}
+
+// This test page shows screens as plain text: lines come whole once, then
+// by key, and blocks get a "$ command" line like a shell transcript.
+let cache = new Map();
+function plain(windows) {
+  const next = new Map();
+  const text = (ref) => {
+    const runs = "v" in ref ? ref.v : cache.get(ref.k) || [];
+    next.set(ref.k, runs);
+    return runs.map((r) => r[0]).join("");
+  };
+  for (const w of windows) for (const t of w.tabs) for (const p of t.panes) {
+    const sc = p.screen;
+    if (!sc) continue;
+    p.columns = sc.columns;
+    p.lines = sc.mode === "grid" ? sc.lines.map(text) : sc.blocks.flatMap((b) =>
+      [...(b.kind === "command" && b.command ? [`$ ${b.command}`] : []), ...b.lines.map(text)]);
+    if (sc.editor) p.lines.push(`› ${sc.editor.text}`);
+  }
+  cache = next;
+  return windows;
 }
 
 function dot(state) { return `<span class="dot ${state || "none"}"></span>`; }

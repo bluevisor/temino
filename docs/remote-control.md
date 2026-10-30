@@ -141,7 +141,12 @@ also carry `screen`, drawn the way the Mac draws them:
 {"mode":"grid","columns":120,"lines":[…],"cursor":[0,4]}
 ```
 
-A line is runs of `[text, fg, bg, flags]` (flags: 1 bold, 2 italic,
+Each line comes as `{"k":key,"v":runs}` the first time and while it
+changes, then as `{"k":key}` alone: the client keeps the lines the last
+state used. The editor also carries the Mac's grey `suggestion`, its
+completion `menu` (`items` of `[label, kind]`, `selected`), and `ai`.
+
+A line's runs are `[text, fg, bg, flags]` (flags: 1 bold, 2 italic,
 4 underline, 8 strikeout), colors already resolved through the Mac's
 theme. Each window also carries `theme`, the Mac's palette, so the client
 looks like the app. Typing goes over a key or a run of text at a time
@@ -157,7 +162,6 @@ anything in it changes, at most every 150 ms per window.
    cell grid with colors and cursor, hardware keyboard on iPad, split view,
    notifications when an agent waits on you or finishes. Sign in with
    Apple there, as App Store review requires next to Google.
-3. **Less traffic**: diffs instead of whole states.
 4. **Managing devices**: list and remove approved phones on the Mac, and
    devices on the account.
 5. **Team sharing**: machines shared with teammates, view-only or control,

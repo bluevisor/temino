@@ -1048,7 +1048,7 @@ impl App {
 
     /// This window as remotes see it: its tabs and their panes, what each
     /// agent is doing, and the screens of the panes a remote watches.
-    fn remote_state(&mut self) -> String {
+    fn remote_state(&mut self) -> (String, std::collections::HashMap<String, String>) {
         let no = platform::window_no();
         let agents: Vec<Option<AgentState>> = self
             .tabs
@@ -1059,7 +1059,14 @@ impl App {
                 self.panes.iter().filter(|p| leaves.contains(&p.id)).filter_map(|p| p.agent_now).max()
             })
             .collect();
-        let theme = &self.ctx.theme.clone();
+        // Watched panes' screens first: they need the context (history,
+        // commands) the outline below doesn't.
+        let mut screens = std::collections::HashMap::new();
+        let mut lines = std::collections::HashMap::new();
+        for pane in self.panes.iter_mut().filter(|pane| remote::watching(no, pane.id)) {
+            let prefix = format!("{no}:{}:", pane.id);
+            screens.insert(pane.id, pane.remote_screen(&mut self.ctx, &prefix, &mut lines));
+        }
         // Settings has no terminal to drive, so phones don't see it.
         let shown: Vec<usize> = (0..self.tabs.len()).filter(|&index| self.tabs[index].focus != SETTINGS).collect();
         let tabs: Vec<String> = shown
@@ -1072,11 +1079,7 @@ impl App {
                     .iter()
                     .filter_map(|&id| {
                         let pane = self.panes.iter_mut().find(|p| p.id == id)?;
-                        let screen = if remote::watching(no, id) {
-                            format!(r#","screen":{}"#, pane.remote_screen(theme))
-                        } else {
-                            String::new()
-                        };
+                        let screen = screens.get(&id).map_or(String::new(), |screen| format!(r#","screen":{screen}"#));
                         Some(format!(
                             r#"{{"id":{id},"title":{},"cwd":{},"agent":{}{screen}}}"#,
                             remote::quote(&pane.title()),
@@ -1114,12 +1117,13 @@ impl App {
             t.cursor.css(),
             t.selection.css(),
         );
-        format!(
+        let state = format!(
             r#"{{"no":{no},"title":{},"active":{},"theme":{palette},"tabs":[{}]}}"#,
             remote::quote(&self.title),
             self.active,
             tabs.join(",")
-        )
+        );
+        (state, lines)
     }
 
     /// Carries out what a remote asked, as this window's own keyboard
@@ -1661,7 +1665,8 @@ impl App {
         }
         if remote::watched() && now >= self.remote_at {
             self.remote_at = now + REMOTE_EVERY;
-            remote::publish(platform::window_no(), self.remote_state());
+            let (state, lines) = self.remote_state();
+            remote::publish(platform::window_no(), state, lines);
         }
         if self.open_test.as_ref().is_some_and(|(at, _)| now >= *at) {
             let (_, link) = self.open_test.take().unwrap();

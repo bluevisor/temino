@@ -187,7 +187,28 @@ async function send(message) {
 function onMachine(message) {
   if (message.type === "pending") { pending = message.code; render(); }
   else if (message.type === "hello") { pending = null; watch(); render(); }
-  else if (message.type === "state") { pending = null; windows = message.windows; paint(windows[0] && windows[0].theme); settle(); render(); }
+  else if (message.type === "state") { pending = null; windows = resolve(message.windows); paint(windows[0] && windows[0].theme); settle(); notice(); render(); }
+}
+
+// Screen lines come whole once, then as just their key while unchanged.
+// The cache keeps exactly the lines the last state used, as the Mac does.
+let lineCache = new Map();
+function resolve(windows) {
+  const next = new Map();
+  const line = (ref) => {
+    if (Array.isArray(ref)) return ref; // an older Mac sends lines whole
+    const v = "v" in ref ? ref.v : lineCache.get(ref.k) || [];
+    next.set(ref.k, v);
+    return v;
+  };
+  for (const w of windows) for (const t of w.tabs) for (const p of t.panes) {
+    const sc = p.screen;
+    if (!sc) continue;
+    if (sc.mode === "grid") sc.lines = sc.lines.map(line);
+    else for (const b of sc.blocks) b.lines = b.lines.map(line);
+  }
+  lineCache = next;
+  return windows;
 }
 
 // ---- what's on screen
@@ -195,9 +216,17 @@ const win = (no) => windows.find((w) => w.no === no);
 const tabOf = (w, index) => w && w.tabs.find((t) => t.index === index);
 const paneOf = (t, id) => t && t.panes.find((p) => p.id === id);
 
+// A tab opened from here: go to it once the Mac has it.
+let follow = 0;
 function settle() {
   const w = (at && win(at.window)) || windows[0];
   if (!w) { at = null; return; }
+  let jumped = false;
+  if (follow && w.tabs.length > follow) {
+    follow = 0;
+    const u = tabOf(w, w.active);
+    if (u && u.panes.length) { at = { window: w.no, tab: u.index, pane: u.focus }; jumped = true; }
+  }
   let t = at && at.window === w.no ? tabOf(w, at.tab) : null;
   if (!t) t = tabOf(w, w.active) || w.tabs[0];
   // A tab with no terminal (Settings) can't take input: use the first that has one.
@@ -205,7 +234,7 @@ function settle() {
   let p = at && at.window === w.no ? paneOf(t, at.pane) : null;
   if (!p) p = paneOf(t, t.focus) || t.panes[0];
   const next = { window: w.no, tab: t.index, pane: p ? p.id : null };
-  const moved = !at || next.window !== at.window || next.tab !== at.tab || next.pane !== at.pane;
+  const moved = jumped || !at || next.window !== at.window || next.tab !== at.tab || next.pane !== at.pane;
   at = next;
   if (moved) watch();
 }
@@ -247,12 +276,25 @@ function render() {
   $("footer").hidden = level !== "pane";
   document.body.classList.toggle("wide-off", level !== "pane");
   side(w);
+  strip(w);
   if (level === "pane") {
     const stick = !main.firstElementChild || main.scrollHeight - main.scrollTop - main.clientHeight < 40;
     main.innerHTML = `<div id="screen" class="${p && p.screen && p.screen.mode === "grid" ? "full" : ""}">${screenHtml(p, true)}</div>`;
     fit(main.querySelector("#screen"), p);
     if (stick) main.scrollTop = main.scrollHeight;
-    $("screen").onclick = () => $("type").focus();
+    $("screen").onclick = (e) => {
+      const item = e.target.closest("[data-mi]");
+      const ed = p.screen && p.screen.editor;
+      if (item && ed && ed.menu) {
+        // The Mac's own keys: move to the item, then take it.
+        const n = ed.menu.items.length, steps = (+item.dataset.mi - ed.menu.selected + n) % n;
+        for (let i = 0; i < steps; i++) key("Down");
+        key("Enter");
+      } else if (e.target.id === "ghost") {
+        key("End");
+      }
+      $("type").focus();
+    };
   } else if (level === "tab") {
     main.innerHTML = `<div class="grid">${t.panes.map((q) => `
       <div class="mini" data-pane="${q.id}"><div class="h">${dot(q.agent)}${esc(q.title)}</div>
@@ -286,6 +328,7 @@ function render() {
 
 // Every machine on your account.
 function renderUser() {
+  $("tabs").hidden = true;
   $("crumbs").innerHTML = "<b>You</b>";
   $("footer").hidden = true;
   document.body.classList.add("wide-off");
@@ -308,17 +351,68 @@ function renderUser() {
   };
 }
 
+// The window's tabs, along the top on a phone: tap to switch, × closes
+// the current one, + opens one. Swiping the screen sideways switches too.
+function strip(w) {
+  const el = $("tabs");
+  el.hidden = level !== "pane" && level !== "tab";
+  if (el.hidden) return;
+  const live = w.tabs.filter((u) => u.panes.length);
+  el.innerHTML = live.map((u) => `
+    <div class="tab ${u.index === at.tab ? "current" : ""}" data-tab="${u.index}">
+      ${/^#[0-9a-f]{6}$/i.test(u.color) ? `<span class="bar" style="background:${u.color}"></span>` : ""}
+      <span class="n">${u.index + 1}</span>${dot(u.agent)}<span class="tt">${esc(u.title)}</span>
+      ${u.index === at.tab && live.length > 1 ? `<span class="x" data-close="${u.index}">×</span>` : ""}
+    </div>`).join("") + `<div class="tab add" id="addtab">+</div>`;
+  el.onclick = (e) => {
+    const close = e.target.closest("[data-close]");
+    if (close) return send({ type: "close_tab", window: w.no, index: +close.dataset.close });
+    if (e.target.closest("#addtab")) { follow = w.tabs.length; return send({ type: "new_tab", window: w.no }); }
+    const t = e.target.closest("[data-tab]");
+    if (t) switchTab(w, +t.dataset.tab);
+  };
+  const cur = el.querySelector(".current");
+  if (cur && !strip.scrolled) { cur.scrollIntoView({ inline: "center", block: "nearest" }); }
+}
+
+function switchTab(w, index) {
+  const u = tabOf(w, index);
+  if (!u) return;
+  send({ type: "tab", window: w.no, index });
+  go(level === "tab" ? "tab" : "pane", { tab: u.index, pane: u.focus });
+}
+
+// Swipe sideways across the pane: the next or previous tab.
+let swipe = null;
+$("main").addEventListener("touchstart", (e) => {
+  const t = e.touches[0];
+  swipe = e.touches.length === 1 ? { x: t.clientX, y: t.clientY, at: Date.now() } : null;
+}, { passive: true });
+$("main").addEventListener("touchend", (e) => {
+  if (!swipe || level !== "pane") return;
+  const t = e.changedTouches[0], dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
+  const quick = Date.now() - swipe.at < 500;
+  swipe = null;
+  // Only a clear, quick sideways flick, and not over something that scrolls sideways.
+  if (!quick || Math.abs(dx) < 70 || Math.abs(dy) > Math.abs(dx) / 2) return;
+  const scroller = e.target.closest(".block, #screen.full");
+  if (scroller && scroller.scrollWidth > scroller.clientWidth + 2) return;
+  const w = win(at.window), live = w.tabs.filter((u) => u.panes.length);
+  const i = live.findIndex((u) => u.index === at.tab);
+  const next = live[i + (dx < 0 ? 1 : -1)];
+  if (next) switchTab(w, next.index);
+}, { passive: true });
+
 function side(w) {
-  $("side").innerHTML = w.tabs.map((u) => `
+  $("side").innerHTML = w.tabs.filter((u) => u.panes.length).map((u) => `
     <div class="card ${u.index === at.tab ? "current" : ""}" data-tab="${u.index}">${dot(u.agent)}
       <div class="t"><div>${u.index + 1}. ${esc(u.title)}</div></div></div>` +
     (u.index === at.tab && u.panes.length > 1 ? u.panes.map((q) => `
     <div class="card pane ${q.id === at.pane ? "current" : ""}" data-pane="${q.id}">${dot(q.agent)}
       <div class="t"><div>${esc(q.title)}</div></div></div>`).join("") : "")).join("");
-  $("side").querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => {
-    const u = tabOf(w, +el.dataset.tab);
-    go("pane", { tab: u.index, pane: u.focus });
-  });
+  $("side").insertAdjacentHTML("beforeend", `<button class="add" id="sideadd">+ New Tab</button>`);
+  $("sideadd").onclick = () => { follow = w.tabs.length; send({ type: "new_tab", window: w.no }); };
+  $("side").querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => switchTab(w, +el.dataset.tab));
   $("side").querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));
 }
 
@@ -359,16 +453,104 @@ function screenHtml(p, live) {
     const status = b.running ? `<span class="st run">● ${seconds(b.secs)}</span>`
       : b.exit == null ? "" : b.exit === 0 ? `<span class="st ok">✓ ${seconds(b.secs)}</span>`
       : `<span class="st bad">✗ ${b.exit} · ${seconds(b.secs)}</span>`;
-    const head = b.kind === "command" && b.command
+    const head = b.kind === "ai" && b.command ? `<div class="cmd"><span class="pr">✦</span> ${esc(b.command)}</div>`
+      : b.kind === "command" && b.command
       ? `<div class="bh">${chips(b.cwd, b.branch)}${status}</div><div class="cmd"><span class="pr">❯</span> ${esc(b.command)}</div>` : "";
     const [cr, cc] = (live && b.cursor) || [-1, -1];
     const out = b.lines.length ? `<pre class="term">${b.lines.map((r, i) => rowHtml(r, i === cr ? cc : null)).join("\n")}</pre>` : "";
     return `<div class="block ${b.exit && b.exit !== 0 ? "failed" : ""} ${b.running ? "running" : ""}">${head}${out}</div>`;
   }).join("");
-  const ed = sc.editor;
-  const prompt = ed ? `<div class="block prompt"><div class="bh">${chips(ed.cwd, ed.branch)}</div>
-    <div class="cmd"><span class="pr">❯</span> ${live ? rowHtml([[ed.text, "var(--text)", null, 0]], ed.cursor) : esc(ed.text)}${!ed.text && live ? `<span class="hint">Tap to type</span>` : ""}</div></div>` : "";
-  return blocks + prompt;
+  const ed = sc.editor && (live ? shown(p.id, sc.editor) : sc.editor);
+  if (!ed) return blocks;
+  const atEnd = ed.cursor >= Array.from(ed.text).length;
+  const ghost = live && atEnd && ed.suggestion ? `<span class="ghost" id="ghost">${esc(ed.suggestion)}</span>` : "";
+  const line = live ? rowHtml([[ed.text, "var(--text)", null, 0]], atEnd && ghost ? null : ed.cursor) : esc(ed.text);
+  const caret = live && atEnd && ghost ? `<span class="cur"> </span>` : "";
+  const menu = live && ed.menu ? `<div class="menu">${ed.menu.items.map(([label, kind], i) =>
+    `<div class="mi ${i === ed.menu.selected ? "sel" : ""}" data-mi="${i}"><span class="k ${kind}"></span>${esc(label)}</div>`).join("")}</div>` : "";
+  return blocks + `<div class="block prompt ${ed.ai ? "ai" : ""}"><div class="bh">${chips(ed.cwd, ed.branch)}${ed.ai ? `<span class="chip ai">AI</span>` : ""}</div>
+    <div class="cmd"><span class="pr">${ed.ai ? "✦" : "❯"}</span> ${line}${caret}${ghost}${!ed.text && !ghost && live ? `<span class="hint">Tap to type</span>` : ""}</div>${menu}</div>`;
+}
+
+// ---- an agent waiting on you, or done
+// A tab whose agent goes from running to waiting or done gets a banner,
+// unless you're already looking at it. Waiting ones answer from here.
+const agents = new Map(); // "window:pane" -> last state
+const alerts = new Map(); // same key -> { w, t, p, state }
+function notice() {
+  const seen = new Set();
+  for (const w of windows) for (const t of w.tabs) for (const p of t.panes) {
+    const id = `${w.no}:${p.id}`, was = agents.get(id);
+    seen.add(id);
+    agents.set(id, p.agent);
+    const looking = level === "pane" && at && at.window === w.no && at.pane === p.id && !document.hidden;
+    if ((p.agent === "waiting" || p.agent === "done") && was && was !== p.agent && !looking) {
+      alerts.set(id, { w: w.no, t: t.index, p: p.id, state: p.agent, title: t.title, what: p.title });
+      if (navigator.vibrate) navigator.vibrate(60);
+    } else if (p.agent !== "waiting" && p.agent !== "done" || looking) {
+      alerts.delete(id);
+    }
+  }
+  for (const id of alerts.keys()) if (!seen.has(id)) alerts.delete(id);
+  drawAlerts();
+}
+function drawAlerts() {
+  $("alerts").innerHTML = [...alerts.entries()].slice(-3).map(([id, a]) => `
+    <div class="alert ${a.state}" data-alert="${id}">${dot(a.state)}
+      <div class="t"><div>${a.t + 1}. ${esc(a.title)} ${a.state === "waiting" ? "needs you" : "is done"}</div><div>${esc(a.what)}</div></div>
+      ${a.state === "waiting" ? `<button data-do="deny">Deny</button><button class="yes" data-do="allow">Allow</button>` : ""}
+      <button data-do="open">Open</button>
+    </div>`).join("");
+}
+$("alerts").onclick = (e) => {
+  const el = e.target.closest("[data-alert]"), act = e.target.dataset.do;
+  if (!el || !act) return;
+  const a = alerts.get(el.dataset.alert);
+  alerts.delete(el.dataset.alert);
+  drawAlerts();
+  if (!a) return;
+  // Claude Code's prompt: Return takes the first choice (yes), Esc declines.
+  if (act === "allow") send({ type: "key", window: a.w, pane: a.p, key: "Enter", mods: [] });
+  else if (act === "deny") send({ type: "key", window: a.w, pane: a.p, key: "Escape", mods: [] });
+  else go("pane", { window: a.w, tab: a.t, pane: a.p });
+};
+
+// Typing shows at once: keys that edit the line are applied here too, and
+// the Mac's line takes over as soon as it catches up (or after a moment,
+// if it went another way).
+const predicted = new Map(); // pane id -> { text, cursor, at, base }
+function shown(id, ed) {
+  const guess = predicted.get(id);
+  if (!guess) return ed;
+  if ((guess.text === ed.text && guess.cursor === ed.cursor) || Date.now() - guess.at > 1500) { predicted.delete(id); return ed; }
+  // The Mac's suggestion still fits if what's been typed since is its start.
+  let suggestion = null;
+  if (ed.suggestion && guess.text.startsWith(ed.text)) {
+    const extra = guess.text.slice(ed.text.length);
+    if (ed.suggestion.startsWith(extra) && ed.suggestion.length > extra.length) suggestion = ed.suggestion.slice(extra.length);
+  }
+  return { ...ed, text: guess.text, cursor: guess.cursor, suggestion, menu: null };
+}
+function predict(op, arg) {
+  const p = currentPane(), sc = p && p.screen;
+  if (!sc || sc.mode !== "blocks" || !sc.editor || sc.editor.menu) return;
+  const now = shown(p.id, sc.editor);
+  const chars = Array.from(now.text);
+  let cursor = Math.min(now.cursor, chars.length);
+  if (op === "text") { if (/[\r\n]/.test(arg)) return predicted.delete(p.id); chars.splice(cursor, 0, ...Array.from(arg)); cursor += Array.from(arg).length; }
+  else if (op === "Backspace") { if (cursor > 0) { chars.splice(cursor - 1, 1); cursor--; } }
+  else if (op === "Delete") chars.splice(cursor, 1);
+  else if (op === "Left") cursor = Math.max(0, cursor - 1);
+  else if (op === "Right" && cursor < chars.length) cursor++;
+  else if (op === "Home") cursor = 0;
+  else if (op === "End" && !now.suggestion) cursor = chars.length;
+  else return predicted.delete(p.id); // Enter, Tab, Up…: wait for the Mac
+  predicted.set(p.id, { text: chars.join(""), cursor, at: Date.now() });
+  render();
+}
+function currentPane() {
+  const w = at && win(at.window);
+  return w && paneOf(tabOf(w, at.tab), at.pane);
 }
 
 // Text size: a full-screen program is laid out for its columns, so they
@@ -416,8 +598,12 @@ document.addEventListener("gestureend", (e) => {
 const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["^C", "c", ["ctrl"]], ["↑", "Up"], ["↓", "Down"], ["←", "Left"], ["→", "Right"],
   ["⌫", "Backspace"], ["⏎", "Enter"], ["^D", "d", ["ctrl"]], ["^R", "r", ["ctrl"]], ["^L", "l", ["ctrl"]]];
 $("keys").innerHTML = `<button id="kb" aria-label="Keyboard">⌨︎</button>` + KEYS.map(([label], i) => `<button data-key="${i}">${label}</button>`).join("");
-const key = (k, mods = []) => at && send({ type: "key", window: at.window, pane: at.pane, key: k, mods });
-const text = (t) => at && t && send({ type: "text", window: at.window, pane: at.pane, text: t });
+const key = (k, mods = []) => {
+  if (!at) return;
+  if (!mods.length) predict(k); else { const p = currentPane(); if (p) predicted.delete(p.id); }
+  send({ type: "key", window: at.window, pane: at.pane, key: k, mods });
+};
+const text = (t) => { if (!at || !t) return; predict("text", t); send({ type: "text", window: at.window, pane: at.pane, text: t }); };
 $("keys").onpointerdown = (e) => e.preventDefault(); // keep the keyboard up
 $("keys").onclick = (e) => {
   const b = e.target.closest("button");
