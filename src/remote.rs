@@ -119,7 +119,10 @@ pub fn start() -> Option<&'static str> {
                     return None;
                 }
             };
-            let token = token();
+            let Some(token) = token() else {
+                crate::trace("remote: no randomness for a token; not listening");
+                return None;
+            };
             let _ = std::thread::Builder::new().name("remote".into()).spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let token = token.clone();
@@ -132,18 +135,35 @@ pub fn start() -> Option<&'static str> {
         .as_deref()
 }
 
-/// The secret a client must know, made and saved the first time.
-pub fn token() -> String {
+/// The secret a client must know, made and saved the first time; None
+/// (and no host) if the system's randomness can't be read.
+pub fn token() -> Option<String> {
     if let Some(token) = crate::setting("remote_token").filter(|t| t.len() >= 16) {
-        return token;
+        return Some(token);
     }
-    let mut bytes = [0u8; 16];
-    if let Ok(mut random) = std::fs::File::open("/dev/urandom") {
-        let _ = random.read_exact(&mut bytes);
-    }
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom").and_then(|mut random| random.read_exact(&mut bytes)).ok()?;
     let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     crate::save_setting("remote_token", &token);
-    token
+    Some(token)
+}
+
+/// Whether `given` is the token, in the same time whatever it holds.
+fn token_matches(given: &str, token: &str) -> bool {
+    given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
+}
+
+/// A browser says where the page that opened the socket came from: only
+/// our own page may (no other site, even one rebinding its name to us).
+/// The app sends no Origin.
+fn origin_allowed(request: &str) -> bool {
+    let header =
+        |name: &str| request.lines().find_map(|line| line.strip_prefix(name).map(|value| value.trim().to_owned()));
+    match (header("origin:"), header("host:")) {
+        (None, _) => true,
+        (Some(origin), Some(host)) => origin == format!("http://{host}") || origin == format!("https://{host}"),
+        (Some(_), None) => false,
+    }
 }
 
 /// One connection: the test page over plain HTTP, or a client over a
@@ -155,6 +175,9 @@ fn serve(stream: TcpStream, token: &str) {
     if !request.contains("upgrade: websocket") {
         return page(stream);
     }
+    if !origin_allowed(&request) {
+        return;
+    }
     let Ok(mut socket) = tungstenite::accept(stream) else { return };
     let _ = socket.get_mut().set_read_timeout(Some(POLL));
     let mut hello = false;
@@ -165,7 +188,9 @@ fn serve(stream: TcpStream, token: &str) {
             Ok(tungstenite::Message::Text(text)) => {
                 let Some(message) = json::parse(text.as_str()) else { continue };
                 if !hello {
-                    if message.str_at("type") != Some("hello") || message.str_at("token") != Some(token) {
+                    if message.str_at("type") != Some("hello")
+                        || !message.str_at("token").is_some_and(|given| token_matches(given, token))
+                    {
                         let _ = socket.send(tungstenite::Message::text(r#"{"type":"error","error":"bad token"}"#));
                         let _ = socket.close(None);
                         return;
@@ -361,6 +386,16 @@ mod tests {
         let tab = key(&json::parse(r#"{"key":"t","mods":["cmd"]}"#).unwrap()).unwrap();
         assert_eq!((tab.raw_char, tab.mods), ('t' as u32, mods::COMMAND));
         assert!(key(&json::parse(r#"{"key":"nope"}"#).unwrap()).is_none());
+    }
+
+    #[test]
+    fn only_our_own_page_opens_a_socket() {
+        let request =
+            |origin: &str| format!("get / http/1.1\r\nhost: 127.0.0.1:7690\r\n{origin}upgrade: websocket\r\n\r\n");
+        assert!(origin_allowed(&request("")));
+        assert!(origin_allowed(&request("origin: http://127.0.0.1:7690\r\n")));
+        assert!(!origin_allowed(&request("origin: https://evil.example\r\n")));
+        assert!(token_matches("abc", "abc") && !token_matches("abd", "abc") && !token_matches("ab", "abc"));
     }
 
     #[test]
