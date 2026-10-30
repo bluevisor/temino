@@ -147,7 +147,7 @@ also carry `screen`, drawn the way the Mac draws them:
 {"mode":"blocks","columns":120,
  "blocks":[{"id":3,"kind":"command","command":"ls","cwd":"/Users/…","branch":"main",
             "exit":0,"running":false,"secs":0.1,"lines":[[["src","#67b0e8",null,1]]],"cursor":null}],
- "editor":{"text":"git st","cursor":6,"cwd":"/Users/…","branch":"main"}}
+ "editor":{"text":"git st","runs":[["git","#7bd88f",null,0],[" st","#d8dee9",null,0]],"cursor":6,"cwd":"/Users/…","branch":"main"}}
 {"mode":"grid","columns":120,"lines":[…],"cursor":[0,4]}
 ```
 
