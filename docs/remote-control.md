@@ -24,9 +24,9 @@ with a team.
 - **End to end** (`src/e2e.rs`, `relay/public/noise.js`):
   `Noise_XX_25519_AESGCM_SHA256` with prologue `temino-remote-1`, phone
   as initiator. Each device has a long-term X25519 key (the Mac's in
-  `remote_key`, mode 0600; the web client's in IndexedDB, as bytes
-  because Safari can't reload an X25519 CryptoKey, imported non-extractable
-  on load). Every session gets fresh keys (forward secrecy).
+  `remote_key`, mode 0600; the web client's in IndexedDB, wrapped under a
+  non-extractable AES key because Safari can't reload an X25519 CryptoKey,
+  and unwrapped non-extractable on load). Every session gets fresh keys (forward secrecy).
 - **Approval**: the handshake proves which key is at the other end; the
   Mac only lets a phone in once you approve it **on the Mac**, after
   checking both screens show the same six digits. They're drawn from the
