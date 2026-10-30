@@ -28,8 +28,12 @@ with a team.
   key in IndexedDB). Every session gets fresh keys (forward secrecy).
 - **Approval**: the handshake proves which key is at the other end; the
   Mac only lets a phone in once you approve it **on the Mac**, after
-  checking both screens show the same six digits (drawn from the
-  handshake hash, so a relay that swaps keys produces different digits).
+  checking both screens show the same six digits. They're drawn from the
+  handshake hash and two random values fixed commit-then-reveal (the
+  phone sends SHA-256 of its value in message 1, the Mac its value in
+  message 2, the phone its value in message 3), so a relay in the middle
+  can't grind keys until both sessions' digits match: one guess in a
+  million per attempt, and each attempt is a prompt you see.
   Approved keys live in `remote_peers`. The Mac also refuses a phone whose
   proven key isn't the one the relay lists for that device.
 - **Inside the session**: the protocol below, unchanged. Messages bigger

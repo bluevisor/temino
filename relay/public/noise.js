@@ -6,6 +6,13 @@
 //   <- e, ee, s, es
 //   -> s, se
 //
+// The payloads carry the values the six-digit code is drawn from, fixed
+// in turn so a relay in the middle can't grind keys until both sessions'
+// digits match: the phone's first message holds only the SHA-256 of its
+// random value, the desktop's reply its own value, the phone's last
+// message its value, which must match. The code is the first four bytes
+// of SHA-256(handshake hash ‖ phone's value ‖ desktop's value), mod 10⁶.
+//
 // Then each message is sealed in pieces of at most 65518 bytes, each
 // starting with a byte that says whether it's the last.
 
@@ -97,8 +104,13 @@ class Symmetric {
   }
 }
 
-// Six digits from the handshake hash, as src/e2e.rs makes them.
-const code = (h) => String(new DataView(h.buffer, h.byteOffset).getUint32(0, false) % 1000000).padStart(6, "0");
+// Six digits, as src/e2e.rs makes them.
+async function code(h, phone, desktop) {
+  const d = await sha256(concat(h, phone, desktop));
+  return String(new DataView(d.buffer).getUint32(0, false) % 1000000).padStart(6, "0");
+}
+const randomValue = () => globalThis.crypto.getRandomValues(new Uint8Array(32));
+const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 // One end of a session. The web client initiates; `respond` exists for
 // tests and is what the desktop does in Rust.
@@ -114,15 +126,18 @@ export class Session {
     const session = new Session(keys, true);
     session.sym = await new Symmetric().init();
     session.e = await generateKeys(false);
+    session.mine = randomValue();
     await session.sym.mixHash(session.e.public);
-    await session.sym.encryptAndHash(new Uint8Array(0));
+    const promise = await sha256(session.mine);
+    await session.sym.encryptAndHash(promise);
     session.step = 1;
-    return [session, session.e.public];
+    return [session, concat(session.e.public, promise)];
   }
 
   static async respond(keys) {
     const session = new Session(keys, false);
     session.sym = await new Symmetric().init();
+    session.mine = randomValue();
     return session;
   }
 
@@ -137,27 +152,29 @@ export class Session {
       await sym.mixKey(await dh(this.e.privateKey, this.re));
       this.rs = await sym.decryptAndHash(message.slice(32, 32 + 48));
       await sym.mixKey(await dh(this.e.privateKey, this.rs));
-      await sym.decryptAndHash(message.slice(80));
-      // -> s, se
+      this.theirs = await sym.decryptAndHash(message.slice(80));
+      if (this.theirs.length !== 32) throw new Error("handshake without its value");
+      // -> s, se, then the value promised
       const s = await sym.encryptAndHash(this.s.public);
       await sym.mixKey(await dh(this.s.privateKey, this.re));
-      const payload = await sym.encryptAndHash(new Uint8Array(0));
+      const payload = await sym.encryptAndHash(this.mine);
       [this.send, this.recv] = await sym.split();
-      this.finish();
+      await this.finish(this.mine, this.theirs);
       return concat(s, payload);
     }
     if (!this.initiator && this.step === 0) {
       // -> e
       this.re = message.slice(0, 32);
       await sym.mixHash(this.re);
-      await sym.decryptAndHash(message.slice(32));
-      // <- e, ee, s, es
+      this.promise = await sym.decryptAndHash(message.slice(32));
+      if (this.promise.length !== 32) throw new Error("handshake without its promise");
+      // <- e, ee, s, es, and this end's value
       this.e = await generateKeys(false);
       await sym.mixHash(this.e.public);
       await sym.mixKey(await dh(this.e.privateKey, this.re));
       const s = await sym.encryptAndHash(this.s.public);
       await sym.mixKey(await dh(this.s.privateKey, this.re));
-      const payload = await sym.encryptAndHash(new Uint8Array(0));
+      const payload = await sym.encryptAndHash(this.mine);
       this.step = 2;
       return concat(this.e.public, s, payload);
     }
@@ -165,20 +182,22 @@ export class Session {
       // -> s, se
       this.rs = await sym.decryptAndHash(message.slice(0, 48));
       await sym.mixKey(await dh(this.e.privateKey, this.rs));
-      await sym.decryptAndHash(message.slice(48));
+      const theirs = await sym.decryptAndHash(message.slice(48));
+      if (!same(await sha256(theirs), this.promise)) throw new Error("the value doesn't keep its promise");
       [this.recv, this.send] = await sym.split();
-      this.finish();
+      await this.finish(theirs, this.mine);
       return null;
     }
     throw new Error("unexpected handshake message");
   }
 
-  finish() {
-    this.code = code(this.sym.h);
+  async finish(phone, desktop) {
+    this.code = await code(this.sym.h, phone, desktop);
     this.peer = this.rs;
     this.open = true;
     this.sym = null;
     this.e = null;
+    this.mine = null;
   }
 
   // A message as frames to send.
