@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, KeyEvent as WinitKey, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent as WinitKey, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -99,6 +99,8 @@ enum Request {
     Title(String),
     Cursor(Cursor),
     Blur(bool),
+    /// Where the text caret is, in logical pixels: x, y, height.
+    Caret(i32, i32, i32),
     ViewerOpen(u64, ViewerKind, String, ViewerStyle),
     ViewerPlace(Vec<(u64, [f32; 4], bool)>),
     ViewerClose(u64),
@@ -211,7 +213,8 @@ pub fn app_run() {
     let event_loop = EVENT_LOOP.with(|slot| slot.borrow_mut().take()).expect("app_new first");
     let (title, width, height, sender) = SETUP.with(|slot| slot.borrow_mut().take()).expect("window_new first");
     *MENU_SENDER.lock().unwrap() = Some(sender.clone());
-    let mut handler = Handler { title, size: (width, height), first: Some(sender), windows: Vec::new(), next: 1, primary: 1 };
+    let mut handler =
+        Handler { title, size: (width, height), first: Some(sender), windows: Vec::new(), next: 1, primary: 1 };
     let _ = event_loop.run_app(&mut handler);
 }
 
@@ -429,7 +432,10 @@ pub fn set_cursor(cursor: Cursor) {
     request(Request::Cursor(cursor));
 }
 
-pub fn set_text_caret(_x: i32, _y: i32, _height: i32) {}
+/// Where an input method's candidate window opens: beside the caret.
+pub fn set_text_caret(x: i32, y: i32, height: i32) {
+    request(Request::Caret(x, y, height));
+}
 
 pub fn beep() {}
 
@@ -646,6 +652,8 @@ struct Win {
     buttons: i32,
     last_click: Option<(Instant, (f32, f32), i32)>,
     clicks: i32,
+    /// An input method is composing: its keys aren't ours.
+    composing: bool,
 }
 
 struct Handler {
@@ -855,6 +863,8 @@ impl Handler {
         };
         self.next += 1;
         window.set_cursor(CursorIcon::Text);
+        // Pinyin and the other input methods.
+        window.set_ime_allowed(true);
         #[cfg(not(target_os = "macos"))]
         window.set_blur(BLUR.load(Ordering::Acquire));
         #[cfg(target_os = "macos")]
@@ -881,6 +891,7 @@ impl Handler {
             buttons: 0,
             last_click: None,
             clicks: 0,
+            composing: false,
         };
         #[cfg(target_os = "macos")]
         {
@@ -1001,6 +1012,11 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                     }
                 }
             }
+            Request::Caret(x, y, height) => {
+                if let Some(win) = self.win(no) {
+                    win.window.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(1, height.max(1)));
+                }
+            }
             #[cfg(target_os = "macos")]
             Request::ViewerOpen(id, kind, target, style) => {
                 let target = std::ffi::CString::new(target.replace('\0', "")).unwrap_or_default();
@@ -1072,8 +1088,23 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                 win.modifiers = modifiers.state();
                 win.send(UiEvent::Modifiers(win.mods()));
             }
+            WindowEvent::Ime(ime) => match ime {
+                Ime::Preedit(text, _) => {
+                    win.composing = !text.is_empty();
+                    win.send(UiEvent::Preedit(text));
+                }
+                Ime::Commit(text) => {
+                    win.composing = false;
+                    win.send(UiEvent::Text(text));
+                }
+                Ime::Disabled => {
+                    win.composing = false;
+                    win.send(UiEvent::Preedit(String::new()));
+                }
+                Ime::Enabled => {}
+            },
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
+                if event.state == ElementState::Pressed && !win.composing {
                     win.key(&event);
                 }
             }
