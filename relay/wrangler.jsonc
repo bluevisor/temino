@@ -7,7 +7,7 @@
   "assets": { "directory": "public", "binding": "ASSETS", "html_handling": "auto-trailing-slash" },
   "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
-  "kv_namespaces": [{ "binding": "ACCOUNTS", "id": "TO_BE_CREATED" }],
+  "kv_namespaces": [{ "binding": "ACCOUNTS", "id": "f8a12d0a02864bb4ba29d1bf7e01cbb6" }],
   "vars": {
     "GOOGLE_CLIENT_ID": "",
     "APPLE_CLIENT_ID": "",
