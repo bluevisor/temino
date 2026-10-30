@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f1117">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
 <title>Temino Remote</title>
 <style>
   :root {
@@ -85,7 +89,8 @@
   .center h1 { font-size: 20px; margin: 0 0 8px; }
   .center p { color: var(--dim); line-height: 1.45; margin: 0 0 20px; }
   .code { font: 600 40px ui-monospace, Menlo, monospace; letter-spacing: 6px; margin: 8px 0 18px; }
-  .signout { text-align: center; margin: 24px 0; }
+  .signout { text-align: center; margin: 24px 0; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .note { color: var(--faint); font-size: 13px; text-align: center; max-width: 360px; margin: 0 auto; line-height: 1.4; }
   .center button { width: 100%; padding: 12px; font-weight: 600; }
   .lock { color: var(--done); font-size: 12px; }
   #side { display: none; }

@@ -230,6 +230,7 @@ export default {
       case "POST /auth/apple/callback": return appleCallback(request, env, url);
       case "GET /auth/dev": return dev(env, url);
       case "GET /connect": return connect(request, env, url);
+      case "GET /vapid": return new Response(env.VAPID_PUBLIC || "", { headers: { "content-type": "text/plain" } });
     }
     return env.ASSETS.fetch(request);
   },

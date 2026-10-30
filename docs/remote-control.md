@@ -42,6 +42,14 @@ with a team.
   than a Noise frame (65 535 bytes) go in pieces, each led by a byte that
   says whether more follow.
 
+- **Notifications**: when an agent starts waiting on you or finishes
+  while no Temino window is in front, the Mac tells the relay only
+  `{"type":"notify","kind":"waiting"|"done","tab":n}`, and the relay sends
+  a Web Push ("Mac name: Tab 3 needs you") to each phone that subscribed
+  and isn't showing the page. No screen content goes this way: a phone
+  that isn't connected can't be reached end to end. On iPhone, Web Push
+  needs the page added to the Home Screen; then Notify Me on the You view.
+
 On the Mac: Settings ▸ Remote Control ▸ Sign In…  On the phone: open the
 relay's `/app`, sign in with the same account, then Allow on the Mac.
 
@@ -70,7 +78,9 @@ cargo test -- --ignored interop     # Rust Noise against noise.js
 Deploying needs `wrangler login`, a KV namespace for `ACCOUNTS`, and the
 secrets `RELAY_SECRET`, `GOOGLE_CLIENT_SECRET`, `APPLE_PRIVATE_KEY`, with
 `GOOGLE_CLIENT_ID`, `APPLE_CLIENT_ID` (Services ID), `APPLE_TEAM_ID`,
-`APPLE_KEY_ID` in `wrangler.jsonc`. `DEV_LOGIN` must never be set there.
+`APPLE_KEY_ID` in `wrangler.jsonc`; for notifications, `VAPID_PUBLIC` there
+and the secret `VAPID_PRIVATE` (a P-256 key's JWK `d`). `node
+test/webpush.mjs` checks the push encryption and signature. `DEV_LOGIN` must never be set there.
 
 ## Zoom levels
 

@@ -3160,6 +3160,8 @@ impl App {
     fn refresh_agents(&mut self) -> Vec<Option<AgentState>> {
         let now = Instant::now();
         let mut moved = false;
+        // Away from the Mac (no Temino window in front): phones get pinged.
+        let away = !self.focused;
         let agents = (0..self.tabs.len())
             .map(|index| {
                 let mut leaves = Vec::new();
@@ -3173,6 +3175,14 @@ impl App {
                         }
                         let state = pane.agent(now);
                         moved |= state.is_some() != pane.agent_now.is_some();
+                        // Newly waiting or done while you're away from the
+                        // Mac: the phones hear of it.
+                        if let Some(need @ (AgentState::Waiting | AgentState::Done)) = state {
+                            if away && pane.needs_since.map(|(was, _)| was) != Some(need) {
+                                #[cfg(not(target_os = "haiku"))]
+                                crate::relay::notify(if need == AgentState::Waiting { "waiting" } else { "done" }, index + 1);
+                            }
+                        }
                         pane.agent_now = state;
                         pane.needs_since = match state {
                             Some(need @ (AgentState::Waiting | AgentState::Done)) => match pane.needs_since {
