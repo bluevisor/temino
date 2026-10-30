@@ -30,6 +30,8 @@ const SIGN_IN_WAIT: Duration = Duration::from_secs(600);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 /// Your answers to phones asking in: device id, and whether to let it in.
 static DECISIONS: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+/// Notices for phones that aren't looking: an agent waiting or done.
+static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn relay_url() -> String {
     crate::setting("relay").unwrap_or_else(|| DEFAULT_RELAY.to_owned()).trim_end_matches('/').to_owned()
@@ -63,6 +65,21 @@ pub fn start() {
 }
 
 /// Your answer to a phone asking to control this machine.
+/// Tells the account's phones that tab `tab`'s agent is `kind` ("waiting"
+/// or "done"), as a push notification. Only that goes to the relay, never
+/// what's on screen: it can't be end to end encrypted to a phone that isn't
+/// connected.
+pub fn notify(kind: &str, tab: usize) {
+    if !signed_in() {
+        return;
+    }
+    let mut notices = NOTICES.lock().unwrap();
+    notices.push(format!(r#"{{"type":"notify","kind":"{kind}","tab":{tab}}}"#));
+    // Offline for a while: only the latest few are worth sending.
+    let excess = notices.len().saturating_sub(4);
+    notices.drain(..excess);
+}
+
 pub fn decide(device: &str, allow: bool) {
     DECISIONS.lock().unwrap().push((device.to_owned(), allow));
 }
@@ -220,6 +237,7 @@ fn serve() -> Result<(), String> {
                 seal(id, peer, &state, &mut out)?;
             }
         }
+        out.append(&mut NOTICES.lock().unwrap());
         for message in out.drain(..) {
             socket.send(tungstenite::Message::text(message)).map_err(|e| e.to_string())?;
         }
