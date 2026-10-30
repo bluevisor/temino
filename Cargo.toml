@@ -1,6 +1,6 @@
 [package]
 name = "temino"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 description = "An ADHD-friendly, GPU-accelerated modern terminal, designed for the AI age (Haiku, Linux and macOS)"
 license = "MIT"
