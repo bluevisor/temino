@@ -1884,17 +1884,25 @@ impl Pane {
     }
 
     pub fn mouse_up(&mut self, ctx: &Ctx, x: f32, y: f32) {
+        let link = self.link_click.take();
         if let Some((index, _, _)) = self.layout.alt {
             let mode = *self.session.blocks[index].term.mode();
             if mode.intersects(TermMode::MOUSE_MODE) {
                 if let Some((column, line)) = self.alt_cell(ctx, x, y) {
                     self.mouse_report(0, column, line, false);
                 }
+                // The program takes the mouse, so there's no selection to
+                // tell a click from a drag: a release on the link it was
+                // pressed on opens it.
+                self.clicked_link =
+                    link.filter(|url| self.link_under(ctx, x, y).is_some_and(|(_, under)| under.url == *url));
+                self.bar_grab = None;
+                self.dragging = false;
+                return;
             }
         }
         self.bar_grab = None;
         let was_dragging = std::mem::take(&mut self.dragging);
-        let link = self.link_click.take();
         if let Some(selection) = self.selection {
             if selection.mode == SelectMode::Char && selection.anchor == selection.head {
                 self.selection = None;
