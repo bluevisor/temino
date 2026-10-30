@@ -246,7 +246,7 @@ function renderUser() {
     <div class="card ${d.id === machine ? "current" : ""}" data-machine="${esc(d.id)}">${dot(d.online ? "idle" : null)}
       <div class="t"><div>${esc(d.name)}</div><div>${d.online ? "Online" : "Offline"}</div></div>
     </div>`).join("") + `</div>` : `<div class="center"><p>No Mac on this account yet. In Temino, open Settings and sign in to Remote Control.</p></div>`)
-    + `<button id="signout">Sign Out</button>`;
+    + `<div class="signout"><button id="signout">Sign Out</button></div>`;
   $("main").querySelectorAll("[data-machine]").forEach((el) => el.onclick = async () => {
     const d = devices.find((x) => x.id === el.dataset.machine);
     if (!d || !d.online) return;
