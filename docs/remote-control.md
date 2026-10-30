@@ -116,7 +116,8 @@ Client → host:
 {"type":"text","window":1,"pane":5,"text":"ls"}
 {"type":"key","window":1,"pane":5,"key":"Enter"}
 {"type":"key","window":1,"pane":5,"key":"c","mods":["ctrl"]}
-{"type":"new_tab","window":1}
+{"type":"new_tab","window":1}                // in the usual shell
+{"type":"new_tab","window":1,"shell":"zsh"}  // or another installed one
 {"type":"close_tab","window":1,"index":2}
 {"type":"new_window","window":1}
 ```
@@ -133,7 +134,7 @@ Host → client:
 ```json
 {"type":"hello","device":"Johns-M5-MacBook-Pro","version":"0.2.8"}
 {"type":"state","windows":[{
-  "no":1,"title":"~ — Temino","active":0,"theme":{"background":"#0f1117","text":"#e6e8ec","accent":"#67b0e8","…":"…"},
+  "no":1,"title":"~ — Temino","active":0,"theme":{"background":"#0f1117","text":"#e6e8ec","accent":"#67b0e8","…":"…"},"shells":["fish","bash","zsh"],
   "tabs":[{"index":0,"title":"silverride","color":"#67b0e8","agent":"running","focus":5,
     "panes":[{"id":5,"title":"silverride · claude","cwd":"/Users/…","agent":"running",
               "screen":{…}}]}]}]}
