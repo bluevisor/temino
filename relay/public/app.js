@@ -460,21 +460,29 @@ function side(w) {
 
 // ---- drawing a pane the way the Mac does
 
-// One output line: [text, fg, bg, flags] runs.
+// Characters as cells. ASCII sits on the monospace grid by itself; anything
+// else (box drawing, braille graphs, symbols, CJK) may come from a fallback
+// font of another width, so it gets a cell of its own: one wide, or two
+// for a wide character (flag 16), so every line keeps its columns.
+const cells = (chars, wide) => chars.map((c) => /^[\x20-\x7e]$/.test(c) ? esc(c)
+  : `<span class="c${wide ? " w" : ""}">${esc(c)}</span>`).join("");
+
+// One output line: [text, fg, bg, flags] runs. `cursorAt` is a column.
 function rowHtml(runs, cursorAt) {
   let html = "", col = 0;
   for (const [text, fg, bg, flags] of runs || []) {
-    const chars = Array.from(text);
+    const chars = Array.from(text), wide = flags & 16, span = wide ? 2 : 1;
     const style = `color:${fg}${bg ? `;background:${bg}` : ""}${flags & 1 ? ";font-weight:700" : ""}${flags & 2 ? ";font-style:italic" : ""}`
       + (flags & 12 ? `;text-decoration:${flags & 4 ? "underline" : ""} ${flags & 8 ? "line-through" : ""}` : "");
-    if (cursorAt != null && cursorAt >= col && cursorAt < col + chars.length) {
-      const i = cursorAt - col;
-      html += `<span style="${style}">${esc(chars.slice(0, i).join(""))}<span class="cur">${esc(chars[i])}</span>${esc(chars.slice(i + 1).join(""))}</span>`;
+    const width = chars.length * span;
+    if (cursorAt != null && cursorAt >= col && cursorAt < col + width) {
+      const i = Math.floor((cursorAt - col) / span);
+      html += `<span style="${style}">${cells(chars.slice(0, i), wide)}<span class="cur">${cells([chars[i]], wide)}</span>${cells(chars.slice(i + 1), wide)}</span>`;
       cursorAt = null;
     } else {
-      html += `<span style="${style}">${esc(text)}</span>`;
+      html += `<span style="${style}">${cells(chars, wide)}</span>`;
     }
-    col += chars.length;
+    col += width;
   }
   if (cursorAt != null) html += " ".repeat(Math.max(0, cursorAt - col)) + `<span class="cur"> </span>`;
   return html;

@@ -67,6 +67,10 @@
   .mi .k { width: 7px; height: 7px; border-radius: 2px; background: var(--faint); flex: none; }
   .mi .k.command { background: var(--accent); } .mi .k.directory { background: var(--variable); }
   .mi .k.file { background: var(--string); } .mi .k.history { background: var(--waiting); }
+  .term .c { display: inline-block; width: 1ch; text-align: center; vertical-align: top; overflow: hidden; }
+  .term .c.w { width: 2ch; }
+  /* Full-screen programs draw boxes and graphs: rows touch, as in a terminal. */
+  #screen.full .term { line-height: 1.15; }
   .cur { background: var(--cursor); color: var(--bg); border-radius: 1px; }
   body:not(.typing) .prompt .cur { background: transparent; outline: 1px solid var(--cursor); color: inherit; }
   .wait { color: var(--faint); padding: 12px; }
