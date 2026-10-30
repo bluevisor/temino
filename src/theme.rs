@@ -12,6 +12,12 @@ pub struct Color {
 }
 
 impl Color {
+    /// `#rrggbb`, for remote clients.
+    pub fn css(self) -> String {
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", byte(self.r), byte(self.g), byte(self.b))
+    }
+
     pub const TRANSPARENT: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 
     pub const fn hex(rgb: u32) -> Color {
@@ -100,6 +106,7 @@ impl Color {
     }
 }
 
+#[derive(Clone)]
 pub struct Theme {
     pub background: Color,
     pub surface: Color,

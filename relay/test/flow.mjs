@@ -70,16 +70,18 @@ ws.onmessage = async (event) => {
     } else if (message.type === "state") {
       const w = message.windows[0];
       if (!w) return;
-      const t = w.tabs[w.active], pane = t.focus, p = t.panes.find((q) => q.id === pane);
+      const t = w.tabs.find((u) => u.index === w.active) || w.tabs[0], pane = t.focus, p = t.panes.find((q) => q.id === pane);
+      const lines = p.screen && (p.screen.mode === "grid" ? p.screen.lines : p.screen.blocks.flatMap((b) => b.lines))
+        .map((runs) => runs.map((r) => r[0]).join(""));
       if (stage === "handshake") {
         stage = "watch";
         await seal({ type: "watch", panes: [[w.no, pane]] });
-      } else if (stage === "watch" && p.lines) {
+      } else if (stage === "watch" && lines) {
         stage = "typed";
         await seal({ type: "text", window: w.no, pane, text: "echo through-the-relay" });
         await seal({ type: "key", window: w.no, pane, key: "Enter" });
-      } else if (stage === "typed" && p.lines && p.lines.some((l) => l.trim() === "through-the-relay")) {
-        console.log("screen:\n" + p.lines.slice(-3).join("\n"));
+      } else if (stage === "typed" && lines && lines.some((l) => l.trim() === "through-the-relay")) {
+        console.log("screen:\n" + lines.slice(-3).join("\n"));
         console.log("OK");
         process.exit(0);
       }

@@ -1059,6 +1059,7 @@ impl App {
                 self.panes.iter().filter(|p| leaves.contains(&p.id)).filter_map(|p| p.agent_now).max()
             })
             .collect();
+        let theme = &self.ctx.theme.clone();
         // Settings has no terminal to drive, so phones don't see it.
         let shown: Vec<usize> = (0..self.tabs.len()).filter(|&index| self.tabs[index].focus != SETTINGS).collect();
         let tabs: Vec<String> = shown
@@ -1072,8 +1073,7 @@ impl App {
                     .filter_map(|&id| {
                         let pane = self.panes.iter_mut().find(|p| p.id == id)?;
                         let screen = if remote::watching(no, id) {
-                            let lines: Vec<String> = pane.remote_lines().iter().map(|l| remote::quote(l)).collect();
-                            format!(r#","columns":{},"lines":[{}]"#, pane.session.size.columns, lines.join(","))
+                            format!(r#","screen":{}"#, pane.remote_screen(theme))
                         } else {
                             String::new()
                         };
@@ -1095,8 +1095,27 @@ impl App {
                 )
             })
             .collect();
+        let t = &self.ctx.theme;
+        let palette = format!(
+            r#"{{"background":"{}","surface":"{}","raised":"{}","divider":"{}","text":"{}","dim":"{}","faint":"{}","accent":"{}","success":"{}","error":"{}","warning":"{}","string":"{}","variable":"{}","cursor":"{}","selection":"{}"}}"#,
+            t.background.css(),
+            t.surface.css(),
+            t.raised.css(),
+            t.divider.css(),
+            t.text.css(),
+            t.text_dim.css(),
+            t.text_faint.css(),
+            t.accent.css(),
+            t.success.css(),
+            t.error.css(),
+            t.warning.css(),
+            t.string.css(),
+            t.variable.css(),
+            t.cursor.css(),
+            t.selection.css(),
+        );
         format!(
-            r#"{{"no":{no},"title":{},"active":{},"tabs":[{}]}}"#,
+            r#"{{"no":{no},"title":{},"active":{},"theme":{palette},"tabs":[{}]}}"#,
             remote::quote(&self.title),
             self.active,
             tabs.join(",")
