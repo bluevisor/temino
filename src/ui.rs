@@ -32,6 +32,70 @@ fn cell_colors(cell: &Cell, theme: &Theme, colors: &Colors) -> (Color, Option<Co
     (fg, bg)
 }
 
+/// Output line `index` of `block` for remote clients: a JSON array of
+/// `[text, fg, bg, flags]` runs (flags: 1 bold, 2 italic, 4 underline,
+/// 8 strikeout), colors resolved through the theme like the GPU view's.
+pub fn remote_row(block: &Block, index: usize, theme: &Theme) -> String {
+    let term = &block.term;
+    let grid = term.grid();
+    let colors = term.colors();
+    let row = &grid[block.grid_line(index)];
+    let columns = grid.columns();
+    // Trailing blanks without a background aren't worth sending.
+    let mut end = columns;
+    while end > 0 {
+        let c = &row[Column(end - 1)];
+        if (c.c != ' ' && c.c != '\t') || cell_colors(c, theme, colors).1.is_some() {
+            break;
+        }
+        end -= 1;
+    }
+    let mut runs: Vec<(String, String, Option<String>, u8)> = Vec::new();
+    for column in 0..end {
+        let c = &row[Column(column)];
+        if c.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let (fg, bg) = cell_colors(c, theme, colors);
+        let mut flags = 0u8;
+        if c.flags.contains(Flags::BOLD) {
+            flags |= 1;
+        }
+        if c.flags.contains(Flags::ITALIC) {
+            flags |= 2;
+        }
+        if c.flags.intersects(Flags::ALL_UNDERLINES) {
+            flags |= 4;
+        }
+        if c.flags.contains(Flags::STRIKEOUT) {
+            flags |= 8;
+        }
+        let (fg, bg) = (fg.css(), bg.map(Color::css));
+        let mut piece = String::new();
+        if c.flags.contains(Flags::HIDDEN) || c.c == '\t' {
+            piece.push(' ');
+        } else {
+            piece.push(c.c);
+            piece.extend(c.zerowidth().unwrap_or(&[]));
+        }
+        match runs.last_mut() {
+            Some(run) if run.1 == fg && run.2 == bg && run.3 == flags => run.0.push_str(&piece),
+            _ => runs.push((piece, fg, bg, flags)),
+        }
+    }
+    let runs: Vec<String> = runs
+        .into_iter()
+        .map(|(text, fg, bg, flags)| {
+            format!(
+                "[{},\"{fg}\",{},{flags}]",
+                crate::remote::quote(&text),
+                bg.map_or("null".to_owned(), |bg| format!("\"{bg}\""))
+            )
+        })
+        .collect();
+    format!("[{}]", runs.join(","))
+}
+
 pub struct GridView<'a> {
     pub block: &'a Block,
     pub x: f32,

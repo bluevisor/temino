@@ -123,15 +123,29 @@ Host → client:
 ```json
 {"type":"hello","device":"Johns-M5-MacBook-Pro","version":"0.2.8"}
 {"type":"state","windows":[{
-  "no":1,"title":"~ — Temino","active":0,
+  "no":1,"title":"~ — Temino","active":0,"theme":{"background":"#0f1117","text":"#e6e8ec","accent":"#67b0e8","…":"…"},
   "tabs":[{"index":0,"title":"silverride","color":"#67b0e8","agent":"running","focus":5,
     "panes":[{"id":5,"title":"silverride · claude","cwd":"/Users/…","agent":"running",
-              "columns":120,"lines":["…"]}]}]}]}
+              "screen":{…}}]}]}]}
 {"type":"error","error":"bad token"}
 ```
 
-`agent` is `null`, `idle`, `running`, `waiting` or `done`. `columns` and
-`lines` come only for watched panes. A full state goes out whenever
+`agent` is `null`, `idle`, `running`, `waiting` or `done`. Watched panes
+also carry `screen`, drawn the way the Mac draws them:
+
+```json
+{"mode":"blocks","columns":120,
+ "blocks":[{"id":3,"kind":"command","command":"ls","cwd":"/Users/…","branch":"main",
+            "exit":0,"running":false,"secs":0.1,"lines":[[["src","#67b0e8",null,1]]],"cursor":null}],
+ "editor":{"text":"git st","cursor":6,"cwd":"/Users/…","branch":"main"}}
+{"mode":"grid","columns":120,"lines":[…],"cursor":[0,4]}
+```
+
+A line is runs of `[text, fg, bg, flags]` (flags: 1 bold, 2 italic,
+4 underline, 8 strikeout), colors already resolved through the Mac's
+theme. Each window also carries `theme`, the Mac's palette, so the client
+looks like the app. Typing goes over a key or a run of text at a time
+into the Mac's own editor, which completes and runs it. A full state goes out whenever
 anything in it changes, at most every 150 ms per window.
 
 ## Next
@@ -143,8 +157,7 @@ anything in it changes, at most every 150 ms per window.
    cell grid with colors and cursor, hardware keyboard on iPad, split view,
    notifications when an agent waits on you or finishes. Sign in with
    Apple there, as App Store review requires next to Google.
-3. **Richer screens and less traffic**: per-cell colors and attributes,
-   the cursor, and diffs instead of whole states.
+3. **Less traffic**: diffs instead of whole states.
 4. **Managing devices**: list and remove approved phones on the Mac, and
    devices on the account.
 5. **Team sharing**: machines shared with teammates, view-only or control,

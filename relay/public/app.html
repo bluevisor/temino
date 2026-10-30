@@ -9,7 +9,7 @@
   :root {
     --bg: #111317; --panel: #1a1d23; --raised: #22262e; --line: #2c313a;
     --text: #e6e8ec; --dim: #9aa1ad; --faint: #6b7280; --accent: #67b0e8;
-    --waiting: #f0a35e; --done: #8ccf7e;
+    --waiting: #f0a35e; --done: #8ccf7e; --error: #e06c75; --string: #98c379; --variable: #c678dd; --cursor: #e6e8ec;
     color-scheme: dark;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -37,18 +37,39 @@
   .card.current { border-color: var(--accent); }
   .swatch { width: 4px; align-self: stretch; border-radius: 2px; flex: none; }
   pre { margin: 0; font: 11px ui-monospace, Menlo, monospace; line-height: 1.25; white-space: pre; }
-  #screen { background: #0c0d10; border-radius: 8px; padding: 6px; overflow-x: auto; }
+  #screen { --fs: 12px; overflow-x: auto; min-height: 100%; cursor: text; }
+  #screen pre, #screen .cmd { font-size: var(--fs); }
+  #screen.full { background: var(--bg); }
+  .block { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; overflow-x: auto; }
+  .block.failed { border-color: color-mix(in srgb, var(--error) 55%, var(--line)); }
+  .block.running { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+  .block .term { margin-top: 6px; }
+  .bh { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 4px; }
+  .chip { color: var(--dim); background: var(--raised); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+  .chip.br { color: var(--variable); }
+  .st { margin-left: auto; white-space: nowrap; color: var(--faint); }
+  .st.ok { color: var(--done); } .st.bad { color: var(--error); } .st.run { color: var(--accent); }
+  .cmd { font: 13px ui-monospace, Menlo, monospace; white-space: pre; color: var(--text); }
+  .pr { color: var(--accent); }
+  .prompt { background: var(--raised); }
+  .prompt .chip { background: var(--panel); }
+  .hint { color: var(--faint); }
+  .cur { background: var(--cursor); color: var(--bg); border-radius: 1px; }
+  body:not(.typing) .prompt .cur { background: transparent; outline: 1px solid var(--cursor); color: inherit; }
+  .wait { color: var(--faint); padding: 12px; }
+  .mini .m { height: calc(100% - 22px); overflow: hidden; --fs: 6px; }
+  .mini .block { padding: 4px 6px; margin-bottom: 4px; border-radius: 6px; }
+  .mini .bh { display: none; }
+  .mini pre, .mini .cmd { font-size: 6px; }
+  #type { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; border: 0; padding: 0; resize: none; }
   .grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-  .mini { background: #0c0d10; border: 1px solid var(--line); border-radius: 8px; padding: 6px; height: 160px; overflow: hidden; }
+  .mini { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px; height: 160px; overflow: hidden; }
   .mini .h { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); margin-bottom: 4px;
     white-space: nowrap; overflow: hidden; }
   .mini pre { font-size: 6px; }
   footer { padding: 8px 8px 10px; background: var(--panel); border-top: 1px solid var(--line); }
-  #keys { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 8px; }
+  #keys { display: flex; gap: 6px; overflow-x: auto; }
   #keys button { flex: none; padding: 6px 12px; }
-  form { display: flex; gap: 6px; }
-  input { flex: 1; min-width: 0; font: 16px ui-monospace, Menlo, monospace; color: var(--text);
-    background: #0c0d10; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
   #status { color: var(--faint); font-size: 13px; text-align: center; padding: 24px; }
   .user { color: var(--faint); font-size: 13px; padding: 4px 2px 12px; }
   .center { max-width: 360px; margin: 12vh auto 0; text-align: center; }
@@ -71,6 +92,7 @@
     #side .pane { margin-left: 18px; font-size: 13px; }
     main { padding: 16px; }
     pre { font-size: 13px; }
+    .mini pre, .mini .cmd { font-size: 8px; }
     .grid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
     .mini { height: 260px; }
     .mini pre { font-size: 8px; }
@@ -89,7 +111,7 @@
 <main id="main"><div id="status">Loading…</div></main>
 <footer id="footer" hidden>
   <div id="keys"></div>
-  <form id="send"><input id="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type, then Return"><button>Send</button></form>
+  <textarea id="type" rows="1" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Type into the terminal"></textarea>
 </footer>
 <script type="module" src="/app.js"></script>
 </body>
