@@ -50,6 +50,8 @@ pub struct Values {
     pub see_through: bool,
     /// Which panes get a status header.
     pub headers: Headers,
+    /// Signed in for remote control; None where there's no relay (Haiku).
+    pub remote: Option<bool>,
     /// What each text field holds now, in `Field::ALL` order.
     pub fields: [String; Field::ALL.len()],
     /// The field being typed in, its text, and whether that's all selected.
@@ -149,6 +151,8 @@ pub enum Action {
     Updates(bool),
     CheckForUpdates,
     Headers(Headers),
+    /// Sign in to remote control (true) or out.
+    Remote(bool),
     /// Start typing in a text field.
     Edit(Field),
 }
@@ -226,6 +230,9 @@ impl Page {
         y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Headers], values);
         let fields = Field::ALL.map(Row::Field);
         y = ui.section(x, y, width, "AI", &fields, values);
+        if values.remote.is_some() {
+            y = ui.section(x, y, width, "Remote Control", &[Row::Remote], values);
+        }
         y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::CheckForUpdates], values);
         let version = format!("Temino {}", env!("CARGO_PKG_VERSION"));
         ui.text.draw_text(ui.scene, &version, x, y + 4.0, UI, 11.5, theme.text_faint);
@@ -263,6 +270,7 @@ enum Row {
     Updates,
     CheckForUpdates,
     Headers,
+    Remote,
     Field(Field),
 }
 
@@ -345,6 +353,14 @@ impl Ui<'_> {
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
+            Row::Remote => (
+                "Control from iPhone or iPad",
+                if values.remote == Some(true) {
+                    "Signed in · end-to-end encrypted; new devices need your OK here".to_owned()
+                } else {
+                    "Sign in with Apple or Google, then on your phone too".to_owned()
+                },
+            ),
             Row::Field(Field::LlmUrl) => ("Model server", "OpenAI-compatible, for AI mode and tab recaps".to_owned()),
             Row::Field(Field::LlmKey) => ("Model server key", "If the server asks for one".to_owned()),
             Row::Field(Field::TypesafeKey) => ("TypeSafe key", "Lets Jev decide: command or answer".to_owned()),
@@ -401,6 +417,10 @@ impl Ui<'_> {
             }
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::CheckForUpdates => self.button(right, control_y, "Check for Updates", Action::CheckForUpdates),
+            Row::Remote => match values.remote {
+                Some(true) => self.button(right, control_y, "Sign Out", Action::Remote(false)),
+                _ => self.button(right, control_y, "Sign In…", Action::Remote(true)),
+            },
             Row::Headers => {
                 let labels = Headers::ALL.map(|h| h.label().to_owned());
                 let selected = Headers::ALL.iter().position(|&h| h == values.headers);
@@ -636,6 +656,7 @@ mod tests {
             updates: true,
             see_through: true,
             headers: Headers::Auto,
+            remote: None,
             fields: Default::default(),
             editing: None,
         };

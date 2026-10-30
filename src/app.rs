@@ -490,6 +490,10 @@ pub struct App {
     /// Per frame: the update pill and card's hit areas, and the card.
     update_hits: Vec<(Rect, UpdateAction)>,
     update_card: Rect,
+    /// Phones asking to control this machine (device, name, code), and
+    /// where their Allow and Deny buttons are.
+    asks: Vec<(String, String, String)>,
+    ask_hits: Vec<(Rect, String, bool)>,
     /// Quitting to start the installed update.
     relaunch: bool,
     /// Whether this window keeps the tabs (and their output) for the next
@@ -770,6 +774,8 @@ impl App {
             update: None,
             update_hits: Vec::new(),
             update_card: Rect::default(),
+            asks: Vec::new(),
+            ask_hits: Vec::new(),
             remote_at: Instant::now(),
             open_test: std::env::var("TEMINO_OPEN_TEST")
                 .ok()
@@ -1141,6 +1147,12 @@ impl App {
                 }
             }
             remote::Command::Refresh => self.remote_at = Instant::now(),
+            remote::Command::Ask { device, name, code } => {
+                self.asks.retain(|(d, _, _)| *d != device);
+                self.asks.push((device, name, code));
+                platform::beep();
+            }
+            remote::Command::Settled(device) => self.asks.retain(|(d, _, _)| *d != device),
             remote::Command::NewWindow => {
                 let cwd = self.focused_id().and_then(|id| self.panes.iter().find(|p| p.id == id));
                 platform::new_window(cwd.map(|pane| pane.session.cwd.clone()));
@@ -2281,6 +2293,10 @@ impl App {
             fields: Field::ALL.map(|field| crate::setting(field.key()).unwrap_or_default()),
             editing: self.field.clone(),
             headers: self.headers,
+            #[cfg(not(target_os = "haiku"))]
+            remote: Some(crate::relay::signed_in()),
+            #[cfg(target_os = "haiku")]
+            remote: None,
         }
     }
 
@@ -2341,6 +2357,12 @@ impl App {
             Action::CheckForUpdates => {
                 self.check_for_updates();
             }
+            #[cfg(not(target_os = "haiku"))]
+            Action::Remote(true) => crate::relay::sign_in(),
+            #[cfg(not(target_os = "haiku"))]
+            Action::Remote(false) => crate::relay::sign_out(),
+            #[cfg(target_os = "haiku")]
+            Action::Remote(_) => {}
             Action::Headers(headers) => {
                 self.headers = headers;
                 self.ctx.headers = headers != Headers::Off;
@@ -2669,6 +2691,14 @@ impl App {
             } else if self.menu_rect.contains(x, y) {
                 self.tab_menu = Some(menu);
             }
+            return;
+        }
+        if let Some((_, device, allow)) = self.ask_hits.iter().find(|(r, _, _)| r.contains(x, y)).cloned() {
+            #[cfg(not(target_os = "haiku"))]
+            crate::relay::decide(&device, allow);
+            let _ = allow;
+            self.asks.retain(|(d, _, _)| *d != device);
+            self.dirty = true;
             return;
         }
         if let Some(&(_, action)) = self.update_hits.iter().find(|(r, _)| r.contains(x, y)) {
@@ -3035,6 +3065,7 @@ impl App {
         self.draw_tab_bar(&agents);
         self.draw_titlebar();
         self.draw_update();
+        self.draw_asks();
         self.draw_tab_menu();
         self.draw_toast();
         self.draw_preedit();
@@ -3939,6 +3970,50 @@ impl App {
         update_hits.push((footer, UpdateAction::Notes));
         scene.set_layer(LAYER_CONTENT);
         *update_card = card;
+    }
+
+    /// A card at the top for each phone asking to control this machine:
+    /// its name, the code to compare with what it shows, Deny and Allow.
+    fn draw_asks(&mut self) {
+        self.ask_hits.clear();
+        let (mx, my) = self.mouse;
+        let width = self.width;
+        let top = self.top();
+        let Self { scene, ctx, asks, ask_hits, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        const W: f32 = 340.0;
+        const H: f32 = 132.0;
+        let blue = theme.accent.mix(Color::hex(0x0a4fd6), 0.65);
+        scene.set_layer(LAYER_OVERLAY);
+        for (i, (device, name, code)) in asks.iter().enumerate() {
+            let card = Rect::new(((width - W) / 2.0).round(), top + 12.0 + i as f32 * (H + 10.0), W, H);
+            scene.shadow(card, Color::hex(0x000000).alpha(0.55), 10.0, 14.0);
+            scene.quad(Quad::new(card, theme.raised).radius(10.0).border(1.0, theme.divider));
+            let title = text.elide(&format!("“{name}” wants to control this computer"), UI_BOLD, 13.0, W - 28.0);
+            text.draw_text(scene, &title, card.x + 14.0, card.y + 26.0, UI_BOLD, 13.0, theme.text);
+            text.draw_text(scene, "Allow only if it shows this code:", card.x + 14.0, card.y + 46.0, UI, 11.5, theme.text_dim);
+            let spaced = format!("{} {}", &code[..3.min(code.len())], &code[3.min(code.len())..]);
+            text.draw_text(scene, &spaced, card.x + 14.0, card.y + 80.0, UI_BOLD, 26.0, theme.text);
+            let mut x = card.right() - 14.0;
+            for (label, allow) in [("Allow", true), ("Deny", false)] {
+                let w = text.measure(label, UI_BOLD, 12.0) + 26.0;
+                let rect = Rect::new(x - w, card.bottom() - 38.0, w, 26.0);
+                let hover = rect.contains(mx, my);
+                let fill = match (allow, hover) {
+                    (true, false) => blue,
+                    (true, true) => blue.mix(Color::hex(0xffffff), 0.12),
+                    (false, false) => theme.raised.mix(Color::hex(0xffffff), 0.05),
+                    (false, true) => theme.raised.mix(Color::hex(0xffffff), 0.1),
+                };
+                scene.quad(Quad::new(rect, fill).radius(6.0).border(1.0, if allow { blue } else { theme.divider }));
+                let ink = if allow { Color::hex(0xffffff) } else { theme.text };
+                let baseline = (rect.y + (rect.h + text.ui_ascent(12.0) * 0.72) / 2.0).round();
+                text.draw_text(scene, label, rect.x + 13.0, baseline, UI_BOLD, 12.0, ink);
+                ask_hits.push((rect, device.clone(), allow));
+                x = rect.x - 8.0;
+            }
+        }
+        scene.set_layer(LAYER_CONTENT);
     }
 
     fn draw_toast(&mut self) {

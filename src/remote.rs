@@ -50,6 +50,85 @@ pub enum Command {
     NewWindow,
     /// Build the state now: someone new is watching, or watches more.
     Refresh,
+    /// A phone came through the relay with a key not approved here: ask
+    /// (its device id, its name, the code both screens show).
+    Ask { device: String, name: String, code: String },
+    /// That phone's request is over: it got in, or it left.
+    Settled(String),
+}
+
+/// One client of the host: the test page's socket, or a phone over the
+/// relay. While it lives, windows build their state; dropping it leaves.
+pub struct Client {
+    id: u64,
+    /// The hub's version this client last got the state of.
+    sent: u64,
+}
+
+impl Client {
+    pub fn join() -> Client {
+        CLIENTS.fetch_add(1, Ordering::Relaxed);
+        let id = {
+            let mut hub = HUB.lock().unwrap();
+            hub.next_client += 1;
+            let id = hub.next_client;
+            hub.watching.push((id, Vec::new()));
+            id
+        };
+        refresh();
+        Client { id, sent: u64::MAX }
+    }
+
+    /// What a client hears first.
+    pub fn hello() -> String {
+        format!(
+            r#"{{"type":"hello","device":{},"version":{}}}"#,
+            quote(&crate::app::host_name().unwrap_or_default()),
+            quote(env!("CARGO_PKG_VERSION"))
+        )
+    }
+
+    /// A message from the client: what it watches, or what to do.
+    pub fn handle(&self, message: &Value) {
+        if message.str_at("type") == Some("watch") {
+            watch(self.id, message);
+        } else {
+            command(message);
+        }
+    }
+
+    /// Every window's state, if it changed since the client last got it.
+    pub fn state(&mut self) -> Option<String> {
+        let hub = HUB.lock().unwrap();
+        (hub.version != self.sent).then(|| {
+            self.sent = hub.version;
+            let windows: Vec<&str> = hub.windows.iter().map(|(_, _, s)| s.as_str()).filter(|s| !s.is_empty()).collect();
+            format!(r#"{{"type":"state","windows":[{}]}}"#, windows.join(","))
+        })
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        CLIENTS.fetch_sub(1, Ordering::Relaxed);
+        HUB.lock().unwrap().watching.retain(|(id, _)| *id != self.id);
+    }
+}
+
+/// Shows `text` briefly in the first window.
+pub fn notice(text: &str) {
+    let hub = HUB.lock().unwrap();
+    if let Some((_, sender, _)) = hub.windows.iter().min_by_key(|(no, _, _)| *no) {
+        let _ = sender.send(Msg::Notice(text.to_owned()));
+    }
+}
+
+/// Asks the first window to show `command` (an approval) to you.
+pub fn ask(command: Command) {
+    let hub = HUB.lock().unwrap();
+    if let Some((_, sender, _)) = hub.windows.iter().min_by_key(|(no, _, _)| *no) {
+        let _ = sender.send(Msg::Remote(command));
+    }
 }
 
 struct Hub {
@@ -106,6 +185,8 @@ pub fn publish(no: u32, state: String) {
 /// Starts the host, once, if the settings file turns it on. Returns where
 /// it listens.
 pub fn start() -> Option<&'static str> {
+    #[cfg(not(target_os = "haiku"))]
+    crate::relay::start();
     STARTED
         .get_or_init(|| {
             if crate::setting("remote").as_deref() != Some("on") {
@@ -180,14 +261,12 @@ fn serve(stream: TcpStream, token: &str) {
     }
     let Ok(mut socket) = tungstenite::accept(stream) else { return };
     let _ = socket.get_mut().set_read_timeout(Some(POLL));
-    let mut hello = false;
-    let mut client = 0;
-    let mut sent = u64::MAX;
+    let mut client: Option<Client> = None;
     loop {
         match socket.read() {
             Ok(tungstenite::Message::Text(text)) => {
                 let Some(message) = json::parse(text.as_str()) else { continue };
-                if !hello {
+                let Some(client) = &client else {
                     if message.str_at("type") != Some("hello")
                         || !message.str_at("token").is_some_and(|given| token_matches(given, token))
                     {
@@ -195,31 +274,13 @@ fn serve(stream: TcpStream, token: &str) {
                         let _ = socket.close(None);
                         return;
                     }
-                    hello = true;
-                    CLIENTS.fetch_add(1, Ordering::Relaxed);
-                    client = {
-                        let mut hub = HUB.lock().unwrap();
-                        hub.next_client += 1;
-                        let id = hub.next_client;
-                        hub.watching.push((id, Vec::new()));
-                        id
-                    };
-                    refresh();
-                    let hello = format!(
-                        r#"{{"type":"hello","device":{},"version":{}}}"#,
-                        quote(&crate::app::host_name().unwrap_or_default()),
-                        quote(env!("CARGO_PKG_VERSION"))
-                    );
-                    if socket.send(tungstenite::Message::text(hello)).is_err() {
+                    client = Some(Client::join());
+                    if socket.send(tungstenite::Message::text(Client::hello())).is_err() {
                         break;
                     }
                     continue;
-                }
-                if message.str_at("type") == Some("watch") {
-                    watch(client, &message);
-                } else {
-                    command(&message);
-                }
+                };
+                client.handle(&message);
             }
             Ok(tungstenite::Message::Close(_)) => break,
             Ok(_) => {}
@@ -227,27 +288,12 @@ fn serve(stream: TcpStream, token: &str) {
                 if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(_) => break,
         }
-        if !hello {
-            continue;
-        }
-        let state = {
-            let hub = HUB.lock().unwrap();
-            (hub.version != sent).then(|| {
-                sent = hub.version;
-                let windows: Vec<&str> =
-                    hub.windows.iter().map(|(_, _, s)| s.as_str()).filter(|s| !s.is_empty()).collect();
-                format!(r#"{{"type":"state","windows":[{}]}}"#, windows.join(","))
-            })
-        };
-        if let Some(state) = state {
+        let Some(client) = &mut client else { continue };
+        if let Some(state) = client.state() {
             if socket.send(tungstenite::Message::text(state)).is_err() {
                 break;
             }
         }
-    }
-    if hello {
-        CLIENTS.fetch_sub(1, Ordering::Relaxed);
-        HUB.lock().unwrap().watching.retain(|(id, _)| *id != client);
     }
 }
 

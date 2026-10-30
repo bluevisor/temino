@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Temino Remote</title>
+<style>
+  :root {
+    --bg: #111317; --panel: #1a1d23; --raised: #22262e; --line: #2c313a;
+    --text: #e6e8ec; --dim: #9aa1ad; --faint: #6b7280; --accent: #67b0e8;
+    --waiting: #f0a35e; --done: #8ccf7e;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px -apple-system, system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; height: 100dvh; width: 100%; overflow: hidden;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  #crumbs { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+  #crumbs b { color: var(--text); font-weight: 600; }
+  button { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; }
+  button:active { background: var(--line); }
+  header, main, footer { min-width: 0; }
+  main { flex: 1; overflow: auto; padding: 12px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+  .dot.running { background: var(--accent); } .dot.waiting { background: var(--waiting); }
+  .dot.done { background: var(--done); } .dot.none { visibility: hidden; }
+  .card { display: flex; align-items: center; gap: 10px; padding: 12px; margin-bottom: 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .card .t { flex: 1; min-width: 0; }
+  .card .t div:first-child { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .t div + div { color: var(--faint); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card.current { border-color: var(--accent); }
+  .swatch { width: 4px; align-self: stretch; border-radius: 2px; flex: none; }
+  pre { margin: 0; font: 11px ui-monospace, Menlo, monospace; line-height: 1.25; white-space: pre; }
+  #screen { background: #0c0d10; border-radius: 8px; padding: 6px; overflow-x: auto; }
+  .grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .mini { background: #0c0d10; border: 1px solid var(--line); border-radius: 8px; padding: 6px; height: 160px; overflow: hidden; }
+  .mini .h { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); margin-bottom: 4px;
+    white-space: nowrap; overflow: hidden; }
+  .mini pre { font-size: 6px; }
+  footer { padding: 8px 8px 10px; background: var(--panel); border-top: 1px solid var(--line); }
+  #keys { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 8px; }
+  #keys button { flex: none; padding: 6px 12px; }
+  form { display: flex; gap: 6px; }
+  input { flex: 1; min-width: 0; font: 16px ui-monospace, Menlo, monospace; color: var(--text);
+    background: #0c0d10; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  #status { color: var(--faint); font-size: 13px; text-align: center; padding: 24px; }
+  .user { color: var(--faint); font-size: 13px; padding: 4px 2px 12px; }
+  .center { max-width: 360px; margin: 12vh auto 0; text-align: center; }
+  .center h1 { font-size: 20px; margin: 0 0 8px; }
+  .center p { color: var(--dim); line-height: 1.45; margin: 0 0 20px; }
+  .code { font: 600 40px ui-monospace, Menlo, monospace; letter-spacing: 6px; margin: 8px 0 18px; }
+  .center button { width: 100%; padding: 12px; font-weight: 600; }
+  .lock { color: var(--done); font-size: 12px; }
+  #side { display: none; }
+  /* iPad and other wide screens: the pane keeps a list of the window's
+     tabs and panes beside it, and the zoomed-out views spread wider. */
+  @media (min-width: 768px) {
+    body { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr auto; }
+    header { grid-column: 1 / -1; }
+    #side { display: block; grid-row: 2 / 4; overflow: auto; padding: 12px 0 12px 12px; border-right: 1px solid var(--line); }
+    body.wide-off #side { display: none; }
+    body.wide-off main, body.wide-off footer { grid-column: 1 / -1; }
+    #side .card { padding: 9px 10px; margin-bottom: 6px; margin-right: 12px; }
+    #side .pane { margin-left: 18px; font-size: 13px; }
+    main { padding: 16px; }
+    pre { font-size: 13px; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+    .mini { height: 260px; }
+    .mini pre { font-size: 8px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 0 12px; }
+    footer { padding: 10px 16px 14px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <button id="out" aria-label="Zoom out">⤢</button>
+  <div id="crumbs">Temino</div>
+  <span class="lock" id="lock" hidden title="End-to-end encrypted">● E2E</span>
+</header>
+<nav id="side"></nav>
+<main id="main"><div id="status">Loading…</div></main>
+<footer id="footer" hidden>
+  <div id="keys"></div>
+  <form id="send"><input id="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type, then Return"><button>Send</button></form>
+</footer>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

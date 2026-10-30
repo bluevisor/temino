@@ -10,6 +10,7 @@ mod app;
 mod ask;
 mod bindings;
 mod complete;
+mod e2e;
 mod editor;
 mod find;
 #[cfg(not(target_os = "macos"))]
@@ -24,6 +25,8 @@ mod llm;
 mod pane;
 mod picture;
 mod platform;
+#[cfg(not(target_os = "haiku"))]
+mod relay;
 mod remote;
 mod scene;
 mod session;
