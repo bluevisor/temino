@@ -35,6 +35,7 @@ const keys = await generateKeys();
 const { token } = await devSignIn(keys.public, "phone", "Test Phone");
 const ws = new WebSocket(`${RELAY.replace("http", "ws")}/connect?token=${encodeURIComponent(token)}`);
 let session, machine, stage = "handshake", approvedOnce = false;
+const cache = new Map(); // screen lines by key: sent whole once, then by key
 const send = (to, kind, bytes) => ws.send(JSON.stringify({ type: "send", to, kind, data: b64(bytes) }));
 const seal = async (message) => { for (const f of await session.seal(JSON.stringify(message))) send(machine, "msg", f); };
 async function start() {
@@ -71,8 +72,12 @@ ws.onmessage = async (event) => {
       const w = message.windows[0];
       if (!w) return;
       const t = w.tabs.find((u) => u.index === w.active) || w.tabs[0], pane = t.focus, p = t.panes.find((q) => q.id === pane);
-      const lines = p.screen && (p.screen.mode === "grid" ? p.screen.lines : p.screen.blocks.flatMap((b) => b.lines))
-        .map((runs) => runs.map((r) => r[0]).join(""));
+      const refs = p.screen && (p.screen.mode === "grid" ? p.screen.lines : p.screen.blocks.flatMap((b) => b.lines));
+      const lines = refs && refs.map((ref) => {
+        const runs = "v" in ref ? ref.v : cache.get(ref.k);
+        cache.set(ref.k, runs);
+        return runs.map((r) => r[0]).join("");
+      });
       if (stage === "handshake") {
         stage = "watch";
         await seal({ type: "watch", panes: [[w.no, pane]] });

@@ -3,6 +3,7 @@
 //! (`app.rs`) arranges panes into tabs and splits; a pane draws and takes
 //! the mouse in its own coordinates, as if it had the window to itself.
 
+use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -815,13 +816,24 @@ impl Pane {
     /// output, then the prompt with what's typed at it.
     /// What a remote client draws for this pane, as JSON: a full-screen
     /// program's grid with its cursor, or the last blocks plus the editor.
-    pub fn remote_screen(&mut self, theme: &Theme) -> String {
-        use crate::remote::quote;
+    /// Lines go into `lines` by key (`prefix` plus where they are) and
+    /// stand in the JSON as that key, so a client gets each line once.
+    pub fn remote_screen(&mut self, ctx: &mut Ctx, prefix: &str, lines_out: &mut HashMap<String, String>) -> String {
+        use crate::remote::{quote, LINE};
+        let mut line_ref = |key: String, json: String| {
+            let marker = format!("{LINE}{key}{LINE}");
+            lines_out.insert(key, json);
+            marker
+        };
+        let suggestion = if self.session.editor_active() { self.suggestion(ctx) } else { None };
+        let theme = &ctx.theme;
         let rows = self.session.size.lines.max(1);
         let columns = self.session.size.columns;
         if let Some(block) = self.session.active_mut().filter(|block| block.alt_screen()) {
             let top = block.term.grid().history_size();
-            let lines: Vec<String> = (top..top + rows).map(|i| crate::ui::remote_row(block, i, theme)).collect();
+            let lines: Vec<String> = (top..top + rows)
+                .map(|i| line_ref(format!("{prefix}g{}", i - top), crate::ui::remote_row(block, i, theme)))
+                .collect();
             let cursor = if block.term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR) {
                 let point = block.term.grid().cursor.point;
                 format!("[{},{}]", point.line.0, point.column.0)
@@ -837,8 +849,10 @@ impl Pane {
         let count = self.session.blocks.len();
         for (i, block) in self.session.blocks[start..].iter_mut().enumerate() {
             let n = block.output_lines();
-            let lines: Vec<String> =
-                (n.saturating_sub(rows * 2)..n).map(|line| crate::ui::remote_row(block, line, theme)).collect();
+            let id = block.id;
+            let lines: Vec<String> = (n.saturating_sub(rows * 2)..n)
+                .map(|line| line_ref(format!("{prefix}{id}.{line}"), crate::ui::remote_row(block, line, theme)))
+                .collect();
             let running = live && start + i + 1 == count && block.running();
             // A running block's cursor, for programs that read a line.
             let cursor = if running {
@@ -857,7 +871,11 @@ impl Pane {
             blocks.push(format!(
                 r#"{{"id":{},"kind":{},"command":{},"cwd":{},"branch":{},"exit":{},"running":{running},"secs":{:.1},"lines":[{}],"cursor":{cursor}}}"#,
                 block.id,
-                quote(if block.kind == BlockKind::Command { "command" } else { "output" }),
+                quote(match block.kind {
+                    BlockKind::Command => "command",
+                    BlockKind::Ai => "ai",
+                    BlockKind::Background => "output",
+                }),
                 quote(&block.command),
                 quote(&block.cwd),
                 block.branch.as_deref().map_or("null".to_owned(), quote),
@@ -868,11 +886,30 @@ impl Pane {
         }
         let editor = if self.session.editor_active() {
             let cursor = self.editor.text[..self.editor.cursor.min(self.editor.text.len())].chars().count();
+            let menu = self.completion.as_ref().map_or("null".to_owned(), |c| {
+                let items: Vec<String> = c
+                    .candidates
+                    .iter()
+                    .take(50)
+                    .map(|candidate| {
+                        let kind = match candidate.kind {
+                            crate::complete::Kind::Command => "command",
+                            crate::complete::Kind::Directory => "directory",
+                            crate::complete::Kind::File => "file",
+                            crate::complete::Kind::History => "history",
+                        };
+                        format!(r#"[{},"{kind}"]"#, quote(&candidate.label))
+                    })
+                    .collect();
+                format!(r#"{{"items":[{}],"selected":{}}}"#, items.join(","), c.selected)
+            });
             format!(
-                r#"{{"text":{},"cursor":{cursor},"cwd":{},"branch":{}}}"#,
+                r#"{{"text":{},"cursor":{cursor},"cwd":{},"branch":{},"suggestion":{},"ai":{},"menu":{menu}}}"#,
                 quote(&self.editor.text),
                 quote(&self.session.cwd),
-                self.session.branch.as_deref().map_or("null".to_owned(), quote)
+                self.session.branch.as_deref().map_or("null".to_owned(), quote),
+                suggestion.as_deref().map_or("null".to_owned(), quote),
+                self.ai,
             )
         } else {
             "null".to_owned()
