@@ -1,0 +1,17 @@
+// Temino's relay. Secrets (wrangler secret put): RELAY_SECRET,
+// GOOGLE_CLIENT_SECRET, APPLE_PRIVATE_KEY. Local dev reads .dev.vars.
+{
+  "name": "temino-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "public", "binding": "ASSETS", "html_handling": "auto-trailing-slash" },
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  "kv_namespaces": [{ "binding": "ACCOUNTS", "id": "TO_BE_CREATED" }],
+  "vars": {
+    "GOOGLE_CLIENT_ID": "",
+    "APPLE_CLIENT_ID": "",
+    "APPLE_TEAM_ID": "",
+    "APPLE_KEY_ID": ""
+  }
+}
