@@ -723,9 +723,11 @@ pub struct Session {
     continuation_since: Option<Instant>,
     pub exit_code: Option<i32>,
     pub boot_output: Vec<u8>,
-    /// When a running program last printed, and when we last wrote to it.
+    /// When a running program last printed, when we last wrote to it, and
+    /// when what we wrote last had an Enter in it.
     pub output_at: Option<Instant>,
     input_at: Cell<Option<Instant>>,
+    submitted_at: Cell<Option<Instant>>,
     /// The shell's own $PATH, which a Dock-launched Temino's lacks.
     pub path: Option<String>,
     /// The shell's file name: "zsh".
@@ -756,6 +758,7 @@ impl Session {
             boot_output: Vec::new(),
             output_at: None,
             input_at: Cell::new(None),
+            submitted_at: Cell::new(None),
             path: None,
             shell_name: String::new(),
         }
@@ -855,6 +858,9 @@ impl Session {
     /// Sends what you typed (or did) to the program.
     pub fn write(&self, bytes: &[u8]) {
         self.input_at.set(Some(Instant::now()));
+        if bytes.contains(&b'\r') {
+            self.submitted_at.set(self.input_at.get());
+        }
         self.reply(bytes);
     }
 
@@ -873,6 +879,11 @@ impl Session {
 
     pub fn input_at(&self) -> Option<Instant> {
         self.input_at.get()
+    }
+
+    /// When you last pressed Enter in the program (or pasted a line).
+    pub fn submitted_at(&self) -> Option<Instant> {
+        self.submitted_at.get()
     }
 
     fn new_block(&mut self, kind: BlockKind, command: String) -> &mut Block {
