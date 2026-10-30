@@ -157,7 +157,7 @@ state used. The editor also carries the Mac's grey `suggestion`, its
 completion `menu` (`items` of `[label, kind]`, `selected`), and `ai`.
 
 A line's runs are `[text, fg, bg, flags]` (flags: 1 bold, 2 italic,
-4 underline, 8 strikeout), colors already resolved through the Mac's
+4 underline, 8 strikeout, 16 two cells wide), colors already resolved through the Mac's
 theme. Each window also carries `theme`, the Mac's palette, so the client
 looks like the app. Typing goes over a key or a run of text at a time
 into the Mac's own editor, which completes and runs it. A full state goes out whenever
