@@ -61,6 +61,10 @@ pub enum Msg {
 /// on Haiku, ~/Library/Application Support/Temino on macOS, and
 /// $XDG_CONFIG_HOME/temino (~/.config/temino) on Linux.
 pub fn settings_dir() -> String {
+    // A second Temino with its own settings and tabs, e.g. a test build.
+    if let Some(dir) = std::env::var("TEMINO_SETTINGS").ok().filter(|d| !d.is_empty()) {
+        return dir;
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
     if cfg!(target_os = "haiku") {
         format!("{home}/config/settings/Temino")
