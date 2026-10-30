@@ -54,6 +54,15 @@
   .prompt { background: var(--raised); }
   .prompt .chip { background: var(--panel); }
   .hint { color: var(--faint); }
+  .ghost { color: var(--faint); }
+  .prompt.ai { border-color: color-mix(in srgb, var(--variable) 50%, var(--line)); }
+  .prompt.ai .pr, .chip.ai { color: var(--variable); }
+  .menu { margin-top: 6px; max-height: 40vh; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 4px; }
+  .mi { display: flex; align-items: center; gap: 8px; padding: 7px 6px; border-radius: 6px; font: 13px ui-monospace, Menlo, monospace; white-space: nowrap; }
+  .mi.sel { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .mi .k { width: 7px; height: 7px; border-radius: 2px; background: var(--faint); flex: none; }
+  .mi .k.command { background: var(--accent); } .mi .k.directory { background: var(--variable); }
+  .mi .k.file { background: var(--string); } .mi .k.history { background: var(--waiting); }
   .cur { background: var(--cursor); color: var(--bg); border-radius: 1px; }
   body:not(.typing) .prompt .cur { background: transparent; outline: 1px solid var(--cursor); color: inherit; }
   .wait { color: var(--faint); padding: 12px; }
@@ -80,11 +89,33 @@
   .center button { width: 100%; padding: 12px; font-weight: 600; }
   .lock { color: var(--done); font-size: 12px; }
   #side { display: none; }
+  #alerts { position: fixed; left: 8px; right: 8px; top: calc(env(safe-area-inset-top) + 56px); z-index: 10; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+  .alert { pointer-events: auto; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px;
+    background: var(--raised); border: 1px solid var(--line); box-shadow: 0 8px 30px rgb(0 0 0 / 0.35); max-width: 520px; margin: 0 auto; width: 100%; }
+  .alert.waiting { border-color: color-mix(in srgb, var(--waiting) 60%, var(--line)); }
+  .alert.done { border-color: color-mix(in srgb, var(--done) 60%, var(--line)); }
+  .alert .t { flex: 1; min-width: 0; font-size: 14px; }
+  .alert .t div + div { color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .alert button { padding: 6px 10px; font-size: 13px; }
+  .alert .yes { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  #tabs { display: flex; gap: 6px; overflow-x: auto; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); scrollbar-width: none; }
+  #tabs[hidden] { display: none; }
+  #tabs::-webkit-scrollbar { display: none; }
+  .tab { display: flex; align-items: center; gap: 6px; flex: none; max-width: 46vw; padding: 6px 10px; border-radius: 8px;
+    background: var(--raised); color: var(--dim); font-size: 13px; border: 1px solid transparent; position: relative; overflow: hidden; }
+  .tab.current { color: var(--text); border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); background: color-mix(in srgb, var(--raised) 70%, var(--text) 6%); }
+  .tab .n { color: var(--faint); }
+  .tab .tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tab .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+  .tab .x { color: var(--faint); padding: 0 0 0 4px; }
+  .tab.add { color: var(--accent); }
   /* iPad and other wide screens: the pane keeps a list of the window's
      tabs and panes beside it, and the zoomed-out views spread wider. */
   @media (min-width: 768px) {
     body { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr auto; }
     header { grid-column: 1 / -1; }
+    #tabs { display: none !important; }
+    #side .add { margin-right: 12px; width: calc(100% - 12px); }
     #side { display: block; grid-row: 2 / 4; overflow: auto; padding: 12px 0 12px 12px; border-right: 1px solid var(--line); }
     body.wide-off #side { display: none; }
     body.wide-off main, body.wide-off footer { grid-column: 1 / -1; }
@@ -107,6 +138,8 @@
   <div id="crumbs">Temino</div>
   <span class="lock" id="lock" hidden title="End-to-end encrypted">● E2E</span>
 </header>
+<div id="alerts"></div>
+<nav id="tabs" hidden></nav>
 <nav id="side"></nav>
 <main id="main"><div id="status">Loading…</div></main>
 <footer id="footer" hidden>
