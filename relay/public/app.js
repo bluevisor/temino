@@ -48,7 +48,8 @@ async function loadKeys() {
     }
     return found.privateKey instanceof CryptoKey ? found : null;
   };
-  const found = await usable(await get("device"));
+  const stored = await get("device");
+  const found = await usable(stored);
   if (found) return found;
   // Safari can't read an X25519 CryptoKey back out of IndexedDB after a
   // reload, but can an AES one. So the key is kept wrapped under a
@@ -57,10 +58,13 @@ async function loadKeys() {
   const wrapKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["wrapKey", "unwrapKey"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const wrapped = new Uint8Array(await crypto.subtle.wrapKey("pkcs8", made.privateKey, wrapKey, { name: "AES-GCM", iv }));
-  // add, not put: of two tabs making a key at once, the second reads back the first's.
+  // add, not put: of two tabs making a key at once, the second reads back
+  // the first's. One it can't use (an older format) is replaced.
   await new Promise((r) => {
     const t = db.transaction("keys", "readwrite");
-    t.objectStore("keys").add({ wrapped, wrapKey, iv, public: made.public }, "device").onerror = (e) => e.preventDefault();
+    const record = { wrapped, wrapKey, iv, public: made.public };
+    const store = t.objectStore("keys");
+    (stored ? store.put(record, "device") : store.add(record, "device")).onerror = (e) => e.preventDefault();
     t.oncomplete = r; t.onerror = r; t.onabort = r;
   });
   const kept = await usable(await get("device"));
@@ -357,6 +361,10 @@ $("send").onsubmit = (e) => {
 };
 addEventListener("resize", render);
 
-keys = await loadKeys();
-takeToken();
-connect();
+try {
+  keys = await loadKeys();
+  takeToken();
+  connect();
+} catch (error) {
+  center(`<h1>Can't start</h1><p>${esc(error.message || error)}</p>`);
+}
