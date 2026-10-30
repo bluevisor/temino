@@ -187,7 +187,7 @@ async function send(message) {
 function onMachine(message) {
   if (message.type === "pending") { pending = message.code; render(); }
   else if (message.type === "hello") { pending = null; watch(); render(); }
-  else if (message.type === "state") { pending = null; windows = message.windows; settle(); render(); }
+  else if (message.type === "state") { pending = null; windows = message.windows; paint(windows[0] && windows[0].theme); settle(); render(); }
 }
 
 // ---- what's on screen
@@ -248,13 +248,16 @@ function render() {
   document.body.classList.toggle("wide-off", level !== "pane");
   side(w);
   if (level === "pane") {
-    main.innerHTML = `<div id="screen"><pre>${esc((p && p.lines || []).join("\n"))}</pre></div>`;
-    fit(main.querySelector("pre"), p && p.columns);
-    main.scrollTop = main.scrollHeight;
+    const stick = !main.firstElementChild || main.scrollHeight - main.scrollTop - main.clientHeight < 40;
+    main.innerHTML = `<div id="screen" class="${p && p.screen && p.screen.mode === "grid" ? "full" : ""}">${screenHtml(p, true)}</div>`;
+    fit(main.querySelector("#screen"), p);
+    if (stick) main.scrollTop = main.scrollHeight;
+    $("screen").onclick = () => $("type").focus();
   } else if (level === "tab") {
     main.innerHTML = `<div class="grid">${t.panes.map((q) => `
       <div class="mini" data-pane="${q.id}"><div class="h">${dot(q.agent)}${esc(q.title)}</div>
-      <pre>${esc((q.lines || []).slice(-24).join("\n"))}</pre></div>`).join("")}</div>`;
+      <div class="m">${screenHtml(q, false)}</div></div>`).join("")}</div>`;
+    main.querySelectorAll(".mini .m").forEach((m) => { m.scrollTop = m.scrollHeight; });
     main.querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));
   } else if (level === "window") {
     main.innerHTML = `<div class="cards">` + w.tabs.map((u) => `
@@ -319,13 +322,81 @@ function side(w) {
   $("side").querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));
 }
 
-function fit(pre, columns) {
-  if (!columns) return;
-  // As wide as the longest line on screen, not the pane: a wide desktop
-  // pane's text stays readable; past the smallest size it scrolls sideways.
-  const used = Math.max(40, ...pre.textContent.split("\n").map((l) => l.length));
-  const width = pre.parentElement.clientWidth - 12;
-  pre.style.fontSize = Math.max(9, Math.min(14, width / (Math.min(columns, used) * 0.6))) + "px";
+// ---- drawing a pane the way the Mac does
+
+// One output line: [text, fg, bg, flags] runs.
+function rowHtml(runs, cursorAt) {
+  let html = "", col = 0;
+  for (const [text, fg, bg, flags] of runs || []) {
+    const chars = Array.from(text);
+    const style = `color:${fg}${bg ? `;background:${bg}` : ""}${flags & 1 ? ";font-weight:700" : ""}${flags & 2 ? ";font-style:italic" : ""}`
+      + (flags & 12 ? `;text-decoration:${flags & 4 ? "underline" : ""} ${flags & 8 ? "line-through" : ""}` : "");
+    if (cursorAt != null && cursorAt >= col && cursorAt < col + chars.length) {
+      const i = cursorAt - col;
+      html += `<span style="${style}">${esc(chars.slice(0, i).join(""))}<span class="cur">${esc(chars[i])}</span>${esc(chars.slice(i + 1).join(""))}</span>`;
+      cursorAt = null;
+    } else {
+      html += `<span style="${style}">${esc(text)}</span>`;
+    }
+    col += chars.length;
+  }
+  if (cursorAt != null) html += " ".repeat(Math.max(0, cursorAt - col)) + `<span class="cur"> </span>`;
+  return html;
+}
+
+const seconds = (s) => s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+const home = (cwd) => (cwd || "").replace(/^\/Users\/[^/]+/, "~");
+const chips = (cwd, branch) => `<span class="chip">${esc(home(cwd))}</span>${branch ? `<span class="chip br">${esc(branch)}</span>` : ""}`;
+
+function screenHtml(p, live) {
+  const sc = p && p.screen;
+  if (!sc) return `<div class="wait">…</div>`;
+  if (sc.mode === "grid") {
+    const [cr, cc] = sc.cursor || [-1, -1];
+    return `<pre class="term">${sc.lines.map((r, i) => rowHtml(r, live && i === cr ? cc : null)).join("\n")}</pre>`;
+  }
+  const blocks = sc.blocks.map((b) => {
+    const status = b.running ? `<span class="st run">● ${seconds(b.secs)}</span>`
+      : b.exit == null ? "" : b.exit === 0 ? `<span class="st ok">✓ ${seconds(b.secs)}</span>`
+      : `<span class="st bad">✗ ${b.exit} · ${seconds(b.secs)}</span>`;
+    const head = b.kind === "command" && b.command
+      ? `<div class="bh">${chips(b.cwd, b.branch)}${status}</div><div class="cmd"><span class="pr">❯</span> ${esc(b.command)}</div>` : "";
+    const [cr, cc] = (live && b.cursor) || [-1, -1];
+    const out = b.lines.length ? `<pre class="term">${b.lines.map((r, i) => rowHtml(r, i === cr ? cc : null)).join("\n")}</pre>` : "";
+    return `<div class="block ${b.exit && b.exit !== 0 ? "failed" : ""} ${b.running ? "running" : ""}">${head}${out}</div>`;
+  }).join("");
+  const ed = sc.editor;
+  const prompt = ed ? `<div class="block prompt"><div class="bh">${chips(ed.cwd, ed.branch)}</div>
+    <div class="cmd"><span class="pr">❯</span> ${live ? rowHtml([[ed.text, "var(--text)", null, 0]], ed.cursor) : esc(ed.text)}${!ed.text && live ? `<span class="hint">Tap to type</span>` : ""}</div></div>` : "";
+  return blocks + prompt;
+}
+
+// Text size: a full-screen program is laid out for its columns, so they
+// all fit (down to a floor, then it scrolls sideways); block output fits
+// its longest line so a wide desktop pane stays readable.
+function fit(el, p) {
+  const sc = p && p.screen;
+  if (!el || !sc) return;
+  const width = el.clientWidth - (sc.mode === "grid" ? 4 : 26); // a block's padding and border
+  let cols = sc.columns;
+  if (sc.mode !== "grid") {
+    const used = Math.max(40, ...Array.from(el.querySelectorAll("pre")).flatMap((pre) => pre.textContent.split("\n").map((l) => l.length)));
+    cols = Math.min(cols, used);
+  }
+  const floor = sc.mode === "grid" ? 7 : 9;
+  el.style.setProperty("--fs", Math.max(floor, Math.min(14, width / (cols * 0.6))) + "px");
+}
+
+// The Mac's theme, so the page looks like the app it drives.
+let painted = "";
+function paint(theme) {
+  if (!theme || JSON.stringify(theme) === painted) return;
+  painted = JSON.stringify(theme);
+  const r = document.documentElement.style;
+  const set = { bg: "background", panel: "surface", raised: "raised", line: "divider", text: "text", dim: "dim",
+    faint: "faint", accent: "accent", done: "success", error: "error", waiting: "warning", string: "string",
+    variable: "variable", cursor: "cursor" };
+  for (const [v, k] of Object.entries(set)) if (/^#[0-9a-f]{6}$/i.test(theme[k])) r.setProperty(`--${v}`, theme[k]);
 }
 
 $("out").onclick = () => {
@@ -342,23 +413,51 @@ document.addEventListener("gestureend", (e) => {
   if (pinch > 1.4 && i > 0) go(LEVELS[i - 1]);
 });
 
-const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["↑", "Up"], ["↓", "Down"], ["←", "Left"], ["→", "Right"],
-  ["^C", "c", ["ctrl"]], ["⌫", "Backspace"], ["⏎", "Enter"]];
-$("keys").innerHTML = KEYS.map(([label], i) => `<button data-key="${i}">${label}</button>`).join("");
+const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["^C", "c", ["ctrl"]], ["↑", "Up"], ["↓", "Down"], ["←", "Left"], ["→", "Right"],
+  ["⌫", "Backspace"], ["⏎", "Enter"], ["^D", "d", ["ctrl"]], ["^R", "r", ["ctrl"]], ["^L", "l", ["ctrl"]]];
+$("keys").innerHTML = `<button id="kb" aria-label="Keyboard">⌨︎</button>` + KEYS.map(([label], i) => `<button data-key="${i}">${label}</button>`).join("");
+const key = (k, mods = []) => at && send({ type: "key", window: at.window, pane: at.pane, key: k, mods });
+const text = (t) => at && t && send({ type: "text", window: at.window, pane: at.pane, text: t });
+$("keys").onpointerdown = (e) => e.preventDefault(); // keep the keyboard up
 $("keys").onclick = (e) => {
-  const i = e.target.dataset.key;
-  if (i === undefined || !at) return;
-  const [, key, mods] = KEYS[i];
-  send({ type: "key", window: at.window, pane: at.pane, key, mods: mods || [] });
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.id === "kb") { const t = $("type"); document.activeElement === t ? t.blur() : t.focus(); return; }
+  const [, k, mods] = KEYS[b.dataset.key];
+  key(k, mods || []);
 };
-$("send").onsubmit = (e) => {
-  e.preventDefault();
-  if (!at) return;
-  const text = $("text").value;
-  if (text) send({ type: "text", window: at.window, pane: at.pane, text });
-  send({ type: "key", window: at.window, pane: at.pane, key: "Enter" });
-  $("text").value = "";
-};
+
+// Typing goes straight to the pane, a key at a time, like at the Mac: the
+// Mac's own editor shows it, completes it, and runs it on Return.
+const NAMED = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right", Escape: "Escape", Tab: "Tab",
+  Enter: "Enter", Backspace: "Backspace", Delete: "Delete", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown" };
+const type = $("type");
+type.addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
+  const mods = [e.ctrlKey && "ctrl", e.altKey && "alt", e.metaKey && "cmd", e.shiftKey && "shift"].filter(Boolean);
+  if (NAMED[e.key]) { e.preventDefault(); key(NAMED[e.key], mods); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.length === 1) {
+    if (e.metaKey && e.key === "v") return; // paste comes as a paste event
+    e.preventDefault();
+    key(e.key.toLowerCase(), mods.filter((m) => m !== "shift"));
+  }
+});
+type.addEventListener("beforeinput", (e) => {
+  if (e.isComposing) return;
+  if (e.inputType === "insertText" && e.data) { e.preventDefault(); text(e.data); }
+  else if (e.inputType === "insertLineBreak" || e.inputType === "insertParagraph") { e.preventDefault(); key("Enter"); }
+  else if (e.inputType === "deleteContentBackward") { e.preventDefault(); key("Backspace"); }
+  else if (e.inputType === "insertReplacementText" || e.inputType === "insertFromPaste") {
+    e.preventDefault();
+    text(e.data || (e.dataTransfer && e.dataTransfer.getData("text/plain")) || "");
+  }
+});
+// CJK and other input methods: what the IME commits goes over whole.
+type.addEventListener("compositionend", (e) => { text(e.data); type.value = ""; });
+type.addEventListener("paste", (e) => { e.preventDefault(); text(e.clipboardData.getData("text/plain")); });
+type.addEventListener("input", () => { if (!type.matches(":focus") || !type.value) return; /* leftovers */ });
+type.addEventListener("focus", () => document.body.classList.add("typing"));
+type.addEventListener("blur", () => document.body.classList.remove("typing"));
 addEventListener("resize", render);
 
 try {

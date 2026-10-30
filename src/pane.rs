@@ -813,30 +813,71 @@ impl Pane {
     /// What a remote shows of the pane, a screenful of lines: a full-screen
     /// program's screen as it is, or else the last commands with their
     /// output, then the prompt with what's typed at it.
-    pub fn remote_lines(&mut self) -> Vec<String> {
+    /// What a remote client draws for this pane, as JSON: a full-screen
+    /// program's grid with its cursor, or the last blocks plus the editor.
+    pub fn remote_screen(&mut self, theme: &Theme) -> String {
+        use crate::remote::quote;
         let rows = self.session.size.lines.max(1);
+        let columns = self.session.size.columns;
         if let Some(block) = self.session.active_mut().filter(|block| block.alt_screen()) {
             let top = block.term.grid().history_size();
-            let text = block.text_between((top, 0), (top + rows - 1, usize::MAX));
-            return text.lines().map(str::to_owned).collect();
+            let lines: Vec<String> = (top..top + rows).map(|i| crate::ui::remote_row(block, i, theme)).collect();
+            let cursor = if block.term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR) {
+                let point = block.term.grid().cursor.point;
+                format!("[{},{}]", point.line.0, point.column.0)
+            } else {
+                "null".to_owned()
+            };
+            return format!(r#"{{"mode":"grid","columns":{columns},"lines":[{}],"cursor":{cursor}}}"#, lines.join(","));
         }
-        let mut lines = Vec::new();
-        let start = self.session.blocks.len().saturating_sub(8);
-        for block in &mut self.session.blocks[start..] {
-            if block.kind == BlockKind::Command && !block.command.is_empty() {
-                lines.push(format!("$ {}", block.command));
-            }
+        // Each block's last screenful at most; the client scrolls.
+        let start = self.session.blocks.len().saturating_sub(12);
+        let mut blocks = Vec::new();
+        let live = self.session.phase == crate::session::Phase::Running;
+        let count = self.session.blocks.len();
+        for (i, block) in self.session.blocks[start..].iter_mut().enumerate() {
             let n = block.output_lines();
-            if n > 0 {
-                let text = block.text_between((n.saturating_sub(rows), 0), (n - 1, usize::MAX));
-                lines.extend(text.lines().map(str::to_owned));
-            }
+            let lines: Vec<String> =
+                (n.saturating_sub(rows * 2)..n).map(|line| crate::ui::remote_row(block, line, theme)).collect();
+            let running = live && start + i + 1 == count && block.running();
+            // A running block's cursor, for programs that read a line.
+            let cursor = if running {
+                let grid = block.term.grid();
+                let point = grid.cursor.point;
+                let index = (grid.history_size() as i32 + point.line.0) as usize;
+                let first = n.saturating_sub(rows * 2);
+                if index >= first && index < n.max(index + 1) {
+                    format!("[{},{}]", index - first, point.column.0)
+                } else {
+                    "null".to_owned()
+                }
+            } else {
+                "null".to_owned()
+            };
+            blocks.push(format!(
+                r#"{{"id":{},"kind":{},"command":{},"cwd":{},"branch":{},"exit":{},"running":{running},"secs":{:.1},"lines":[{}],"cursor":{cursor}}}"#,
+                block.id,
+                quote(if block.kind == BlockKind::Command { "command" } else { "output" }),
+                quote(&block.command),
+                quote(&block.cwd),
+                block.branch.as_deref().map_or("null".to_owned(), quote),
+                block.exit.map_or("null".to_owned(), |code| code.to_string()),
+                block.duration().as_secs_f32(),
+                lines.join(","),
+            ));
         }
-        if self.session.editor_active() {
-            lines.push(format!("› {}", self.editor.text));
-        }
-        let skip = lines.len().saturating_sub(rows);
-        lines.split_off(skip)
+        let editor = if self.session.editor_active() {
+            let cursor = self.editor.text[..self.editor.cursor.min(self.editor.text.len())].chars().count();
+            format!(
+                r#"{{"text":{},"cursor":{cursor},"cwd":{},"branch":{}}}"#,
+                quote(&self.editor.text),
+                quote(&self.session.cwd),
+                self.session.branch.as_deref().map_or("null".to_owned(), quote)
+            )
+        } else {
+            "null".to_owned()
+        };
+        format!(r#"{{"mode":"blocks","columns":{columns},"blocks":[{}],"editor":{editor}}}"#, blocks.join(","))
     }
 
     /// Advances animations; true when the pane needs a new frame.
