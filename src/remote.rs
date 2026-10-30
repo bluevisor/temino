@@ -46,7 +46,8 @@ pub enum Command {
     Text(u64, String),
     /// Press this key in the pane.
     Key(u64, KeyEvent),
-    NewTab,
+    /// A new tab, in the shell named (bash, zsh, fish) or the usual one.
+    NewTab(Option<crate::shells::Kind>),
     CloseTab(usize),
     NewWindow,
     /// Build the state now: someone new is watching, or watches more.
@@ -384,7 +385,7 @@ fn command(message: &Value) {
         (Some("focus"), Some(pane)) => Some(Command::Focus(pane)),
         (Some("text"), Some(pane)) => message.str_at("text").map(|text| Command::Text(pane, text.to_owned())),
         (Some("key"), Some(pane)) => key(message).map(|key| Command::Key(pane, key)),
-        (Some("new_tab"), _) => Some(Command::NewTab),
+        (Some("new_tab"), _) => Some(Command::NewTab(message.str_at("shell").and_then(crate::shells::Kind::from_name))),
         (Some("close_tab"), _) => index.map(Command::CloseTab),
         (Some("new_window"), _) => Some(Command::NewWindow),
         _ => None,

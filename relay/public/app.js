@@ -366,16 +366,30 @@ function strip(w) {
       ${/^#[0-9a-f]{6}$/i.test(u.color) ? `<span class="bar" style="background:${u.color}"></span>` : ""}
       <span class="n">${u.index + 1}</span>${dot(u.agent)}<span class="tt">${esc(u.title)}</span>
       ${u.index === at.tab && live.length > 1 ? `<span class="x" data-close="${u.index}">×</span>` : ""}
-    </div>`).join("") + `<div class="tab add" id="addtab">+</div>`;
+    </div>`).join("") + `<div class="tab add" id="addtab">${choosing ? "×" : "+"}</div>`
+    + (choosing ? (w.shells || []).map((name, i) => `<div class="tab shell" data-shell="${esc(name)}">${esc(name)}${i === 0 ? ` <span class="n">usual</span>` : ""}</div>`).join("") : "");
   el.onclick = (e) => {
     const close = e.target.closest("[data-close]");
     if (close) return send({ type: "close_tab", window: w.no, index: +close.dataset.close });
-    if (e.target.closest("#addtab")) { follow = w.tabs.length; return send({ type: "new_tab", window: w.no }); }
+    const shell = e.target.closest("[data-shell]");
+    if (shell) { choosing = false; return newTab(w, shell.dataset.shell); }
+    if (e.target.closest("#addtab")) {
+      // One shell: just open it. Several: + shows them, the usual one first.
+      if ((w.shells || []).length < 2) return newTab(w);
+      choosing = !choosing;
+      return render();
+    }
     const t = e.target.closest("[data-tab]");
     if (t) switchTab(w, +t.dataset.tab);
   };
   const cur = el.querySelector(".current");
   if (cur && !strip.scrolled) { cur.scrollIntoView({ inline: "center", block: "nearest" }); }
+}
+
+let choosing = false;
+function newTab(w, shell) {
+  follow = w.tabs.length;
+  send({ type: "new_tab", window: w.no, ...(shell ? { shell } : {}) });
 }
 
 function switchTab(w, index) {
@@ -452,8 +466,9 @@ function side(w) {
     (u.index === at.tab && u.panes.length > 1 ? u.panes.map((q) => `
     <div class="card pane ${q.id === at.pane ? "current" : ""}" data-pane="${q.id}">${dot(q.agent)}
       <div class="t"><div>${esc(q.title)}</div></div></div>`).join("") : "")).join("");
-  $("side").insertAdjacentHTML("beforeend", `<button class="add" id="sideadd">+ New Tab</button>`);
-  $("sideadd").onclick = () => { follow = w.tabs.length; send({ type: "new_tab", window: w.no }); };
+  $("side").insertAdjacentHTML("beforeend", (w.shells || []).length < 2 ? `<button class="add" data-shell="">+ New Tab</button>`
+    : (w.shells || []).map((name, i) => `<button class="add" data-shell="${esc(name)}">+ New ${esc(name)} Tab</button>`).join(""));
+  $("side").querySelectorAll("[data-shell]").forEach((b) => b.onclick = () => newTab(w, b.dataset.shell || undefined));
   $("side").querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => switchTab(w, +el.dataset.tab));
   $("side").querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));
 }

@@ -1117,10 +1117,22 @@ impl App {
             t.cursor.css(),
             t.selection.css(),
         );
+        // The shells a new tab can start in, the usual one first.
+        let usual = shells::Kind::of_path(&self.ctx.shell);
+        let mut kinds: Vec<&str> = shells::KINDS
+            .into_iter()
+            .filter(|&kind| Some(kind) != usual && shells::find(kind).is_some())
+            .map(shells::Kind::name)
+            .collect();
+        if let Some(usual) = usual {
+            kinds.insert(0, usual.name());
+        }
+        let shells: Vec<String> = kinds.iter().map(|name| format!("\"{name}\"")).collect();
         let state = format!(
-            r#"{{"no":{no},"title":{},"active":{},"theme":{palette},"tabs":[{}]}}"#,
+            r#"{{"no":{no},"title":{},"active":{},"theme":{palette},"shells":[{}],"tabs":[{}]}}"#,
             remote::quote(&self.title),
             self.active,
+            shells.join(","),
             tabs.join(",")
         );
         (state, lines)
@@ -1162,9 +1174,15 @@ impl App {
                     self.ui_event(UiEvent::Key(key));
                 }
             }
-            remote::Command::NewTab => {
+            remote::Command::NewTab(kind) => {
+                // Another shell for just this tab: the usual one stays.
+                let other = kind.and_then(shells::find);
+                let usual = other.map(|path| std::mem::replace(&mut self.ctx.shell, path));
                 if let Err(error) = self.new_tab() {
                     self.ctx.show_toast(&error);
+                }
+                if let Some(usual) = usual {
+                    self.ctx.shell = usual;
                 }
             }
             remote::Command::CloseTab(index) => {

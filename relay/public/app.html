@@ -118,13 +118,14 @@
   .tab .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
   .tab .x { color: var(--faint); padding: 0 0 0 4px; }
   .tab.add { color: var(--accent); }
+  .tab.shell { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
   /* iPad and other wide screens: the pane keeps a list of the window's
      tabs and panes beside it, and the zoomed-out views spread wider. */
   @media (min-width: 768px) {
     body { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr auto; }
     header { grid-column: 1 / -1; }
     #tabs { display: none !important; }
-    #side .add { margin-right: 12px; width: calc(100% - 12px); }
+    #side .add { margin: 0 12px 6px 0; width: calc(100% - 12px); }
     #side { display: block; grid-row: 2 / 4; overflow: auto; padding: 12px 0 12px 12px; border-right: 1px solid var(--line); }
     body.wide-off #side { display: none; }
     body.wide-off main, body.wide-off footer { grid-column: 1 / -1; }
