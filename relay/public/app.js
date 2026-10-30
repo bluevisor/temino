@@ -188,7 +188,7 @@ async function send(message) {
 function onMachine(message) {
   if (message.type === "pending") { pending = message.code; render(); }
   else if (message.type === "hello") { pending = null; watch(); render(); }
-  else if (message.type === "state") { pending = null; windows = resolve(message.windows); paint(windows[0] && windows[0].theme); settle(); notice(); render(); }
+  else if (message.type === "state") { pending = null; unsure = false; windows = resolve(message.windows); paint(windows[0] && windows[0].theme); settle(); notice(); render(); }
 }
 
 // Screen lines come whole once, then as just their key while unchanged.
@@ -506,7 +506,8 @@ function screenHtml(p, live) {
   if (!ed) return blocks;
   const atEnd = ed.cursor >= Array.from(ed.text).length;
   const ghost = live && atEnd && ed.suggestion ? `<span class="ghost" id="ghost">${esc(ed.suggestion)}</span>` : "";
-  const line = live ? rowHtml([[ed.text, "var(--text)", null, 0]], atEnd && ghost ? null : ed.cursor) : esc(ed.text);
+  const runs = colored(ed);
+  const line = live ? rowHtml(runs, atEnd && ghost ? null : ed.cursor) : rowHtml(runs, null);
   const caret = live && atEnd && ghost ? `<span class="cur"> </span>` : "";
   const menu = live && ed.menu ? `<div class="menu">${ed.menu.items.map(([label, kind], i) =>
     `<div class="mi ${i === ed.menu.selected ? "sel" : ""}" data-mi="${i}"><span class="k ${kind}"></span>${esc(label)}</div>`).join("")}</div>` : "";
@@ -557,6 +558,15 @@ $("alerts").onclick = (e) => {
   else go("pane", { window: a.w, tab: a.t, pane: a.p });
 };
 
+// The command line in the Mac's colors. Typed ahead of the Mac, the part
+// it has colored keeps them; the rest is plain until it catches up.
+function colored(ed) {
+  const runs = ed.runs || [], have = runs.map((r) => r[0]).join("");
+  if (have === ed.text) return runs;
+  if (have && ed.text.startsWith(have)) return [...runs, [ed.text.slice(have.length), "var(--text)", null, 0]];
+  return [[ed.text, "var(--text)", null, 0]];
+}
+
 // Typing shows at once: keys that edit the line are applied here too, and
 // the Mac's line takes over as soon as it catches up (or after a moment,
 // if it went another way).
@@ -573,9 +583,12 @@ function shown(id, ed) {
   }
   return { ...ed, text: guess.text, cursor: guess.cursor, suggestion, menu: null };
 }
+// After a key that can't be guessed (Tab, ^U…), guesses wait for the Mac's
+// next state: built on the old line, they'd be wrong.
+let unsure = false;
 function predict(op, arg) {
   const p = currentPane(), sc = p && p.screen;
-  if (!sc || sc.mode !== "blocks" || !sc.editor || sc.editor.menu) return;
+  if (!sc || sc.mode !== "blocks" || !sc.editor || sc.editor.menu || unsure) return;
   const now = shown(p.id, sc.editor);
   const chars = Array.from(now.text);
   let cursor = Math.min(now.cursor, chars.length);
@@ -586,7 +599,7 @@ function predict(op, arg) {
   else if (op === "Right" && cursor < chars.length) cursor++;
   else if (op === "Home") cursor = 0;
   else if (op === "End" && !now.suggestion) cursor = chars.length;
-  else return predicted.delete(p.id); // Enter, Tab, Up…: wait for the Mac
+  else { unsure = true; return predicted.delete(p.id); } // Enter, Tab, Up…: wait for the Mac
   predicted.set(p.id, { text: chars.join(""), cursor, at: Date.now() });
   render();
 }
@@ -642,7 +655,7 @@ const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["^C", "c", ["ctrl"]], ["↑", 
 $("keys").innerHTML = `<button id="kb" aria-label="Keyboard">⌨︎</button>` + KEYS.map(([label], i) => `<button data-key="${i}">${label}</button>`).join("");
 const key = (k, mods = []) => {
   if (!at) return;
-  if (!mods.length) predict(k); else { const p = currentPane(); if (p) predicted.delete(p.id); }
+  if (!mods.length) predict(k); else { const p = currentPane(); if (p) predicted.delete(p.id); unsure = true; }
   send({ type: "key", window: at.window, pane: at.pane, key: k, mods });
 };
 const text = (t) => { if (!at || !t) return; predict("text", t); send({ type: "text", window: at.window, pane: at.pane, text: t }); };

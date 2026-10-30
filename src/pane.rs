@@ -826,6 +826,32 @@ impl Pane {
             marker
         };
         let suggestion = if self.session.editor_active() { self.suggestion(ctx) } else { None };
+        // The command line in the Mac's syntax colors (a known command green…).
+        let editor_runs = if self.session.editor_active() {
+            let text = &self.editor.text;
+            let mut colors = vec![ctx.theme.text; text.len()];
+            if !self.ai {
+                ctx.commands.use_path(self.session.path.as_deref());
+                for (start, end, color) in crate::ui::highlight(text, self.editor.cursor, &mut ctx.commands, &ctx.theme) {
+                    for slot in &mut colors[start.min(text.len())..end.min(text.len())] {
+                        *slot = color;
+                    }
+                }
+            }
+            let mut runs: Vec<(String, String)> = Vec::new();
+            for (offset, c) in text.char_indices() {
+                let color = colors[offset].css();
+                match runs.last_mut() {
+                    Some(run) if run.1 == color => run.0.push(c),
+                    _ => runs.push((c.to_string(), color)),
+                }
+            }
+            let runs: Vec<String> =
+                runs.iter().map(|(t, color)| format!(r#"[{},"{color}",null,0]"#, quote(t))).collect();
+            format!("[{}]", runs.join(","))
+        } else {
+            "[]".to_owned()
+        };
         let theme = &ctx.theme;
         let rows = self.session.size.lines.max(1);
         let columns = self.session.size.columns;
@@ -904,7 +930,7 @@ impl Pane {
                 format!(r#"{{"items":[{}],"selected":{}}}"#, items.join(","), c.selected)
             });
             format!(
-                r#"{{"text":{},"cursor":{cursor},"cwd":{},"branch":{},"suggestion":{},"ai":{},"menu":{menu}}}"#,
+                r#"{{"text":{},"runs":{editor_runs},"cursor":{cursor},"cwd":{},"branch":{},"suggestion":{},"ai":{},"menu":{menu}}}"#,
                 quote(&self.editor.text),
                 quote(&self.session.cwd),
                 self.session.branch.as_deref().map_or("null".to_owned(), quote),
