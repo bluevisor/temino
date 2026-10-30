@@ -156,7 +156,7 @@ function onMachine(message) {
 
 // ---- what's on screen
 const win = (no) => windows.find((w) => w.no === no);
-const tabOf = (w, index) => w && w.tabs[index];
+const tabOf = (w, index) => w && w.tabs.find((t) => t.index === index);
 const paneOf = (t, id) => t && t.panes.find((p) => p.id === id);
 
 function settle() {
@@ -164,6 +164,8 @@ function settle() {
   if (!w) { at = null; return; }
   let t = at && at.window === w.no ? tabOf(w, at.tab) : null;
   if (!t) t = tabOf(w, w.active) || w.tabs[0];
+  // A tab with no terminal (Settings) can't take input: use the first that has one.
+  if (t && !t.panes.length) t = w.tabs.find((x) => x.panes.length) || t;
   let p = at && at.window === w.no ? paneOf(t, at.pane) : null;
   if (!p) p = paneOf(t, t.focus) || t.panes[0];
   const next = { window: w.no, tab: t.index, pane: p ? p.id : null };
@@ -225,7 +227,7 @@ function render() {
         <div class="t"><div>${u.index + 1}. ${esc(u.title)}</div><div>${u.panes.length} pane${u.panes.length === 1 ? "" : "s"} · ${esc(u.panes[0] && u.panes[0].cwd)}</div></div>
       </div>`).join("") + `</div><button id="newtab">New Tab</button>`;
     main.querySelectorAll("main [data-tab]").forEach((el) => el.onclick = () => {
-      const u = w.tabs[+el.dataset.tab];
+      const u = tabOf(w, +el.dataset.tab);
       go("tab", { tab: u.index, pane: u.focus });
     });
     $("newtab").onclick = () => send({ type: "new_tab", window: w.no });
@@ -275,7 +277,7 @@ function side(w) {
     <div class="card pane ${q.id === at.pane ? "current" : ""}" data-pane="${q.id}">${dot(q.agent)}
       <div class="t"><div>${esc(q.title)}</div></div></div>`).join("") : "")).join("");
   $("side").querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => {
-    const u = w.tabs[+el.dataset.tab];
+    const u = tabOf(w, +el.dataset.tab);
     go("pane", { tab: u.index, pane: u.focus });
   });
   $("side").querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));

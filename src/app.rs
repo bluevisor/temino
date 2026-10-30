@@ -1059,7 +1059,10 @@ impl App {
                 self.panes.iter().filter(|p| leaves.contains(&p.id)).filter_map(|p| p.agent_now).max()
             })
             .collect();
-        let tabs: Vec<String> = (0..self.tabs.len())
+        // Settings has no terminal to drive, so phones don't see it.
+        let shown: Vec<usize> = (0..self.tabs.len()).filter(|&index| self.tabs[index].focus != SETTINGS).collect();
+        let tabs: Vec<String> = shown
+            .into_iter()
             .map(|index| {
                 let tab = &self.tabs[index];
                 let mut leaves = Vec::new();
