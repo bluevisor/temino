@@ -34,7 +34,8 @@ fn cell_colors(cell: &Cell, theme: &Theme, colors: &Colors) -> (Color, Option<Co
 
 /// Output line `index` of `block` for remote clients: a JSON array of
 /// `[text, fg, bg, flags]` runs (flags: 1 bold, 2 italic, 4 underline,
-/// 8 strikeout), colors resolved through the theme like the GPU view's.
+/// 8 strikeout, 16 two cells wide), colors resolved through the theme like
+/// the GPU view's.
 pub fn remote_row(block: &Block, index: usize, theme: &Theme) -> String {
     let term = &block.term;
     let grid = term.grid();
@@ -69,6 +70,9 @@ pub fn remote_row(block: &Block, index: usize, theme: &Theme) -> String {
         }
         if c.flags.contains(Flags::STRIKEOUT) {
             flags |= 8;
+        }
+        if c.flags.contains(Flags::WIDE_CHAR) {
+            flags |= 16;
         }
         let (fg, bg) = (fg.css(), bg.map(Color::css));
         let mut piece = String::new();
