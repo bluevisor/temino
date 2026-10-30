@@ -84,6 +84,13 @@ function connect() {
   relay.onclose = (event) => {
     session = null;
     if (event.code === 4001 || event.code === 1008) { store.set("temino-token", null); return connect(); }
+    // Another tab or window took over this device: don't fight it back.
+    if (event.code === 4000) {
+      center(`<h1>Open in another tab</h1><p>Temino Remote is running in another tab or window.</p><button id="here">Use Here</button>`);
+      $("crumbs").textContent = "Paused";
+      $("here").onclick = connect;
+      return;
+    }
     $("crumbs").textContent = "Reconnecting…";
     setTimeout(connect, 1500);
   };
