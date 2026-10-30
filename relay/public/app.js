@@ -41,9 +41,15 @@ async function loadKeys() {
   const get = (k) => new Promise((r) => { const q = db.transaction("keys").objectStore("keys").get(k); q.onsuccess = () => r(q.result); q.onerror = () => r(null); });
   const found = await get("device");
   if (found) return found;
+  // add, not put: two tabs opening at once must end up with the same key,
+  // so the loser of the race reads back the winner's.
   const fresh = await generateKeys(false);
-  await new Promise((r) => { const t = db.transaction("keys", "readwrite"); t.objectStore("keys").put(fresh, "device"); t.oncomplete = r; t.onerror = r; });
-  return fresh;
+  await new Promise((r) => {
+    const t = db.transaction("keys", "readwrite");
+    t.objectStore("keys").add(fresh, "device").onerror = (e) => e.preventDefault();
+    t.oncomplete = r; t.onerror = r; t.onabort = r;
+  });
+  return (await get("device")) || fresh;
 }
 
 // ---- signing in
@@ -102,6 +108,16 @@ async function onRelay(message) {
   if (message.type === "devices") {
     me = message.you;
     devices = message.devices;
+    // The account knows this device by another key (storage was cleared, or
+    // another tab made a key first): no Mac would let it in, so sign in again.
+    const self = devices.find((d) => d.id === me);
+    if (self && self.pub !== hex(keys.public)) {
+      relay.onclose = null;
+      relay.send(JSON.stringify({ type: "forget", id: me }));
+      relay.close();
+      store.set("temino-token", null);
+      return connect();
+    }
     const desktops = devices.filter((d) => d.kind === "desktop");
     const wanted = store.get("temino-machine");
     const pick = desktops.find((d) => d.id === machine && d.online) || desktops.find((d) => d.id === wanted && d.online)
