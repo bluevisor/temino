@@ -12,6 +12,7 @@
     "GOOGLE_CLIENT_ID": "313030212279-d693u625001cfnlhmf5sgdj8ih7aifgg.apps.googleusercontent.com",
     "APPLE_CLIENT_ID": "com.bluevisor.temino.signin",
     "APPLE_TEAM_ID": "CKGXYS3R8N",
-    "APPLE_KEY_ID": "VXYLHDH8MA"
+    "APPLE_KEY_ID": "VXYLHDH8MA",
+    "VAPID_PUBLIC": "BJPcvtWDIXrHAhWLpzQv92--aNTzz6ebZbHsmlbvryD0tOX9nWwhwbWcnLHRh_H4d_b_82n48V21qMYVL2vdLvg"
   }
 }

@@ -107,6 +107,7 @@ function connect() {
   }
   relay = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/connect?token=${encodeURIComponent(token)}`);
   relay.onmessage = (event) => onRelay(JSON.parse(event.data));
+  relay.onopen = visible;
   relay.onclose = (event) => {
     session = null;
     if (event.code === 4001 || event.code === 1008) { store.set("temino-token", null); return connect(); }
@@ -337,7 +338,9 @@ function renderUser() {
     <div class="card ${d.id === machine ? "current" : ""}" data-machine="${esc(d.id)}">${dot(d.online ? "idle" : null)}
       <div class="t"><div>${esc(d.name)}</div><div>${d.online ? "Online" : "Offline"}</div></div>
     </div>`).join("") + `</div>` : `<div class="center"><p>No Mac on this account yet. In Temino, open Settings and sign in to Remote Control.</p></div>`)
-    + `<div class="signout"><button id="signout">Sign Out</button></div>`;
+    + `<div class="signout"><button id="notify">${notifyLabel()}</button><button id="signout">Sign Out</button></div>`
+    + `<p class="note" id="notifynote">${notifyNote()}</p>`;
+  $("notify").onclick = toggleNotify;
   $("main").querySelectorAll("[data-machine]").forEach((el) => el.onclick = async () => {
     const d = devices.find((x) => x.id === el.dataset.machine);
     if (!d || !d.online) return;
@@ -402,6 +405,45 @@ $("main").addEventListener("touchend", (e) => {
   const next = live[i + (dx < 0 ? 1 : -1)];
   if (next) switchTab(w, next.index);
 }, { passive: true });
+
+// ---- notifications while the page is closed (Web Push)
+// iOS delivers them only to the page added to the Home Screen.
+const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+const pushable = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const notifyOn = () => store.get("temino-push") === "on" && pushable && Notification.permission === "granted";
+const notifyLabel = () => notifyOn() ? "Notifications On" : "Notify Me";
+function notifyNote() {
+  if (notifyOn()) return "You'll hear when an agent waits on you or finishes while you're away from the Mac.";
+  if (!pushable && /iPhone|iPad/.test(navigator.userAgent) && !standalone) return "To get notifications, tap Share ▸ Add to Home Screen, then open Temino from there.";
+  if (!pushable) return "This browser can't show notifications.";
+  return "Get a notification when an agent waits on you or finishes.";
+}
+async function toggleNotify() {
+  try {
+    const registration = await navigator.serviceWorker.register("/sw.js");
+    if (notifyOn()) {
+      const sub = await registration.pushManager.getSubscription();
+      if (sub) await sub.unsubscribe();
+      relay.send(JSON.stringify({ type: "push", sub: null }));
+      store.set("temino-push", null);
+    } else {
+      if (await Notification.requestPermission() !== "granted") throw new Error("Notifications are turned off for this page in Settings.");
+      const key = await (await fetch("/vapid")).text();
+      const sub = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64url(key) });
+      relay.send(JSON.stringify({ type: "push", sub: sub.toJSON() }));
+      store.set("temino-push", "on");
+    }
+  } catch (error) {
+    $("notifynote").textContent = error.message || String(error);
+    return;
+  }
+  render();
+}
+const fromB64url = (t) => Uint8Array.from(atob(t.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((t.length + 3) % 4)), (c) => c.charCodeAt(0));
+
+// The relay pushes only to phones not looking at the page.
+const visible = () => relay && relay.readyState === 1 && relay.send(JSON.stringify({ type: "visible", on: !document.hidden }));
+document.addEventListener("visibilitychange", visible);
 
 function side(w) {
   $("side").innerHTML = w.tabs.filter((u) => u.panes.length).map((u) => `
