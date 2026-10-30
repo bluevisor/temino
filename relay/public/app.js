@@ -41,8 +41,9 @@ async function loadKeys() {
   const get = (k) => new Promise((r) => { const q = db.transaction("keys").objectStore("keys").get(k); q.onsuccess = () => r(q.result); q.onerror = () => r(null); });
   const usable = async (found) => {
     if (!found || !(found.public instanceof Uint8Array) || found.public.length !== 32) return null;
-    if (found.pkcs8) {
-      const privateKey = await crypto.subtle.importKey("pkcs8", found.pkcs8, { name: "X25519" }, false, ["deriveBits"]).catch(() => null);
+    if (found.wrapped && found.wrapKey instanceof CryptoKey) {
+      const privateKey = await crypto.subtle.unwrapKey("pkcs8", found.wrapped, found.wrapKey, { name: "AES-GCM", iv: found.iv },
+        { name: "X25519" }, false, ["deriveBits"]).catch(() => null);
       return privateKey && { privateKey, public: found.public };
     }
     return found.privateKey instanceof CryptoKey ? found : null;
@@ -50,15 +51,21 @@ async function loadKeys() {
   const found = await usable(await get("device"));
   if (found) return found;
   // Safari can't read an X25519 CryptoKey back out of IndexedDB after a
-  // reload, so the key is kept as bytes and imported, non-extractable, on load.
+  // reload, but can an AES one. So the key is kept wrapped under a
+  // non-extractable AES key and unwrapped, non-extractable, on load.
   const made = await generateKeys(true);
-  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", made.privateKey));
+  const wrapKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["wrapKey", "unwrapKey"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const wrapped = new Uint8Array(await crypto.subtle.wrapKey("pkcs8", made.privateKey, wrapKey, { name: "AES-GCM", iv }));
+  // add, not put: of two tabs making a key at once, the second reads back the first's.
   await new Promise((r) => {
     const t = db.transaction("keys", "readwrite");
-    t.objectStore("keys").put({ pkcs8, public: made.public }, "device");
+    t.objectStore("keys").add({ wrapped, wrapKey, iv, public: made.public }, "device").onerror = (e) => e.preventDefault();
     t.oncomplete = r; t.onerror = r; t.onabort = r;
   });
-  return (await usable(await get("device"))) || made;
+  const kept = await usable(await get("device"));
+  if (!kept) throw new Error("this browser can't keep a device key");
+  return kept;
 }
 
 // ---- signing in
