@@ -11,13 +11,23 @@
 //! The handshake proves which key is at the other end, not whose key it
 //! is: the relay hands out device keys, and a lying relay could hand out
 //! its own. So a phone is trusted only once you approve it here, after
-//! checking that both screens show the same six digits (`code`), drawn
-//! from the handshake: a key swapped in between gives different digits.
-//! Approved keys are kept in `remote_peers`.
+//! checking that both screens show the same six digits (`code`). Approved
+//! keys are kept in `remote_peers`.
+//!
+//! Six digits alone could be ground: a relay in the middle could try a
+//! million keys of its own until both sessions' digits matched. So the
+//! digits also come from two random values fixed in turn (commit, then
+//! reveal, as Bluetooth's numeric comparison does): the phone sends only
+//! the hash of its value in the first message, this machine sends its
+//! value in the second, and the phone reveals its own in the third, which
+//! must match the hash. Each side's value is set before it sees the
+//! other's, so a relay can't steer the digits: it gets one guess in a
+//! million, and you see each try.
 //!
 //! Messages bigger than a Noise frame go in pieces: each piece's first
 //! byte says whether more follow.
 
+use sha2::{Digest, Sha256};
 use snow::{Builder, HandshakeState, TransportState};
 
 pub const PATTERN: &str = "Noise_XX_25519_AESGCM_SHA256";
@@ -63,10 +73,37 @@ fn builder() -> Builder<'static> {
 /// One end of a session, from the first handshake message to the last
 /// message sent.
 pub enum Session {
-    Handshake(Box<HandshakeState>),
+    Handshake(Box<HandshakeState>, Commit),
     Open { transport: Box<TransportState>, code: String, partial: Vec<u8> },
     /// A handshake that failed partway: the phone starts over.
     Broken,
+}
+
+/// The values the code is drawn from, as the handshake fixes them.
+pub struct Commit {
+    /// This end's random value.
+    mine: [u8; 32],
+    /// The phone's hash of its value (this machine's end), until revealed.
+    promise: Option<Vec<u8>>,
+    /// The other end's value, once known.
+    theirs: Option<Vec<u8>>,
+    initiator: bool,
+}
+
+impl Commit {
+    fn new(initiator: bool) -> Result<Commit, String> {
+        let mut mine = [0u8; 32];
+        getrandom::getrandom(&mut mine).map_err(|e| e.to_string())?;
+        Ok(Commit { mine, promise: None, theirs: None, initiator })
+    }
+
+    /// The code: the handshake's hash, then the phone's value, then this
+    /// machine's.
+    fn code(&self, hash: &[u8]) -> Result<String, String> {
+        let theirs = self.theirs.as_deref().ok_or("no value from the other end")?;
+        let (phone, mac) = if self.initiator { (&self.mine[..], theirs) } else { (theirs, &self.mine[..]) };
+        Ok(code(&Sha256::new().chain_update(hash).chain_update(phone).chain_update(mac).finalize()))
+    }
 }
 
 impl Session {
@@ -75,28 +112,46 @@ impl Session {
     #[cfg(test)]
     pub fn initiate(keys: &Keys) -> Result<(Session, Vec<u8>), String> {
         let mut state = builder().local_private_key(&keys.private).build_initiator().map_err(|e| e.to_string())?;
+        let commit = Commit::new(true)?;
         let mut out = vec![0u8; 1024];
-        let n = state.write_message(&[], &mut out).map_err(|e| e.to_string())?;
+        let promise = Sha256::digest(commit.mine);
+        let n = state.write_message(&promise, &mut out).map_err(|e| e.to_string())?;
         out.truncate(n);
-        Ok((Session::Handshake(Box::new(state)), out))
+        Ok((Session::Handshake(Box::new(state), commit), out))
     }
 
     /// This machine's end, waiting for the phone's first message.
     pub fn respond(keys: &Keys) -> Result<Session, String> {
         let state = builder().local_private_key(&keys.private).build_responder().map_err(|e| e.to_string())?;
-        Ok(Session::Handshake(Box::new(state)))
+        Ok(Session::Handshake(Box::new(state), Commit::new(false)?))
     }
 
     /// Takes a handshake message; returns the reply to send, if any. Once
     /// the handshake is done the session is open.
     pub fn handshake(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        let Session::Handshake(state) = self else { return Err("already open".into()) };
+        let Session::Handshake(state, commit) = self else { return Err("already open".into()) };
         let mut scratch = vec![0u8; 1024];
-        state.read_message(message, &mut scratch).map_err(|e| e.to_string())?;
+        let n = state.read_message(message, &mut scratch).map_err(|e| e.to_string())?;
+        let payload = scratch[..n].to_vec();
+        if payload.len() != 32 {
+            return Err("handshake without its value".into());
+        }
+        // First message: the phone's promise; second: this machine's value;
+        // third: the phone's value, which has to keep the promise.
+        match (commit.initiator, commit.promise.take()) {
+            (true, _) => commit.theirs = Some(payload),
+            (false, None) => commit.promise = Some(payload),
+            (false, Some(promise)) => {
+                if Sha256::digest(&payload).as_slice() != promise.as_slice() {
+                    return Err("the phone's value doesn't keep its promise".into());
+                }
+                commit.theirs = Some(payload);
+            }
+        }
         let reply = if state.is_handshake_finished() {
             None
         } else {
-            let n = state.write_message(&[], &mut scratch).map_err(|e| e.to_string())?;
+            let n = state.write_message(&commit.mine, &mut scratch).map_err(|e| e.to_string())?;
             Some(scratch[..n].to_vec())
         };
         if state.is_handshake_finished() {
@@ -106,10 +161,10 @@ impl Session {
     }
 
     fn open(&mut self) -> Result<(), String> {
-        let Session::Handshake(state) = std::mem::replace(self, Session::Broken) else {
+        let Session::Handshake(state, commit) = std::mem::replace(self, Session::Broken) else {
             return Ok(());
         };
-        let code = code(state.get_handshake_hash());
+        let code = commit.code(state.get_handshake_hash())?;
         let transport = state.into_transport_mode().map_err(|e| e.to_string())?;
         *self = Session::Open { transport: Box::new(transport), code, partial: Vec::new() };
         Ok(())
@@ -118,7 +173,7 @@ impl Session {
     /// The other device's long-term public key, once it's proven.
     pub fn peer(&self) -> Option<Vec<u8>> {
         match self {
-            Session::Handshake(state) => state.get_remote_static().map(<[u8]>::to_vec),
+            Session::Handshake(state, _) => state.get_remote_static().map(<[u8]>::to_vec),
             Session::Open { transport, .. } => transport.get_remote_static().map(<[u8]>::to_vec),
             Session::Broken => None,
         }
@@ -128,7 +183,7 @@ impl Session {
     pub fn code(&self) -> Option<&str> {
         match self {
             Session::Open { code, .. } => Some(code),
-            Session::Handshake(_) | Session::Broken => None,
+            Session::Handshake(..) | Session::Broken => None,
         }
     }
 
@@ -161,9 +216,8 @@ impl Session {
     }
 }
 
-/// Six digits from the handshake's hash: the same on both ends only if
-/// nothing was swapped in between.
-pub fn code(hash: &[u8]) -> String {
+/// Six digits from a hash.
+fn code(hash: &[u8]) -> String {
     let n = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) % 1_000_000;
     format!("{n:06}")
 }
@@ -240,6 +294,21 @@ mod tests {
             whole = phone.open_frame(&frame).unwrap();
         }
         assert_eq!(whole.unwrap(), big);
+    }
+
+    #[test]
+    fn a_phone_that_breaks_its_promise_is_refused() {
+        let (phone_keys, mac_keys) = (Keys::generate().unwrap(), Keys::generate().unwrap());
+        let (mut phone, first) = Session::initiate(&phone_keys).unwrap();
+        let mut mac = Session::respond(&mac_keys).unwrap();
+        let second = mac.handshake(&first).unwrap().unwrap();
+        // Choosing its value after seeing the Mac's: what a relay in the
+        // middle would need to steer the digits.
+        if let Session::Handshake(_, commit) = &mut phone {
+            commit.mine[0] ^= 1;
+        }
+        let third = phone.handshake(&second).unwrap().unwrap();
+        assert!(mac.handshake(&third).is_err());
     }
 
     #[test]
