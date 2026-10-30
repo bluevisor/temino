@@ -50,8 +50,11 @@ const AGENT_SCAN: Duration = Duration::from_millis(300);
 const AGENT_SCAN_LINES: usize = 10;
 const AGENT_QUIET: Duration = Duration::from_millis(1500);
 const AGENT_ECHO: Duration = Duration::from_millis(400);
-/// How long after you type output still counts as the agent answering.
+/// How long after you press Enter output still counts as the agent
+/// answering.
 const AGENT_ASKED: Duration = Duration::from_secs(10);
+/// A turn shorter than this was a repaint, not work: no green pop for it.
+const AGENT_MIN_TURN: Duration = Duration::from_secs(3);
 /// How long a recap stays up, and at most while its summary is on the way.
 const RECAP_SHOWN: Duration = Duration::from_secs(6);
 const RECAP_WAIT: Duration = Duration::from_secs(20);
@@ -502,11 +505,11 @@ impl Pane {
         let input = self.session.input_at();
         let notified = self.notified_at.is_some_and(|at| input.is_none_or(|input| at > input));
         // Output that isn't just the echo of your typing. On its own it only
-        // keeps a turn going or starts one you just asked for: an agent at
-        // rest repaints too (status line, a resize), and that isn't a turn
-        // to pop green for.
+        // keeps a turn going or starts one you just asked for (with Enter):
+        // an agent at rest repaints too (status line, a resize, your typing,
+        // a scroll or click in it), and that isn't a turn to pop green for.
         let in_turn = matches!(self.agent_was, Some(AgentState::Running | AgentState::Waiting));
-        let asked = input.is_some_and(|input| now.duration_since(input) < AGENT_ASKED);
+        let asked = self.session.submitted_at().is_some_and(|at| now.duration_since(at) < AGENT_ASKED);
         let printing = (in_turn || asked)
             && self.session.output_at.is_some_and(|at| {
                 now.duration_since(at) < AGENT_QUIET && input.is_none_or(|input| at.duration_since(input) > AGENT_ECHO)
@@ -527,7 +530,12 @@ impl Pane {
             AgentState::Idle
         };
         match state {
-            AgentState::Idle if self.agent_was == Some(AgentState::Running) => self.agent_unseen = true,
+            AgentState::Idle
+                if self.agent_was == Some(AgentState::Running)
+                    && self.turn.is_some_and(|start| now.duration_since(start) >= AGENT_MIN_TURN) =>
+            {
+                self.agent_unseen = true
+            }
             AgentState::Idle => {}
             _ => self.agent_unseen = false,
         }
