@@ -188,7 +188,12 @@ async function send(message) {
 function onMachine(message) {
   if (message.type === "pending") { pending = message.code; render(); }
   else if (message.type === "hello") { pending = null; watch(); render(); }
-  else if (message.type === "state") { pending = null; unsure = false; windows = resolve(message.windows); paint(windows[0] && windows[0].theme); settle(); notice(); render(); }
+  else if (message.type === "state") {
+    pending = null; unsure = false; windows = resolve(message.windows); paint(windows[0] && windows[0].theme); settle(); notice();
+    const sc = starting && currentPane() && currentPane().screen;
+    if (sc && (sc.editor || sc.mode === "grid")) flushHeld();
+    render();
+  }
 }
 
 // Screen lines come whole once, then as just their key while unchanged.
@@ -217,8 +222,13 @@ const win = (no) => windows.find((w) => w.no === no);
 const tabOf = (w, index) => w && w.tabs.find((t) => t.index === index);
 const paneOf = (t, id) => t && t.panes.find((p) => p.id === id);
 
-// A tab opened from here: go to it once the Mac has it.
-let follow = 0;
+// A tab opened from here: go to it once the Mac has it, and send what was
+// typed meanwhile once its shell is at the prompt (a starting shell drops it).
+let follow = 0, starting = false;
+function flushHeld() {
+  starting = false;
+  setTimeout(() => held.splice(0).forEach((f) => f()));
+}
 function settle() {
   const w = (at && win(at.window)) || windows[0];
   if (!w) { at = null; return; }
@@ -227,6 +237,7 @@ function settle() {
     follow = 0;
     const u = tabOf(w, w.active);
     if (u && u.panes.length) { at = { window: w.no, tab: u.index, pane: u.focus }; jumped = true; }
+    starting = true;
   }
   let t = at && at.window === w.no ? tabOf(w, at.tab) : null;
   if (!t) t = tabOf(w, w.active) || w.tabs[0];
@@ -390,6 +401,12 @@ let choosing = false;
 function newTab(w, shell) {
   follow = w.tabs.length;
   send({ type: "new_tab", window: w.no, ...(shell ? { shell } : {}) });
+  // Ready to type in it: focus now, inside the tap (iOS raises the keyboard
+  // only then); keys wait until the Mac has the tab.
+  if (level === "tab") level = "pane";
+  $("type").focus();
+  // No tab after all: type where you were.
+  setTimeout(() => { if (follow || starting) { follow = 0; flushHeld(); } }, 6000);
 }
 
 function switchTab(w, index) {
@@ -678,10 +695,12 @@ const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["^C", "c", ["ctrl"]], ["↑", 
 $("keys").innerHTML = `<button id="kb" aria-label="Keyboard">⌨︎</button>` + KEYS.map(([label], i) => `<button data-key="${i}">${label}</button>`).join("");
 const key = (k, mods = []) => {
   if (!at) return;
+  if (follow || starting) return held.push(() => key(k, mods));
   if (!mods.length) predict(k); else { const p = currentPane(); if (p) predicted.delete(p.id); unsure = true; }
   send({ type: "key", window: at.window, pane: at.pane, key: k, mods });
 };
-const text = (t) => { if (!at || !t) return; predict("text", t); send({ type: "text", window: at.window, pane: at.pane, text: t }); };
+const held = []; // typed before a new tab arrived: for that tab
+const text = (t) => { if (!at || !t) return; if (follow || starting) return held.push(() => text(t)); predict("text", t); send({ type: "text", window: at.window, pane: at.pane, text: t }); };
 $("keys").onpointerdown = (e) => e.preventDefault(); // keep the keyboard up
 $("keys").onclick = (e) => {
   const b = e.target.closest("button");
