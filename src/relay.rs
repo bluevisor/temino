@@ -286,7 +286,7 @@ fn frame(
     if handshake {
         // The handshake's first message starts a session over; its third
         // finishes the one under way.
-        let midway = peers.get(from).is_some_and(|p| matches!(p.session, Session::Handshake(_)));
+        let midway = peers.get(from).is_some_and(|p| matches!(p.session, Session::Handshake(..)));
         if !midway {
             if let Some(old) = peers.get_mut(from) {
                 settle(from, old);
