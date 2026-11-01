@@ -99,19 +99,40 @@ async function login(request, env, url) {
 <a class="b" href="/auth/google${q}">Continue with Google</a>${dev}`);
 }
 
+// The login request waits here through the OAuth round trip; Google or
+// Apple carries only its short id as `state`. The whole signed request
+// was nearly 400 characters, and switching accounts on Google's page
+// nests the sign-in URL in its own until Google calls it malformed.
+// Each id works once, for ten minutes.
+async function hold(env, req) {
+  const id = random();
+  await env.ACCOUNTS.put(`login:${id}`, JSON.stringify(req), { expirationTtl: 600 });
+  return id;
+}
+
+async function claim(env, id) {
+  if (!/^[A-Za-z0-9_-]{22}$/.test(id || "")) return null;
+  const key = `login:${id}`;
+  const raw = await env.ACCOUNTS.get(key);
+  if (!raw) return null;
+  await env.ACCOUNTS.delete(key);
+  const req = JSON.parse(raw);
+  return req.exp && req.exp < Date.now() ? null : req;
+}
+
 async function google(env, url) {
   const req = await unsign(env, url.searchParams.get("req"));
   if (!req) return page("Temino", "<h1>Sign-in expired</h1><p>Start again from Temino.</p>");
   const q = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID, redirect_uri: `${url.origin}/auth/google/callback`,
-    response_type: "code", scope: "openid email", state: url.searchParams.get("req"), nonce: req.nonce,
+    response_type: "code", scope: "openid email", state: await hold(env, req), nonce: req.nonce,
     prompt: "select_account",
   });
   return Response.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${q}`, 302);
 }
 
 async function googleCallback(env, url) {
-  const req = await unsign(env, url.searchParams.get("state"));
+  const req = await claim(env, url.searchParams.get("state"));
   const code = url.searchParams.get("code");
   if (!req || !code) return page("Temino", "<h1>Sign-in didn't finish</h1><p>Start again from Temino.</p>");
   const response = await fetch("https://oauth2.googleapis.com/token", {
@@ -138,14 +159,14 @@ async function apple(env, url) {
   const q = new URLSearchParams({
     client_id: env.APPLE_CLIENT_ID, redirect_uri: `${url.origin}/auth/apple/callback`,
     response_type: "code", response_mode: "form_post", scope: "email",
-    state: url.searchParams.get("req"), nonce: req.nonce,
+    state: await hold(env, req), nonce: req.nonce,
   });
   return Response.redirect(`https://appleid.apple.com/auth/authorize?${q}`, 302);
 }
 
 async function appleCallback(request, env, url) {
   const form = await request.formData();
-  const req = await unsign(env, form.get("state"));
+  const req = await claim(env, form.get("state"));
   const code = form.get("code");
   if (!req || !code) return page("Temino", "<h1>Sign-in didn't finish</h1><p>Start again from Temino.</p>");
   const response = await fetch("https://appleid.apple.com/auth/token", {
