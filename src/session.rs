@@ -995,6 +995,11 @@ impl Session {
 
     /// Sends a command line from the editor.
     pub fn submit(&mut self, command: &str) {
+        self.submit_as(command, command);
+    }
+
+    /// Sends `line` to the shell in a block that shows `command`.
+    pub fn submit_as(&mut self, command: &str, line: &str) {
         let continuing = self.phase == Phase::Continuation;
         if continuing {
             if let Some(block) = self.blocks.iter_mut().rev().find(|b| b.kind == BlockKind::Command && b.running()) {
@@ -1007,7 +1012,7 @@ impl Session {
         }
         self.phase = Phase::Submitted;
         self.continuation_since = None;
-        let mut bytes = command.replace("\r\n", "\n").into_bytes();
+        let mut bytes = line.replace("\r\n", "\n").into_bytes();
         bytes.push(b'\r');
         // readline takes \r as accept-line; embedded newlines continue the
         // command (PS2), which is fine: their echo is dropped too.
@@ -1319,6 +1324,25 @@ impl Session {
     }
 }
 
+/// The command line that replaces the running shell with `shell` (its
+/// path) in place, integration and all: `exec env … fish --init-command …`.
+/// Its words are quoted so bash, zsh and fish all read them the same.
+pub fn exec_line(shell: &str) -> std::io::Result<String> {
+    let mut env = Vec::new();
+    let argv = integrate(shell, &mut env)?;
+    let quote = |word: &String| {
+        if !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=+,@%".contains(c)) {
+            word.clone()
+        } else {
+            // Backslashes differ inside fish's single quotes; in double
+            // quotes `\\` and `'` read alike everywhere.
+            format!("'{}'", word.replace('\\', r#"'"\\"'"#).replace('\'', r#"'"'"'"#))
+        }
+    };
+    let words: Vec<String> = env.iter().chain(&argv).map(quote).collect();
+    Ok(format!("exec env {}", words.join(" ")))
+}
+
 /// Writes `shell`'s integration script to the settings directory and
 /// returns the command line that loads it (adding to `env` what that
 /// needs). Shells Temino doesn't know are started like bash.
@@ -1503,6 +1527,15 @@ fn mac_lang() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn exec_line_reads_alike_in_every_shell() {
+        let line = exec_line("/usr/bin/fish").unwrap();
+        assert!(line.starts_with("exec env TEMINO_INTEGRATION="), "{line}");
+        assert!(line.ends_with("/usr/bin/fish --login --interactive --init-command 'source $TEMINO_INTEGRATION'"));
+        let line = exec_line("/bin/bash").unwrap();
+        assert!(line.starts_with("exec env /bin/bash --rcfile "), "{line}");
+    }
     use super::*;
 
     /// fish 4.9 redrawing an unchanged prompt (here after SIGWINCH): its own
