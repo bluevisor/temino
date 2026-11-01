@@ -18,6 +18,7 @@ let windows = [];
 let relay = null;
 let session = null;         // Noise session with `machine`
 let pending = null;         // the code while the desktop waits for approval
+let denied = false;         // the desktop said no, or disconnected this device
 let keys = null;
 
 const $ = (id) => document.getElementById(id);
@@ -143,7 +144,9 @@ async function onRelay(message) {
     const wanted = store.get("temino-machine");
     const pick = desktops.find((d) => d.id === machine && d.online) || desktops.find((d) => d.id === wanted && d.online)
       || desktops.find((d) => d.online);
-    if (pick && (pick.id !== machine || !session)) await start(pick.id);
+    // Turned away by this desktop: wait to be told to ask again.
+    const away = denied && pick && pick.id === machine;
+    if (pick && !away && (pick.id !== machine || !session)) await start(pick.id);
     if (!pick) { machine = null; session = null; }
     render();
   } else if (message.type === "recv" && message.from === machine) {
@@ -172,6 +175,7 @@ async function start(id) {
   windows = [];
   at = null;
   pending = null;
+  denied = false;
   $("lock").hidden = true;
   const [fresh, first] = await Session.initiate(keys);
   session = fresh;
@@ -187,6 +191,7 @@ async function send(message) {
 
 function onMachine(message) {
   if (message.type === "pending") { pending = message.code; render(); }
+  else if (message.type === "denied") { pending = null; denied = true; at = null; windows = []; render(); }
   else if (message.type === "hello") { pending = null; watch(); render(); }
   else if (message.type === "state") {
     pending = null; unsure = false; windows = resolve(message.windows); paint(windows[0] && windows[0].theme); settle(); notice();
@@ -276,6 +281,11 @@ function render() {
   const main = $("main");
   $("out").disabled = level === "user";
   if (level === "user" || !machine) return renderUser();
+  if (denied) {
+    center(`<h1>Not connected</h1><p>${esc(machineName())} said no, or disconnected this device. To control it again, ask, then allow it there.</p><button id="again">Ask Again</button>`);
+    $("again").onclick = () => start(machine).then(render);
+    return;
+  }
   if (pending) {
     center(`<h1>Approve on ${esc(machineName())}</h1><p>Temino on your Mac is asking whether to let this device control it. Check that it shows the same code:</p><div class="code">${esc(pending)}</div><p>Then choose Allow there.</p>`);
     return;
