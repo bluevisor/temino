@@ -29,6 +29,7 @@ use crate::update::{self, Release};
 use crate::viewer::{self, Viewer};
 use crate::Msg;
 
+mod api;
 mod chrome;
 mod control;
 mod draw;
@@ -734,6 +735,11 @@ impl App {
             }
             Msg::Viewer(id, event) => self.viewer_event(id, event),
             Msg::Remote(command) => self.remote_command(command),
+            Msg::Api(call) => {
+                let params = crate::json::parse(&call.params).unwrap_or(crate::json::Value::Null);
+                let _ = call.reply.send(self.api(&call.method, &params));
+                self.dirty = true;
+            }
             Msg::Notice(message) => {
                 self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(6)));
                 self.dirty = true;

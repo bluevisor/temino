@@ -290,7 +290,19 @@ impl Session {
         self.shell_name = shell.rsplit('/').next().unwrap_or(shell).to_owned();
         let mut env: Vec<String> = std::env::vars()
             .filter(|(key, _)| {
-                !matches!(key.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "COLUMNS" | "LINES" | "ZDOTDIR")
+                !matches!(
+                    key.as_str(),
+                    "TERM"
+                        | "COLORTERM"
+                        | "TERM_PROGRAM"
+                        | "COLUMNS"
+                        | "LINES"
+                        | "ZDOTDIR"
+                        // A Temino started from a Temino pane: its own, not that one's.
+                        | "TEMINO_SOCKET"
+                        | "TEMINO_WINDOW"
+                        | "TEMINO_PANE"
+                )
             })
             .map(|(key, value)| format!("{key}={value}"))
             .collect();
@@ -303,6 +315,12 @@ impl Session {
             env.push("BASH_SILENCE_DEPRECATION_WARNING=1".into());
         }
         env.push(format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION")));
+        // Where this pane is, for `temino` commands and agents run in it.
+        if let Some(socket) = crate::api::start() {
+            env.push(format!("TEMINO_SOCKET={socket}"));
+            env.push(format!("TEMINO_WINDOW={}", crate::platform::window_no()));
+            env.push(format!("TEMINO_PANE={id}"));
+        }
         if let Some(lang) = utf8_lang(&env) {
             env.push(format!("LANG={lang}"));
         }

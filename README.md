@@ -36,7 +36,14 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
 - **A real terminal underneath.** The grid is
   [alacritty_terminal](https://crates.io/crates/alacritty_terminal): 256 and
   true colors, the alternate screen, mouse reporting, bracketed paste, OSC 52
-  copy (not paste), and color and size queries.
+  copy (not paste), color and size queries, and the
+  [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
+  for programs that ask for it (key presses; Temino doesn't see releases).
+- **Desktop notifications.** When an agent starts waiting on you or
+  finishes, or a program asks (OSC 9, 777 or 99), in a tab you can't see,
+  the desktop says so. Settings ▸ Tabs turns them off.
+- **Any monospaced font.** Settings ▸ Text ▸ Font steps through the ones
+  installed; JetBrains Mono is built in.
 - **Tabs and splits.** Each tab holds a tree of panes split side by side or
   stacked; drag a divider to resize, zoom one pane to fill the tab, and new
   panes start in the current pane's directory. Tabs are listed down the left
@@ -74,6 +81,38 @@ stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chrom
   instanced quads; rounded rectangles, borders and shadows are a signed
   distance field shader. Box-drawing and block characters are drawn
   procedurally so they join across cells.
+
+## Scripts and agents
+
+The `temino` command drives the running Temino, from a shell, a script or a
+coding agent. Inside a Temino pane it acts on that pane unless `--pane N`
+(and `--window N`) say otherwise:
+
+```sh
+temino list                          # windows, tabs and panes, as JSON
+temino new-tab --cwd ~/src/app npm test
+temino split --down tail -f log.txt
+temino run --wait make               # prints the output, exits with make's status
+temino read --blocks 3               # the last three commands and their output
+temino send 'git status'; temino keys Enter
+temino keys ctrl+c
+temino notify "Deploy" "finished"
+```
+
+`temino mcp` is the same as an [MCP](https://modelcontextprotocol.io) server
+on stdin and stdout, so agents can open tabs and splits, run commands and read
+their output, type and press keys, and notify you. For Claude Code:
+
+```sh
+claude mcp add temino -- temino mcp
+# macOS: claude mcp add temino -- /Applications/Temino.app/Contents/MacOS/temino mcp
+```
+
+Underneath is a Unix socket, `temino.sock` in the settings directory (or, when
+that path is too long for a socket, in `$XDG_RUNTIME_DIR`), readable only by
+you; each request is a line of JSON, `{"method": …, "params": {…}}`, and so
+is each answer. `src/api.rs` lists the methods. As with tmux, anything running
+as you can drive Temino; `api=off` in the settings file turns the socket off.
 
 ## Keys
 

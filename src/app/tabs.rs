@@ -410,7 +410,7 @@ impl App {
         }
     }
     /// The tab holding pane `id`, by index.
-    fn tab_index_of(&self, id: u64) -> Option<usize> {
+    pub(super) fn tab_index_of(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|tab| {
             let mut leaves = Vec::new();
             tab.root.leaves(&mut leaves);
