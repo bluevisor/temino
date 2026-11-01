@@ -59,6 +59,15 @@ pub enum Command {
     Settled(String),
 }
 
+/// Who is behind a client: shown on the pane it's in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Who {
+    /// "John · iPhone", or just the device's name.
+    pub name: String,
+    /// The account's photo, where the sign-in gave one (Google does).
+    pub picture: Option<String>,
+}
+
 /// One client of the host: the test page's socket, or a phone over the
 /// relay. While it lives, windows build their state; dropping it leaves.
 pub struct Client {
@@ -70,13 +79,14 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn join() -> Client {
+    pub fn join(who: Who) -> Client {
         CLIENTS.fetch_add(1, Ordering::Relaxed);
         let id = {
             let mut hub = HUB.lock().unwrap();
             hub.next_client += 1;
             let id = hub.next_client;
             hub.watching.push((id, Vec::new()));
+            hub.in_control.push((id, who, None));
             id
         };
         refresh();
@@ -97,6 +107,13 @@ impl Client {
         if message.str_at("type") == Some("watch") {
             watch(self.id, message);
         } else {
+            // Opening a pane, or typing or pressing keys in it: it's in there.
+            if matches!(message.str_at("type"), Some("focus" | "text" | "key")) {
+                if let Some(pane) = message.num_at("pane") {
+                    let window = message.num_at("window").unwrap_or(1.0) as u32;
+                    set_pane(self.id, Some((window, pane as u64)));
+                }
+            }
             command(message);
         }
     }
@@ -143,7 +160,11 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         CLIENTS.fetch_sub(1, Ordering::Relaxed);
-        HUB.lock().unwrap().watching.retain(|(id, _)| *id != self.id);
+        let mut hub = HUB.lock().unwrap();
+        hub.watching.retain(|(id, _)| *id != self.id);
+        hub.in_control.retain(|(id, _, _)| *id != self.id);
+        drop(hub);
+        refresh();
     }
 }
 
@@ -175,10 +196,18 @@ struct Hub {
     version: u64,
     /// Each client's watched panes, by (window, pane), keyed by client.
     watching: Vec<(u64, Vec<(u32, u64)>)>,
+    /// Each client, who's behind it, and the pane it's in, if any.
+    in_control: Vec<(u64, Who, Option<(u32, u64)>)>,
     next_client: u64,
 }
 
-static HUB: Mutex<Hub> = Mutex::new(Hub { windows: Vec::new(), version: 0, watching: Vec::new(), next_client: 0 });
+static HUB: Mutex<Hub> = Mutex::new(Hub {
+    windows: Vec::new(),
+    version: 0,
+    watching: Vec::new(),
+    in_control: Vec::new(),
+    next_client: 0,
+});
 /// Clients past their hello: while there are none, windows don't bother
 /// building their state.
 static CLIENTS: AtomicUsize = AtomicUsize::new(0);
@@ -201,6 +230,24 @@ pub fn unregister(no: u32) {
 /// Whether anyone is watching: windows publish their state only then.
 pub fn watched() -> bool {
     CLIENTS.load(Ordering::Relaxed) > 0
+}
+
+/// Who is in pane `pane` of window `no` from another device.
+pub fn in_control(no: u32, pane: u64) -> Vec<Who> {
+    let hub = HUB.lock().unwrap();
+    hub.in_control.iter().filter(|(_, _, at)| *at == Some((no, pane))).map(|(_, who, _)| who.clone()).collect()
+}
+
+/// Client `client` is in this pane now, or in none; windows redraw.
+fn set_pane(client: u64, at: Option<(u32, u64)>) {
+    let mut hub = HUB.lock().unwrap();
+    let Some(slot) = hub.in_control.iter_mut().find(|(id, _, _)| *id == client) else { return };
+    if slot.2 == at {
+        return;
+    }
+    slot.2 = at;
+    drop(hub);
+    refresh();
 }
 
 /// Whether some client watches pane `pane` of window `no`: only those
@@ -312,7 +359,7 @@ fn serve(stream: TcpStream, token: &str) {
                         let _ = socket.close(None);
                         return;
                     }
-                    client = Some(Client::join());
+                    client = Some(Client::join(Who { name: "Browser".into(), picture: None }));
                     if socket.send(tungstenite::Message::text(Client::hello())).is_err() {
                         break;
                     }
@@ -338,7 +385,7 @@ fn serve(stream: TcpStream, token: &str) {
 /// `{"type":"watch","panes":[[window, pane], …]}`: the panes whose screens
 /// this client wants, replacing what it watched before.
 fn watch(client: u64, message: &Value) {
-    let panes = message
+    let panes: Vec<(u32, u64)> = message
         .get("panes")
         .map(Value::array)
         .unwrap_or_default()
@@ -349,16 +396,23 @@ fn watch(client: u64, message: &Value) {
         })
         .collect();
     let mut hub = HUB.lock().unwrap();
+    // Gone from the pane it was in (back up to the tab or the window).
+    let left = hub.in_control.iter().find(|(id, _, _)| *id == client).and_then(|(_, _, at)| *at).filter(|at| {
+        !(panes.len() == 1 && panes[0] == *at)
+    });
     if let Some(slot) = hub.watching.iter_mut().find(|(id, _)| *id == client) {
         slot.1 = panes;
     }
     drop(hub);
+    if left.is_some() {
+        set_pane(client, None);
+    }
     refresh();
 }
 
 /// Wakes every window to build its state: a window at rest sleeps until
 /// something happens.
-fn refresh() {
+pub fn refresh() {
     for (_, sender, _, _) in &HUB.lock().unwrap().windows {
         let _ = sender.send(Msg::Remote(Command::Refresh));
     }
@@ -482,8 +536,13 @@ mod tests {
         assert!(token_matches("abc", "abc") && !token_matches("abd", "abc") && !token_matches("ab", "abc"));
     }
 
+    /// The hub is one for the whole process: tests that use it take turns,
+    /// or one's publish bumps the version another is comparing.
+    static HUB_TURN: Mutex<()> = Mutex::new(());
+
     #[test]
     fn state_reaches_clients_only_when_it_changes() {
+        let _turn = HUB_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let (sender, _receiver) = std::sync::mpsc::channel();
         register(91, sender);
         let version = |no| {
@@ -497,13 +556,14 @@ mod tests {
 
     #[test]
     fn a_client_gets_each_screen_line_once() {
+        let _turn = HUB_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let (sender, _receiver) = std::sync::mpsc::channel();
         register(92, sender);
         let state = |title: &str, line: &str| {
             let lines = HashMap::from([("92:1:g0".to_owned(), line.to_owned())]);
             publish(92, format!(r#"{{"no":92,"title":"{title}","lines":[{LINE}92:1:g0{LINE}]}}"#), lines);
         };
-        let mut client = Client::join();
+        let mut client = Client::join(Who { name: "Test".into(), picture: None });
         state("a", r##"[["hi","#fff",null,0]]"##);
         let first = client.state().unwrap();
         assert!(first.contains(r##"{"k":"92:1:g0","v":[["hi","#fff",null,0]]}"##), "{first}");
