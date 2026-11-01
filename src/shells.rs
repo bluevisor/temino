@@ -32,24 +32,32 @@ impl Kind {
     }
 }
 
-/// Where packaged shells live, newest first: on macOS Homebrew's before the
-/// system's (whose bash is 3.2), and these before $PATH, which an app
-/// started from the Finder doesn't have.
+/// Where packaged programs live, newest first: on macOS Homebrew's before
+/// the system's (whose bash is 3.2), and these before $PATH, which an app
+/// started from the Finder doesn't have; then cargo's and pip's.
 fn search_dirs() -> Vec<String> {
     let mut dirs: Vec<String> = ["/opt/homebrew/bin", "/usr/local/bin"].map(String::from).to_vec();
     if let Ok(path) = std::env::var("PATH") {
         dirs.extend(path.split(':').filter(|dir| !dir.is_empty()).map(String::from));
     }
     dirs.extend(["/usr/bin", "/bin", "/boot/system/bin", "/boot/home/config/non-packaged/bin"].map(String::from));
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.extend([format!("{home}/.cargo/bin"), format!("{home}/.local/bin")]);
+    }
     dirs
+}
+
+/// Where the program `name` is installed, if it is.
+pub fn which(name: &str) -> Option<String> {
+    search_dirs()
+        .into_iter()
+        .map(|dir| format!("{dir}/{name}"))
+        .find(|path| std::fs::metadata(path).is_ok_and(|m| m.is_file()))
 }
 
 /// The installed shell of this kind, if any.
 pub fn find(kind: Kind) -> Option<String> {
-    search_dirs()
-        .into_iter()
-        .map(|dir| format!("{dir}/{}", kind.name()))
-        .find(|path| std::fs::metadata(path).is_ok_and(|m| m.is_file()))
+    which(kind.name())
 }
 
 /// The shell new panes start: TEMINO_SHELL, else the one picked in
@@ -67,7 +75,12 @@ pub fn default_shell() -> String {
 
 /// The command that installs a shell of this kind, or why there is none.
 pub fn install_command(kind: Kind) -> Result<String, String> {
-    let name = kind.name();
+    install_package(kind.name())
+}
+
+/// The command that installs the package `name` with the system's package
+/// manager, or why there is none.
+pub fn install_package(name: &str) -> Result<String, String> {
     if cfg!(target_os = "haiku") {
         return Ok(format!("pkgman install -y {name}"));
     }

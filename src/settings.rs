@@ -2,6 +2,7 @@
 //! rest of the window. The page only draws and says what a click asks for;
 //! app.rs applies it and remembers it in the settings file.
 
+use crate::fetch::FETCHES;
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::shells::KINDS;
 use crate::text::{TextSystem, UI, UI_BOLD};
@@ -42,6 +43,10 @@ pub struct Values {
     /// Which of shells::KINDS new panes start, and which are installed.
     pub shell: Option<usize>,
     pub installed: [bool; KINDS.len()],
+    /// What new tabs open with: 0 nothing, else 1 + an index into FETCHES;
+    /// and which of FETCHES are installed.
+    pub fetch: usize,
+    pub fetches_installed: [bool; FETCHES.len()],
     pub tabs_top: bool,
     /// As a percentage of the default size.
     pub zoom: f32,
@@ -143,6 +148,10 @@ pub enum Action {
     Opacity(usize),
     Blur(bool),
     Shell(usize),
+    /// What new tabs open with: 0 nothing, else 1 + an index into FETCHES.
+    Fetch(usize),
+    /// Open the picked fetch's config file.
+    FetchConfig,
     TabsTop(bool),
     /// Smaller (-1), the default (0) or bigger (+1).
     Zoom(i32),
@@ -217,7 +226,11 @@ impl Page {
         }
         y = ui.section(x, y, width, "Appearance", &rows, values);
         y = ui.section(x, y, width, "Text", &[Row::Zoom, Row::Ligatures], values);
-        y = ui.section(x, y, width, "Shell", &[Row::Shell], values);
+        let mut shell = vec![Row::Shell, Row::Fetch];
+        if values.fetch > 0 {
+            shell.push(Row::FetchConfig);
+        }
+        y = ui.section(x, y, width, "Shell", &shell, values);
         let mut keys = vec![Row::Keys];
         if values.quick_terminal.is_some() {
             keys.push(Row::QuickTerminal);
@@ -259,6 +272,8 @@ enum Row {
     Blur,
     Zoom,
     Shell,
+    Fetch,
+    FetchConfig,
     TabsTop,
     Updates,
     CheckForUpdates,
@@ -333,6 +348,10 @@ impl Ui<'_> {
             Row::Blur => ("Blur behind the window", "Soften what shows through".to_owned()),
             Row::Zoom => ("Size", format!("{:.0}% · Command+plus and Command+minus too", values.zoom)),
             Row::Shell => ("Default shell", "For new tabs and panes; a missing one is installed".to_owned()),
+            Row::Fetch => ("Fetch", "System info at the top of each new tab".to_owned()),
+            Row::FetchConfig => {
+                ("Fetch config", format!("What {} shows, and how", FETCHES[values.fetch.saturating_sub(1)].name))
+            }
             Row::Headers => (
                 "Status header",
                 match values.headers {
@@ -395,6 +414,18 @@ impl Ui<'_> {
                     .collect();
                 self.segments(right, control_y, &labels, values.shell, Action::Shell);
             }
+            Row::Fetch => {
+                let mut labels = vec!["Off".to_owned()];
+                labels.extend(FETCHES.iter().zip(values.fetches_installed).map(|(fetch, installed)| {
+                    if installed {
+                        fetch.name.to_owned()
+                    } else {
+                        format!("{} ↓", fetch.name)
+                    }
+                }));
+                self.segments(right, control_y, &labels, Some(values.fetch), Action::Fetch);
+            }
+            Row::FetchConfig => self.button(right, control_y, "Edit Config", Action::FetchConfig),
             Row::TabsTop => {
                 let labels = ["Side".to_owned(), "Top".to_owned()];
                 self.segments(right, control_y, &labels, Some(values.tabs_top as usize), |i| Action::TabsTop(i == 1));
@@ -631,6 +662,8 @@ mod tests {
             blur: false,
             shell: Some(0),
             installed: [true, true, false],
+            fetch: 1,
+            fetches_installed: [true, false, true],
             tabs_top: false,
             zoom: 100.0,
             updates: true,
@@ -655,6 +688,8 @@ mod tests {
             Action::Ligatures(false),
         ]);
         expected.extend((0..KINDS.len()).map(Action::Shell));
+        expected.extend((0..=FETCHES.len()).map(Action::Fetch));
+        expected.push(Action::FetchConfig);
         expected.extend([Action::EditKeys, Action::QuickTerminal(true)]);
         expected.extend([
             Action::TabsTop(false),
