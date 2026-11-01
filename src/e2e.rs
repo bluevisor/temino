@@ -241,6 +241,14 @@ pub fn approve(key: &[u8], name: &str) {
     crate::write_private(&format!("{}/remote_peers", crate::settings_dir()), text);
 }
 
+/// Takes back a phone's approval: it has to ask, and you allow it, again.
+pub fn forget(key: &[u8]) {
+    let key = hex(key);
+    let peers: Vec<(String, String)> = peers().into_iter().filter(|(k, _)| *k != key).collect();
+    let text: String = peers.iter().map(|(k, n)| format!("{k}\t{n}\n")).collect();
+    crate::write_private(&format!("{}/remote_peers", crate::settings_dir()), text);
+}
+
 fn peers() -> Vec<(String, String)> {
     std::fs::read_to_string(format!("{}/remote_peers", crate::settings_dir()))
         .unwrap_or_default()

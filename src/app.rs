@@ -2400,6 +2400,14 @@ impl App {
             remote: Some(crate::relay::signed_in()),
             #[cfg(target_os = "haiku")]
             remote: None,
+            #[cfg(not(target_os = "haiku"))]
+            remote_url: format!("{}/app", crate::relay::relay_url()),
+            #[cfg(target_os = "haiku")]
+            remote_url: String::new(),
+            #[cfg(not(target_os = "haiku"))]
+            remote_phones: crate::relay::connected().into_iter().map(|(_, name)| name).collect(),
+            #[cfg(target_os = "haiku")]
+            remote_phones: Vec::new(),
         }
     }
 
@@ -2475,6 +2483,15 @@ impl App {
             Action::Remote(false) => crate::relay::sign_out(),
             #[cfg(target_os = "haiku")]
             Action::Remote(_) => {}
+            #[cfg(not(target_os = "haiku"))]
+            Action::Disconnect(index) => {
+                if let Some((device, name)) = crate::relay::connected().into_iter().nth(index) {
+                    crate::relay::disconnect(&device);
+                    self.ctx.show_toast(&format!("Disconnected {name}; it has to ask again to come back"));
+                }
+            }
+            #[cfg(target_os = "haiku")]
+            Action::Disconnect(_) => {}
             Action::Headers(headers) => {
                 self.headers = headers;
                 self.ctx.headers = headers != Headers::Off;

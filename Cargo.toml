@@ -23,6 +23,8 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 snow = { version = "0.9", default-features = false, features = ["default-resolver"] }
 sha2 = { version = "0.10", default-features = false }
 getrandom = "0.2"
+# Remote control: the QR code in Settings that opens the phone's web app.
+qrcodegen = "1.8"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 ash = { version = "0.38", default-features = false, features = ["loaded", "debug"] }

@@ -32,6 +32,10 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static DECISIONS: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
 /// Notices for phones that aren't looking: an agent waiting or done.
 static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The phones in control now, as (device id, name), for Settings.
+static CONNECTED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// Phones Settings asked to cut off, by device id.
+static DISCONNECTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn relay_url() -> String {
     crate::setting("relay").unwrap_or_else(|| DEFAULT_RELAY.to_owned()).trim_end_matches('/').to_owned()
@@ -158,6 +162,27 @@ fn sign_in_now() -> Result<(), String> {
     }
 }
 
+/// The phones controlling this machine now: device id, then name.
+pub fn connected() -> Vec<(String, String)> {
+    CONNECTED.lock().unwrap().clone()
+}
+
+/// Ends phone `device`'s session and takes back its approval, so it can't
+/// come straight back: it has to ask, and you allow it, again.
+pub fn disconnect(device: &str) {
+    DISCONNECTS.lock().unwrap().push(device.to_owned());
+}
+
+/// Publishes who's connected when that changed, and redraws Settings.
+fn set_connected(now: Vec<(String, String)>) {
+    let mut connected = CONNECTED.lock().unwrap();
+    if *connected != now {
+        *connected = now;
+        drop(connected);
+        remote::ask(Command::Refresh);
+    }
+}
+
 /// Signs this machine out here; the relay forgets it on the next connect.
 pub fn sign_out() {
     crate::save_setting("relay_token", "");
@@ -180,6 +205,13 @@ struct Peer {
 
 /// One connection to the relay, until it drops.
 fn serve() -> Result<(), String> {
+    let result = serve_relay();
+    // Off the relay, no phone is in control.
+    set_connected(Vec::new());
+    result
+}
+
+fn serve_relay() -> Result<(), String> {
     let token = crate::setting("relay_token").unwrap_or_default();
     let base = relay_url();
     let ws = base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
@@ -232,6 +264,26 @@ fn serve() -> Result<(), String> {
                 peers.remove(&id);
             }
         }
+        let cut: Vec<String> = std::mem::take(&mut *DISCONNECTS.lock().unwrap());
+        for id in cut {
+            if let Some(device) = devices.get(&id) {
+                e2e::forget(&device.key);
+            }
+            if let Some(mut peer) = peers.remove(&id) {
+                if let Some(key) = peer.session.peer() {
+                    e2e::forget(&key);
+                }
+                settle(&id, &mut peer);
+                seal(&id, &mut peer, r#"{"type":"denied"}"#, &mut out)?;
+            }
+        }
+        let mut now: Vec<(String, String)> = peers
+            .iter()
+            .filter(|(_, peer)| peer.client.is_some())
+            .map(|(id, _)| (id.clone(), devices.get(id).map_or_else(|| "Phone".to_owned(), |d| d.name.clone())))
+            .collect();
+        now.sort();
+        set_connected(now);
         for (id, peer) in &mut peers {
             if let Some(state) = peer.client.as_mut().and_then(Client::state) {
                 seal(id, peer, &state, &mut out)?;

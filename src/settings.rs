@@ -20,6 +20,9 @@ const WHEEL_STEP: f32 = 48.0;
 /// The theme list: one line per theme, at most this tall before it scrolls.
 const LIST_ROW: f32 = 28.0;
 const LIST_HEIGHT: f32 = 340.0;
+/// The Remote Control row that tells the phone's side, QR code and all.
+const PHONE_ROW: f32 = 170.0;
+const QR_SIZE: f32 = 138.0;
 
 /// What the settings are now, for drawing them.
 pub struct Values {
@@ -59,6 +62,10 @@ pub struct Values {
     pub headers: Headers,
     /// Signed in for remote control; None where there's no relay (Haiku).
     pub remote: Option<bool>,
+    /// The phone's web app, which the QR code under it opens.
+    pub remote_url: String,
+    /// The phones controlling this machine now, by name.
+    pub remote_phones: Vec<String>,
     /// What each text field holds now, in `Field::ALL` order.
     pub fields: [String; Field::ALL.len()],
     /// The field being typed in, its text, and whether that's all selected.
@@ -163,6 +170,8 @@ pub enum Action {
     Updates(bool),
     CheckForUpdates,
     Headers(Headers),
+    /// End the session of the connected phone at this place in the list.
+    Disconnect(usize),
     /// Sign in to remote control (true) or out.
     Remote(bool),
     /// Start typing in a text field.
@@ -247,7 +256,10 @@ impl Page {
         let fields = Field::ALL.map(Row::Field);
         y = ui.section(x, y, width, "AI", &fields, values);
         if values.remote.is_some() {
-            y = ui.section(x, y, width, "Remote Control", &[Row::Remote], values);
+            let mut rows = vec![Row::Remote];
+            rows.extend((0..values.remote_phones.len()).map(Row::Connected));
+            rows.push(Row::Phone);
+            y = ui.section(x, y, width, "Remote Control", &rows, values);
         }
         y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::CheckForUpdates], values);
         let version = format!("Temino {}", env!("CARGO_PKG_VERSION"));
@@ -290,7 +302,20 @@ enum Row {
     CheckForUpdates,
     Headers,
     Remote,
+    /// A phone in control now, at this place in the list.
+    Connected(usize),
+    /// What to do on the phone, with a QR code of its web app.
+    Phone,
     Field(Field),
+}
+
+impl Row {
+    fn height(self) -> f32 {
+        match self {
+            Row::Phone => PHONE_ROW,
+            _ => ROW,
+        }
+    }
 }
 
 struct Ui<'a> {
@@ -316,20 +341,25 @@ impl Ui<'_> {
     fn section(&mut self, x: f32, y: f32, width: f32, title: &str, rows: &[Row], values: &Values) -> f32 {
         let theme = self.theme;
         self.text.draw_text(self.scene, &title.to_uppercase(), x + 2.0, y + 12.0, UI_BOLD, 10.5, theme.text_faint);
-        let card = Rect::new(x, y + 22.0, width, ROW * rows.len() as f32);
+        let card = Rect::new(x, y + 22.0, width, rows.iter().map(|row| row.height()).sum());
         self.scene.quad(Quad::new(card, theme.panel(0.04)).radius(10.0).border(1.0, theme.divider));
+        let mut row_y = card.y;
         for (i, &row) in rows.iter().enumerate() {
-            let row_rect = Rect::new(card.x, card.y + i as f32 * ROW, card.w, ROW);
+            let row_rect = Rect::new(card.x, row_y, card.w, row.height());
             if i > 0 {
                 self.scene.fill(Rect::new(row_rect.x + 16.0, row_rect.y, row_rect.w - 32.0, 1.0), theme.divider);
             }
             self.row(row_rect, row, values);
+            row_y += row.height();
         }
         card.bottom() + 28.0
     }
 
     fn row(&mut self, rect: Rect, row: Row, values: &Values) {
         let theme = self.theme;
+        if let Row::Phone = row {
+            return self.phone(rect, values);
+        }
         let (label, detail) = match row {
             Row::Theme => {
                 ("Theme", format!("{} of {} · colors for the terminal and the window", values.theme, values.themes))
@@ -376,10 +406,12 @@ impl Ui<'_> {
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
             Row::Extended => (
                 "Extended tab list",
-                format!(
-                    "Under the active tab, what each pane is doing · {}+Shift+B",
-                    crate::platform::COMMAND_NAME
-                ),
+                {
+                    // On Linux the command modifier is Ctrl+Shift already.
+                    let command = crate::platform::COMMAND_NAME;
+                    let shift = if command.contains("Shift") { "" } else { "+Shift" };
+                    format!("Under the active tab, what each pane is doing · {command}{shift}+B")
+                },
             ),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
@@ -390,6 +422,11 @@ impl Ui<'_> {
                 } else {
                     "Sign in with Apple or Google, then on your phone too".to_owned()
                 },
+            ),
+            Row::Phone => return,
+            Row::Connected(index) => (
+                values.remote_phones[index].as_str(),
+                "Connected · Disconnect takes back its OK: it has to ask again".to_owned(),
             ),
             Row::Field(Field::LlmUrl) => ("Model server", "OpenAI-compatible, for AI mode and tab recaps".to_owned()),
             Row::Field(Field::LlmKey) => ("Model server key", "If the server asks for one".to_owned()),
@@ -470,6 +507,66 @@ impl Ui<'_> {
                 self.segments(right, control_y, &labels, selected, |i| Action::Headers(Headers::ALL[i]));
             }
             Row::Field(field) => self.field(right, control_y, field, values),
+            Row::Connected(index) => self.button(right, control_y, "Disconnect", Action::Disconnect(index)),
+            Row::Phone => {}
+        }
+    }
+
+    /// Remote Control's other end, step by step, beside a QR code that
+    /// opens the phone's web app.
+    fn phone(&mut self, rect: Rect, values: &Values) {
+        let theme = self.theme;
+        let left = rect.x + 16.0;
+        self.text.draw_text(self.scene, "On your iPhone or iPad", left, rect.y + 25.0, UI, 13.0, theme.text);
+        let address = values.remote_url.trim_start_matches("https://");
+        let open = format!("Scan the code, or open {address}");
+        let mut steps = Vec::new();
+        if values.remote != Some(true) {
+            steps.push("Sign in here first, with Sign In… above");
+        }
+        steps.extend([
+            open.as_str(),
+            "Sign in with the same Apple or Google account",
+            "Allow it here: Temino shows the code the phone shows",
+            "For agent alerts: Share ▸ Add to Home Screen",
+        ]);
+        let mut y = rect.y + 48.0;
+        for (number, step) in steps.iter().enumerate() {
+            let number = format!("{}", number + 1);
+            self.text.draw_text(self.scene, &number, left + 2.0, y, UI_BOLD, 11.5, theme.accent);
+            self.text.draw_text(self.scene, step, left + 18.0, y, UI, 11.5, theme.text_dim);
+            y += 22.0;
+        }
+        let code = Rect::new(rect.right() - 16.0 - QR_SIZE, rect.y + (rect.h - QR_SIZE) / 2.0, QR_SIZE, QR_SIZE);
+        self.qr(code, &values.remote_url);
+    }
+
+    /// `text` as a QR code filling `rect`, dark on white with its quiet zone.
+    fn qr(&mut self, rect: Rect, text: &str) {
+        let Ok(qr) = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Medium) else { return };
+        self.scene.quad(Quad::new(rect, Color::hex(0xffffff)).radius(8.0));
+        let size = qr.size();
+        // Two modules of quiet zone each side (the white card's edge adds more).
+        let module = (rect.w / (size + 4) as f32).floor();
+        let origin = rect.x + ((rect.w - module * size as f32) / 2.0).round();
+        let top = rect.y + ((rect.h - module * size as f32) / 2.0).round();
+        let ink = Color::hex(0x000000);
+        for row in 0..size {
+            // Each run of dark modules in a row as one rectangle.
+            let mut column = 0;
+            while column < size {
+                if !qr.get_module(column, row) {
+                    column += 1;
+                    continue;
+                }
+                let start = column;
+                while column < size && qr.get_module(column, row) {
+                    column += 1;
+                }
+                let x = origin + start as f32 * module;
+                let y = top + row as f32 * module;
+                self.scene.fill(Rect::new(x, y, (column - start) as f32 * module, module), ink);
+            }
         }
     }
 
@@ -703,6 +800,8 @@ mod tests {
             see_through: true,
             headers: Headers::Auto,
             remote: None,
+            remote_url: String::new(),
+            remote_phones: Vec::new(),
             fields: Default::default(),
             editing: None,
         };
