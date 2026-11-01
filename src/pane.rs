@@ -1365,10 +1365,35 @@ impl Pane {
         ctx.history.push(&command);
         self.hint = None;
         self.editor.take();
-        self.session.submit(&command);
+        match self.shell_swap(&command) {
+            Some((name, line)) => {
+                self.session.submit_as(&command, &line);
+                self.session.shell_name = name;
+            }
+            None => self.session.submit(&command),
+        }
         self.selected = None;
         self.selection = None;
         self.pin_to_bottom();
+    }
+
+    /// Typing just a shell's name (`fish`, or `exec fish`) at the prompt
+    /// switches this pane to that shell: it replaces the running one in
+    /// place, with Temino's integration, instead of nesting inside a block.
+    /// Returns the shell's name and the line that does it.
+    fn shell_swap(&self, command: &str) -> Option<(String, String)> {
+        if self.session.phase == Phase::Continuation {
+            return None;
+        }
+        let words: Vec<&str> = command.split_whitespace().collect();
+        let word = match words[..] {
+            [word] | ["exec", word] => word,
+            _ => return None,
+        };
+        let kind = crate::shells::Kind::of_path(word)?;
+        let path = if word.contains('/') { word.to_owned() } else { crate::shells::find(kind)? };
+        let line = crate::session::exec_line(&path).ok()?;
+        Some((kind.name().to_owned(), line))
     }
 
     /// AI mode's Enter: the request goes to the model in a block of its own.
