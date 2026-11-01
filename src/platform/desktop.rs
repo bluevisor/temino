@@ -654,6 +654,12 @@ struct Win {
     clicks: i32,
     /// An input method is composing: its keys aren't ours.
     composing: bool,
+    /// Super or Ctrl, as their own key presses and releases say.
+    chord_down: bool,
+    /// A Super or Ctrl release came with no press before it. ibus over XIM
+    /// does that at the start of a chord: a release, the chord's letter with
+    /// nothing held, then the press and the letter again, properly held.
+    orphan_chord: bool,
 }
 
 struct Handler {
@@ -892,6 +898,8 @@ impl Handler {
             last_click: None,
             clicks: 0,
             composing: false,
+            chord_down: false,
+            orphan_chord: false,
         };
         #[cfg(target_os = "macos")]
         {
@@ -1094,8 +1102,14 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                     win.send(UiEvent::Preedit(text));
                 }
                 Ime::Commit(text) => {
-                    win.composing = false;
-                    win.send(UiEvent::Text(text));
+                    // Linux input methods also commit the letter of a
+                    // shortcut (Super+B, Ctrl+Shift+B) the key event already
+                    // ran; only a composition's commit is text.
+                    let shortcut = win.modifiers.super_key() || win.modifiers.control_key();
+                    let composed = std::mem::replace(&mut win.composing, false);
+                    if composed || !shortcut {
+                        win.send(UiEvent::Text(text));
+                    }
                 }
                 Ime::Disabled => {
                     win.composing = false;
@@ -1104,7 +1118,26 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                 Ime::Enabled => {}
             },
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed && !win.composing {
+                let chord = matches!(event.logical_key, Key::Named(NamedKey::Super | NamedKey::Control));
+                let mut ghost = false;
+                match (chord, event.state) {
+                    (true, ElementState::Pressed) => {
+                        win.chord_down = true;
+                        win.orphan_chord = false;
+                    }
+                    (true, ElementState::Released) => {
+                        win.orphan_chord = !win.chord_down;
+                        win.chord_down = false;
+                    }
+                    (false, ElementState::Pressed) => {
+                        // The unheld copy of a chord's letter; the held one follows.
+                        ghost = std::mem::take(&mut win.orphan_chord)
+                            && matches!(event.logical_key, Key::Character(_))
+                            && win.modifiers.is_empty();
+                    }
+                    (false, ElementState::Released) => {}
+                }
+                if event.state == ElementState::Pressed && !win.composing && !ghost {
                     win.key(&event);
                 }
             }
