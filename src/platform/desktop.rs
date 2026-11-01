@@ -811,6 +811,10 @@ impl Win {
             // Ctrl+Shift is the shortcut modifier, as in other Linux terminals.
             bits = (bits & !(mods::CONTROL | mods::SHIFT)) | mods::COMMAND;
         }
+        if cfg!(target_os = "linux") && bits == mods::OPTION && base.is_some_and(|c| ('1'..='9').contains(&c)) {
+            // Alt+1…9 picks a tab, as in GNOME Terminal: Super+1…9 is the dock's.
+            bits = mods::COMMAND;
+        }
         self.send(UiEvent::Key(KeyEvent { named, mods: bits, raw_char: base.map_or(0, |c| c as u32), bytes }));
     }
 }

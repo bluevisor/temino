@@ -94,7 +94,7 @@ macOS, Ctrl+Shift (or Super) on Linux.
 | Cmd+\` / Cmd+Shift+\` | the agent waiting on you longest / most recently; with none, the pane you were in before |
 | Cmd+Enter | zoom the pane to the whole tab, and back |
 | Cmd+Shift+I / Cmd+L / Cmd+Shift+L | mark the tab Important / Waiting / Later, or clear it (also in the tab's ⋯ menu); Cmd+\` skips Waiting and Later tabs, and typing in one clears its mark |
-| Cmd+1…8, Cmd+9 | a tab, the last tab (Settings aside) |
+| Cmd+1…8, Cmd+9 | a tab, the last tab (Settings aside); on Linux also Alt+1…9, as Super+1…9 is often the desktop's |
 | Cmd+B | hide / show the tab list |
 | Ctrl+PageUp / PageDown, Ctrl+Tab / Ctrl+Shift+Tab | previous / next tab (on Haiku Ctrl+Tab stays the window switcher) |
 | Cmd+C, Cmd+Shift+C, Cmd+V | copy (selection, else the selected block's output), copy the block's command, paste |
