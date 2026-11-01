@@ -227,6 +227,18 @@ pub fn unregister(no: u32) {
     hub.version += 1;
 }
 
+/// The open windows' numbers.
+pub fn windows() -> Vec<u32> {
+    let mut windows: Vec<u32> = HUB.lock().unwrap().windows.iter().map(|w| w.0).collect();
+    windows.sort();
+    windows
+}
+
+/// Where window `no`'s core takes messages.
+pub fn window_sender(no: u32) -> Option<Sender<Msg>> {
+    HUB.lock().unwrap().windows.iter().find(|w| w.0 == no).map(|w| w.1.clone())
+}
+
 /// Whether anyone is watching: windows publish their state only then.
 pub fn watched() -> bool {
     CLIENTS.load(Ordering::Relaxed) > 0
@@ -455,7 +467,7 @@ fn command(message: &Value) {
 
 /// `{"key":"Enter"}`, `{"key":"c","mods":["ctrl"]}`: a key as the platform
 /// would have sent it.
-fn key(message: &Value) -> Option<KeyEvent> {
+pub fn key(message: &Value) -> Option<KeyEvent> {
     let name = message.str_at("key")?;
     let mut bits = 0;
     for m in message.get("mods").map(Value::array).unwrap_or_default() {
@@ -481,6 +493,8 @@ fn key(message: &Value) -> Option<KeyEvent> {
         "Tab" => Some(Named::Tab),
         "Enter" => Some(Named::Enter),
         "Escape" => Some(Named::Escape),
+        "Insert" => Some(Named::Insert),
+        f if f.len() > 1 && f.starts_with('F') => f[1..].parse().ok().filter(|n| (1..=12).contains(n)).map(Named::F),
         _ => None,
     };
     let bytes = match named {

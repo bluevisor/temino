@@ -6,11 +6,13 @@
 #![allow(clippy::too_many_arguments)]
 
 mod agent;
+mod api;
 mod app;
 mod ask;
 #[cfg(not(target_os = "haiku"))]
 mod avatar;
 mod bindings;
+mod cli;
 mod complete;
 mod e2e;
 mod editor;
@@ -60,6 +62,8 @@ pub enum Msg {
     Viewer(u64, platform::ViewerEvent),
     /// What a remote (the phone) asks this window to do.
     Remote(remote::Command),
+    /// A request over the API socket, for this window.
+    Api(api::Call),
 }
 
 /// History, the shell integration script and logs: ~/config/settings/Temino
@@ -161,6 +165,11 @@ fn main() {
     #[cfg(target_os = "haiku")]
     if args.get(1).map(String::as_str) == Some("--pty-exec") {
         std::process::exit(platform::pty_exec(&args[2..]));
+    }
+    // `temino list`, `temino run …`, `temino mcp`: a client of the running
+    // Temino (cli.rs), not another window.
+    if args.get(1).is_some_and(|a| cli::COMMANDS.contains(&a.as_str())) {
+        std::process::exit(cli::run(&args[1..]));
     }
     if args.get(1).map(String::as_str) == Some("--selftest") {
         let path = args.get(2).map_or("/tmp/temino-selftest.ppm", String::as_str);
