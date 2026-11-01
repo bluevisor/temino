@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::e2e::{self, Keys, Session};
 use crate::json::{self, Value};
-use crate::remote::{self, Client, Command};
+use crate::remote::{self, Client, Command, Who};
 
 /// Where the relay is, unless the settings file says otherwise.
 pub const DEFAULT_RELAY: &str = "https://temino-relay.bluevisor.workers.dev";
@@ -192,6 +192,20 @@ struct Device {
     name: String,
     kind: String,
     key: Vec<u8>,
+    /// Who signed it in: their first name and photo, where the sign-in
+    /// gave them (Google does; Apple doesn't).
+    person: Option<String>,
+    picture: Option<String>,
+}
+
+impl Device {
+    fn who(&self) -> Who {
+        let name = match &self.person {
+            Some(person) => format!("{person} · {}", self.name),
+            None => self.name.clone(),
+        };
+        Who { name, picture: self.picture.clone() }
+    }
 }
 
 /// A phone talking to this machine.
@@ -258,7 +272,8 @@ fn serve_relay() -> Result<(), String> {
                 if let (Some(key), Some(device)) = (peer.session.peer(), devices.get(&id)) {
                     e2e::approve(&key, &device.name);
                 }
-                let_in(&id, peer, &mut out)?;
+                let who = devices.get(&id).map_or_else(|| Who { name: "Phone".into(), picture: None }, Device::who);
+                let_in(&id, who, peer, &mut out)?;
             } else {
                 seal(&id, peer, r#"{"type":"denied"}"#, &mut out)?;
                 peers.remove(&id);
@@ -314,6 +329,9 @@ fn relay_message(
                         name: d.str_at("name").unwrap_or("Device").to_owned(),
                         kind: d.str_at("kind").unwrap_or_default().to_owned(),
                         key,
+                        person: d.str_at("person").filter(|p| !p.is_empty()).map(str::to_owned),
+                        // Only an https address is fetched.
+                        picture: d.str_at("picture").filter(|p| p.starts_with("https://")).map(str::to_owned),
                     },
                 );
             }
@@ -373,7 +391,7 @@ fn frame(
             return Err("its key isn't the one on the account".into());
         }
         if e2e::approved(&device.key) {
-            return let_in(from, peer, out);
+            return let_in(from, device.who(), peer, out);
         }
         seal(from, peer, &format!(r#"{{"type":"pending","code":"{code}"}}"#), out)?;
         peer.asked = true;
@@ -389,9 +407,12 @@ fn frame(
     Ok(())
 }
 
-fn let_in(id: &str, peer: &mut Peer, out: &mut Vec<String>) -> Result<(), String> {
+fn let_in(id: &str, who: Who, peer: &mut Peer, out: &mut Vec<String>) -> Result<(), String> {
     settle(id, peer);
-    peer.client = Some(Client::join());
+    if let Some(picture) = &who.picture {
+        crate::avatar::fetch(picture);
+    }
+    peer.client = Some(Client::join(who));
     seal(id, peer, &Client::hello(), out)
 }
 

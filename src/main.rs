@@ -8,6 +8,8 @@
 mod agent;
 mod app;
 mod ask;
+#[cfg(not(target_os = "haiku"))]
+mod avatar;
 mod bindings;
 mod complete;
 mod e2e;

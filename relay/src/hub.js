@@ -45,7 +45,11 @@ export class Hub extends DurableObject {
     if (url.pathname === "/register") {
       const device = await request.json();
       const devices = await this.devices();
-      devices[device.id] = { name: device.name, kind: device.kind, pub: device.pub, added: Date.now() };
+      devices[device.id] = {
+        name: device.name, kind: device.kind, pub: device.pub, added: Date.now(),
+        // Who signed it in, for the desktop to show on the pane they're in.
+        person: device.person || "", picture: device.picture || "",
+      };
       await this.ctx.storage.put("devices", devices);
       await this.announce();
       return new Response("ok");
@@ -138,7 +142,9 @@ export class Hub extends DurableObject {
     const devices = await this.devices();
     const sockets = this.ctx.getWebSockets();
     const online = new Set(sockets.filter((s) => s.readyState === 1).map((s) => this.ctx.getTags(s)[0]));
-    const list = Object.entries(devices).map(([id, d]) => ({ id, name: d.name, kind: d.kind, pub: d.pub, online: online.has(id) }));
+    const list = Object.entries(devices).map(([id, d]) => ({
+      id, name: d.name, kind: d.kind, pub: d.pub, online: online.has(id), person: d.person || "", picture: d.picture || "",
+    }));
     for (const socket of sockets) {
       try {
         socket.send(JSON.stringify({ type: "devices", you: this.ctx.getTags(socket)[0], devices: list }));

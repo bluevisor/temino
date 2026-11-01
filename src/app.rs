@@ -3182,6 +3182,7 @@ impl App {
         self.wake_for_agents(&agents);
         self.pane_hits.clear();
         self.draw_agent_headers(&visible);
+        self.draw_remote_marks(&visible);
         for divider in &self.dividers {
             self.scene.set_layer(LAYER_OVERLAY);
             self.scene.fill(divider.line, self.ctx.theme.divider.mix(self.ctx.theme.text_faint, 0.35));
@@ -3368,6 +3369,19 @@ impl App {
                 (None, None, None) => {}
             }
             pane_hits.push((bar, self.active, id));
+        }
+    }
+
+    /// A pane someone is in from a phone: an outline in the accent color,
+    /// and at its top right who it is, with their photo.
+    fn draw_remote_marks(&mut self, visible: &[(u64, Rect)]) {
+        let no = platform::window_no();
+        let Self { scene, ctx, .. } = self;
+        for &(id, rect) in visible {
+            let people = remote::in_control(no, id);
+            if !people.is_empty() {
+                draw_people(scene, &mut ctx.text, &ctx.theme, rect, &people);
+            }
         }
     }
 
@@ -4745,4 +4759,41 @@ enum Install {
     Shell(shells::Kind),
     /// One of fetch::FETCHES.
     Fetch(usize),
+}
+
+/// Over pane `rect`: an accent outline, and at the top right a pill for
+/// each person in it from a phone, their photo (or initial) and name.
+pub fn draw_people(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, rect: Rect, people: &[remote::Who]) {
+    scene.set_layer(LAYER_OVERLAY);
+    scene.quad(Quad::new(rect.inset(1.0, 1.0), Color::TRANSPARENT).radius(6.0).border(2.0, theme.accent));
+    let (size, avatar, pad) = (11.5, 18.0, 4.0);
+    let ascent = text.ui_ascent(size);
+    let mut right = rect.right() - 10.0;
+    for who in people {
+        let label = text.measure(&who.name, UI, size);
+        let x = right - (pad + avatar + 7.0 + label + 10.0);
+        let pill = Rect::new(x, rect.y + 8.0, right - x, avatar + 2.0 * pad);
+        scene.shadow(pill, Color::hex(0x000000).alpha(0.3), pill.h / 2.0, 6.0);
+        scene.quad(Quad::new(pill, theme.raised).radius(pill.h / 2.0).border(1.0, theme.accent));
+        let face = Rect::new(pill.x + pad, pill.y + pad, avatar, avatar);
+        #[cfg(not(target_os = "haiku"))]
+        let photo = who.picture.as_deref().and_then(crate::avatar::get);
+        #[cfg(target_os = "haiku")]
+        let photo: Option<std::sync::Arc<crate::picture::Picture>> = None;
+        match photo {
+            Some(photo) => text.draw_picture(scene, &photo, face),
+            None => {
+                // No photo (Apple's sign-in has none): their initial.
+                scene.quad(Quad::new(face, theme.accent).radius(avatar / 2.0));
+                let initial: String = who.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                let w = text.measure(&initial, UI_BOLD, 10.5);
+                let baseline = (face.y + (face.h + text.ui_ascent(10.5) * 0.72) / 2.0).round();
+                text.draw_text(scene, &initial, face.x + (face.w - w) / 2.0, baseline, UI_BOLD, 10.5, Color::hex(0x0b0d12));
+            }
+        }
+        let baseline = (pill.y + (pill.h + ascent * 0.72) / 2.0).round();
+        text.draw_text(scene, &who.name, face.right() + 7.0, baseline, UI, size, theme.text);
+        right = pill.x - 6.0;
+    }
+    scene.set_layer(LAYER_CONTENT);
 }

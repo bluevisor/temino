@@ -125,7 +125,7 @@ async function google(env, url) {
   if (!req) return page("Temino", "<h1>Sign-in expired</h1><p>Start again from Temino.</p>");
   const q = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID, redirect_uri: `${url.origin}/auth/google/callback`,
-    response_type: "code", scope: "openid email", state: await hold(env, req), nonce: req.nonce,
+    response_type: "code", scope: "openid email profile", state: await hold(env, req), nonce: req.nonce,
     prompt: "select_account",
   });
   return Response.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${q}`, 302);
@@ -150,7 +150,11 @@ async function googleCallback(env, url) {
     audience: env.GOOGLE_CLIENT_ID, nonce: req.nonce,
   });
   if (!claims) return page("Temino", "<h1>Google sign-in failed</h1><p>Start again from Temino.</p>");
-  return finish(env, url, req, { provider: "google", sub: claims.sub, email: claims.email, verified: claims.email_verified === true });
+  return finish(env, url, req, {
+    provider: "google", sub: claims.sub, email: claims.email, verified: claims.email_verified === true,
+    person: claims.given_name || claims.name || "",
+    picture: /^https:\/\//.test(claims.picture || "") ? claims.picture : "",
+  });
 }
 
 async function apple(env, url) {
@@ -219,7 +223,10 @@ async function finish(env, url, req, who) {
   const device = random(12);
   await hub(env, accountId).fetch("https://hub/register", {
     method: "POST",
-    body: JSON.stringify({ id: device, name: req.name, kind: req.kind, pub: req.pub }),
+    body: JSON.stringify({
+      id: device, name: req.name, kind: req.kind, pub: req.pub,
+      person: String(who.person || "").slice(0, 40), picture: String(who.picture || "").slice(0, 500),
+    }),
   });
   const token = await sign(env, { a: accountId, d: device });
   const back = new URL(req.ret);
