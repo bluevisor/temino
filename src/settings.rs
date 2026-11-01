@@ -37,6 +37,8 @@ pub struct Values {
     /// How many key bindings the keys file holds.
     pub bindings: usize,
     pub ligatures: bool,
+    /// The terminal's font family.
+    pub font: String,
     /// The quick terminal's hotkey, if it's on; the outer None where there
     /// is no quick terminal.
     pub quick_terminal: Option<Option<String>>,
@@ -149,6 +151,8 @@ impl Field {
 pub enum Action {
     /// The theme this many places along the library.
     Theme(i32),
+    /// The monospaced family this many places along the installed ones.
+    Font(i32),
     /// Open or close the list of every theme.
     ThemeList,
     /// The theme at this place in the library, picked from the list.
@@ -244,7 +248,7 @@ impl Page {
             rows.extend([Row::Opacity, Row::Blur]);
         }
         y = ui.section(x, y, width, "Appearance", &rows, values);
-        y = ui.section(x, y, width, "Text", &[Row::Zoom, Row::Ligatures], values);
+        y = ui.section(x, y, width, "Text", &[Row::Font, Row::Zoom, Row::Ligatures], values);
         let mut shell = vec![Row::Shell, Row::Fetch];
         if values.fetch > 0 {
             shell.push(Row::FetchConfig);
@@ -291,6 +295,7 @@ enum Row {
     ThemeFolder,
     Keys,
     Ligatures,
+    Font,
     QuickTerminal,
     Background,
     Opacity,
@@ -376,6 +381,7 @@ impl Ui<'_> {
                     n => format!("{n} custom bindings, from the keys file"),
                 },
             ),
+            Row::Font => ("Font", "The terminal's; any monospaced family installed".to_owned()),
             Row::Ligatures => ("Ligatures", "Symbols like -> != >= drawn joined".to_owned()),
             Row::QuickTerminal => (
                 "Quick terminal",
@@ -454,6 +460,10 @@ impl Ui<'_> {
                 });
             }
             Row::Ligatures => self.toggle(right, rect.y, values.ligatures, Action::Ligatures(!values.ligatures)),
+            Row::Font => {
+                let labels = ["‹".to_owned(), values.font.clone(), "›".to_owned()];
+                self.segments(right, control_y, &labels, None, |i| Action::Font(if i == 0 { -1 } else { 1 }));
+            }
             Row::QuickTerminal => {
                 let on = values.quick_terminal.as_ref().is_some_and(Option::is_some);
                 self.toggle(right, rect.y, on, Action::QuickTerminal(!on));
@@ -797,6 +807,7 @@ mod tests {
             palette: 0,
             bindings: 0,
             ligatures: true,
+            font: "JetBrains Mono".into(),
             quick_terminal: Some(None),
             opacity: 0,
             blur: false,
@@ -827,6 +838,9 @@ mod tests {
         expected.extend((0..OPACITIES.len()).map(Action::Opacity));
         expected.extend([
             Action::Blur(true),
+            Action::Font(-1),
+            Action::Font(1),
+            Action::Font(1),
             Action::Zoom(-1),
             Action::Zoom(0),
             Action::Zoom(1),

@@ -222,6 +222,33 @@ pub struct TextSystem {
     mosaics: HashMap<(u64, usize, usize), std::rc::Rc<Vec<u8>>>,
 }
 
+/// A family's four styles, read once and kept for the life of the process:
+/// the shaper borrows its font data, so switching back costs nothing more.
+fn kept_styles(family: &str) -> Result<Vec<(&'static [u8], u32)>, String> {
+    static KEPT: std::sync::Mutex<Vec<(String, Vec<(&'static [u8], u32)>)>> = std::sync::Mutex::new(Vec::new());
+    let mut kept = KEPT.lock().unwrap();
+    if let Some((_, faces)) = kept.iter().find(|(name, _)| name == family) {
+        return Ok(faces.clone());
+    }
+    let styles = crate::fonts::styles(family).ok_or_else(|| format!("{family} isn't installed"))?;
+    // The same file serves several styles when some are missing: kept once.
+    let mut files: Vec<(*const u8, &'static [u8])> = Vec::new();
+    let faces: Vec<(&'static [u8], u32)> = styles
+        .into_iter()
+        .map(|(data, index)| {
+            let same = files.iter().find(|(_, kept)| **kept == data[..]).map(|(_, kept)| *kept);
+            let data: &'static [u8] = same.unwrap_or_else(|| {
+                let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
+                files.push((leaked.as_ptr(), leaked));
+                leaked
+            });
+            (data, index)
+        })
+        .collect();
+    kept.push((family.to_owned(), faces.clone()));
+    Ok(faces)
+}
+
 fn load_system_font(name: &str) -> Option<Font> {
     let home = std::env::var("HOME").unwrap_or_default();
     let data =
@@ -294,6 +321,31 @@ impl TextSystem {
         };
         system.set_size(size);
         system
+    }
+
+    /// Draws the terminal in `family`'s four styles (fonts::styles), or in
+    /// the bundled JetBrains Mono for None. Fails, changing nothing, when a
+    /// face won't load.
+    pub fn set_mono(&mut self, family: Option<&str>) -> Result<(), String> {
+        let faces: Vec<(&'static [u8], u32)> = match family {
+            None => MONO_FONTS.iter().map(|data| (*data, 0)).collect(),
+            Some(family) => kept_styles(family)?,
+        };
+        let mut fonts = Vec::with_capacity(4);
+        let mut shapers = Vec::with_capacity(4);
+        for &(data, index) in &faces {
+            let settings = FontSettings { collection_index: index, ..FontSettings::default() };
+            fonts.push(Font::from_bytes(data, settings).map_err(|e| e.to_string())?);
+            shapers.push(rustybuzz::Face::from_slice(data, index).ok_or("its shaping tables don't read")?);
+        }
+        for (slot, font) in self.fonts.iter_mut().zip(fonts) {
+            *slot = font;
+        }
+        self.shapers = shapers;
+        self.lookup.clear();
+        self.shaped.clear();
+        self.set_size(self.cell.size);
+        Ok(())
     }
 
     pub fn set_scale(&mut self, scale: f32) {
