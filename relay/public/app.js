@@ -267,6 +267,8 @@ function watch() {
 function go(newLevel, where) {
   level = newLevel;
   if (where) at = { ...at, ...where };
+  // A pane opened here is the one in front on the computer too.
+  if (level === "pane" && at && at.pane != null) send({ type: "focus", window: at.window, pane: at.pane });
   watch();
   render();
 }
