@@ -11,6 +11,7 @@ mod ask;
 mod bindings;
 mod complete;
 mod editor;
+mod fetch;
 mod find;
 #[cfg(not(target_os = "macos"))]
 mod gpu;

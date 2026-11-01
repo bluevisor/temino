@@ -12,6 +12,7 @@ use crate::agent::{self, AgentState};
 use crate::bindings::{self, Bind, Bindings};
 use crate::complete::Commands;
 use crate::editor::History;
+use crate::fetch::{self, FETCHES};
 use crate::gpu::Gpu;
 use crate::keys::Named;
 use crate::pane::{AgentInfo, Ctx, MarkNote, Pane};
@@ -469,8 +470,8 @@ pub struct App {
     preedit: String,
     /// The caret last reported to the platform, in window pixels.
     caret_sent: Option<[i32; 3]>,
-    /// The pane installing a shell from Settings ▸ Shell, and which.
-    installing: Option<(u64, shells::Kind)>,
+    /// The pane installing a shell or a fetch from Settings ▸ Shell, and which.
+    installing: Option<(u64, Install)>,
     /// The Settings tab's page, and what it shows that the theme doesn't.
     settings: settings::Page,
     /// The theme library, the scheme in use, and the background picked
@@ -487,6 +488,8 @@ pub struct App {
     blur: bool,
     /// Which of KINDS are installed, as of the Settings tab opening.
     installed: [bool; KINDS.len()],
+    /// Which of fetch::FETCHES are installed, as of opening Settings.
+    fetches_installed: [bool; FETCHES.len()],
     update: Option<UpdateOffer>,
     /// Per frame: the update pill and card's hit areas, and the card.
     update_hits: Vec<(Rect, UpdateAction)>,
@@ -768,6 +771,7 @@ impl App {
             opacity,
             blur: crate::setting("blur").as_deref() == Some("on"),
             installed: [false; KINDS.len()],
+            fetches_installed: [false; FETCHES.len()],
             update: None,
             update_hits: Vec::new(),
             update_card: Rect::default(),
@@ -835,6 +839,12 @@ impl App {
     /// A new tab in `cwd`, or else the focused pane's directory.
     fn new_tab_in(&mut self, cwd: Option<String>) -> Result<(), String> {
         let id = self.make_pane_in(cwd)?;
+        // Settings ▸ Shell's fetch greets each new tab.
+        if let Some(command) = fetch::command() {
+            if let Some(pane) = self.pane(id) {
+                pane.run_when_ready(command);
+            }
+        }
         self.tabs.push(Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -1785,21 +1795,42 @@ impl App {
             self.use_shell(path);
             return;
         }
-        match shells::install_command(kind) {
+        self.install(shells::install_command(kind), Install::Shell(kind));
+        self.refresh_shell_menu();
+    }
+
+    /// Runs an install command from Settings in a new tab, and remembers
+    /// what it installs so check_install can pick it once it's done.
+    fn install(&mut self, command: Result<String, String>, what: Install) {
+        match command {
             Ok(command) => match self.new_tab() {
                 Ok(()) => {
                     if let Some(id) = self.focused_id() {
                         if let Some(pane) = self.pane(id) {
                             pane.run_when_ready(command);
                         }
-                        self.installing = Some((id, kind));
+                        self.installing = Some((id, what));
                     }
                 }
                 Err(error) => self.ctx.show_toast(&error),
             },
             Err(why) => self.ctx.show_toast(&why),
         }
-        self.refresh_shell_menu();
+    }
+
+    /// Settings ▸ Shell ▸ Fetch: what new tabs open with (`index` 0 is
+    /// none); a missing one is installed first, in a new tab.
+    fn set_fetch(&mut self, index: usize) {
+        let Some(fetch) = index.checked_sub(1).and_then(|i| FETCHES.get(i)) else {
+            crate::save_setting("fetch", "off");
+            return;
+        };
+        if shells::which(fetch.name).is_some() {
+            crate::save_setting("fetch", fetch.name);
+            self.ctx.show_toast(&format!("New tabs open with {}", fetch.name));
+        } else {
+            self.install(fetch.install_command(), Install::Fetch(index - 1));
+        }
     }
 
     fn use_shell(&mut self, path: String) {
@@ -1819,12 +1850,27 @@ impl App {
     /// After a Settings ▸ Shell install command finishes: use the shell if
     /// it is there now.
     fn check_install(&mut self, id: u64) {
-        let Some((pane_id, kind)) = self.installing else { return };
+        let Some((pane_id, what)) = self.installing else { return };
         if pane_id != id {
             return;
         }
         let Some(code) = self.pane(id).and_then(|pane| pane.take_queued_exit()) else { return };
         self.installing = None;
+        let kind = match what {
+            Install::Shell(kind) => kind,
+            Install::Fetch(index) => {
+                let fetch = &FETCHES[index];
+                self.fetches_installed = fetch::installed();
+                if shells::which(fetch.name).is_some() {
+                    crate::save_setting("fetch", fetch.name);
+                    self.ctx.show_toast(&format!("New tabs open with {}", fetch.name));
+                } else {
+                    self.ctx.show_toast(&format!("Installing {} failed (status {code})", fetch.name));
+                }
+                self.dirty = true;
+                return;
+            }
+        };
         match shells::find(kind) {
             Some(path) => self.use_shell(path),
             None => {
@@ -2128,6 +2174,7 @@ impl App {
     /// Command+,: the Settings tab, opened after the others or switched to.
     fn open_settings(&mut self) {
         self.installed = KINDS.map(|kind| shells::find(kind).is_some());
+        self.fetches_installed = fetch::installed();
         if let Some(index) = self.tabs.iter().position(|tab| tab.focus == SETTINGS) {
             self.switch_tab(index);
             return;
@@ -2160,6 +2207,8 @@ impl App {
             blur: self.blur,
             shell: shells::Kind::of_path(&self.ctx.shell).and_then(|kind| KINDS.iter().position(|&k| k == kind)),
             installed: self.installed,
+            fetch: fetch::chosen().map_or(0, |index| index + 1),
+            fetches_installed: self.fetches_installed,
             tabs_top: self.strip == TabStrip::Top,
             zoom: self.zoom_percent(),
             updates: crate::setting("updates").as_deref() != Some("off"),
@@ -2215,6 +2264,14 @@ impl App {
             Action::Shell(index) => {
                 self.set_shell(index);
                 self.installed = KINDS.map(|kind| shells::find(kind).is_some());
+            }
+            Action::Fetch(index) => self.set_fetch(index),
+            Action::FetchConfig => {
+                let Some(index) = fetch::chosen() else { return };
+                match FETCHES[index].config_file() {
+                    Ok(path) => platform::open_url(&path),
+                    Err(why) => self.ctx.show_toast(&why),
+                }
             }
             Action::TabsTop(top) => {
                 self.strip = if top { TabStrip::Top } else { TabStrip::Left };
@@ -3063,11 +3120,8 @@ impl App {
             let shell = (info.is_none() && program.is_none()).then(|| {
                 pane.refresh_git(&sender, now);
                 let (busy, line) = pane.activity();
-                let detail = if busy {
-                    ui::short_path(&pane.session.cwd)
-                } else {
-                    pane.idle_line(&pane.session.cwd, now)
-                };
+                let detail =
+                    if busy { ui::short_path(&pane.session.cwd) } else { pane.idle_line(&pane.session.cwd, now) };
                 (busy, pane.last_failed(), line, detail)
             });
             let bar = Rect::new(rect.x, rect.y - AGENT_HEADER, rect.w, AGENT_HEADER);
@@ -4423,4 +4477,12 @@ fn write_ppm(path: &std::ffi::OsStr, bgra: &[u8], width: u32, height: u32) {
         ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
     }
     let _ = std::fs::write(path, ppm);
+}
+
+/// What a Settings install tab is installing.
+#[derive(Clone, Copy)]
+enum Install {
+    Shell(shells::Kind),
+    /// One of fetch::FETCHES.
+    Fetch(usize),
 }
