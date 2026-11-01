@@ -428,6 +428,10 @@ pub struct App {
     title: String,
     cursor: Cursor,
     quitting: bool,
+    /// Closes this window or quits, once the loop has ended and the GPU is
+    /// let go: the main thread exits right after, and the Vulkan driver
+    /// tearing itself down then mustn't race this core destroying its device.
+    leave: Option<fn()>,
     /// When the frame on screen goes stale on its own (spinner, blink).
     animation_at: Option<Instant>,
     pointer: Pointer,
@@ -554,6 +558,11 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
         if app.dirty {
             app.render();
         }
+    }
+    let leave = app.leave.take();
+    drop(app);
+    if let Some(leave) = leave {
+        leave();
     }
 }
 
@@ -724,6 +733,7 @@ impl App {
             title: String::new(),
             cursor: Cursor::IBeam,
             quitting: false,
+            leave: None,
             animation_at: None,
             pointer: Pointer::Idle,
             tab_hits: Vec::new(),
@@ -1566,7 +1576,7 @@ impl App {
     fn quit(&mut self) {
         self.shut_down();
         update::finish(self.relaunch);
-        platform::quit();
+        self.leave = Some(platform::quit);
     }
 
     /// Closes this window; the last one quits.
@@ -1576,7 +1586,7 @@ impl App {
             return;
         }
         self.shut_down();
-        platform::close_window();
+        self.leave = Some(platform::close_window);
     }
 
     /// Done with this window: its tabs saved (if it keeps them) and its
@@ -1632,7 +1642,7 @@ impl App {
                 // Another window quits the app; one with unsaved work stays.
                 if !self.unsaved_blocks_quit() {
                     self.shut_down();
-                    platform::close_window();
+                    self.leave = Some(platform::close_window);
                 }
             }
             UiEvent::Primary => {
