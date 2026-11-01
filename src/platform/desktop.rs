@@ -1094,8 +1094,14 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                     win.send(UiEvent::Preedit(text));
                 }
                 Ime::Commit(text) => {
-                    win.composing = false;
-                    win.send(UiEvent::Text(text));
+                    // Linux input methods also commit the letter of a
+                    // shortcut (Super+B, Ctrl+Shift+B) the key event already
+                    // ran; only a composition's commit is text.
+                    let shortcut = win.modifiers.super_key() || win.modifiers.control_key();
+                    let composed = std::mem::replace(&mut win.composing, false);
+                    if composed || !shortcut {
+                        win.send(UiEvent::Text(text));
+                    }
                 }
                 Ime::Disabled => {
                     win.composing = false;
