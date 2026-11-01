@@ -1026,6 +1026,19 @@ impl ApplicationHandler<(u32, Request)> for Handler {
             }
             Request::Caret(x, y, height) => {
                 if let Some(win) = self.win(no) {
+                    // X11's XIM only takes a spot, the baseline an input
+                    // method draws its candidates under (winit drops the
+                    // size there), so give it the caret's bottom; from the
+                    // top the candidate window covers the line.
+                    #[cfg(all(unix, not(target_os = "macos")))]
+                    let y = {
+                        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                        let x11 = matches!(
+                            win.window.window_handle().map(|h| h.as_raw()),
+                            Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_))
+                        );
+                        if x11 { y + height.max(1) } else { y }
+                    };
                     win.window.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(1, height.max(1)));
                 }
             }
