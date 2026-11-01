@@ -118,10 +118,26 @@ pub(super) fn parse_osc(body: &[u8]) -> Option<Segment> {
         "6973" => rest.strip_prefix("path;").map(|path| Segment::Path(path.to_owned())),
         "9" => match rest.strip_prefix("4;") {
             Some(progress) => Some(Segment::Progress(!matches!(progress.split(';').next(), Some("0" | "")))),
-            None => Some(Segment::Notify),
+            None => Some(Segment::Notify(None, rest.to_owned())),
         },
-        "777" if rest.starts_with("notify;") => Some(Segment::Notify),
-        "99" => Some(Segment::Notify),
+        // OSC 777;notify;title;body (urxvt, Ghostty, WezTerm).
+        "777" => {
+            let mut parts = rest.strip_prefix("notify;")?.splitn(2, ';');
+            let title = parts.next().unwrap_or_default();
+            Some(Segment::Notify(
+                Some(title.to_owned()).filter(|t| !t.is_empty()),
+                parts.next().unwrap_or_default().to_owned(),
+            ))
+        }
+        // Kitty's OSC 99;metadata;payload: p=title makes the payload the title.
+        "99" => {
+            let (meta, payload) = rest.split_once(';').unwrap_or(("", rest));
+            if meta.split(':').any(|kv| kv == "p=title") {
+                Some(Segment::Notify(Some(payload.to_owned()), String::new()))
+            } else {
+                Some(Segment::Notify(None, payload.to_owned()))
+            }
+        }
         _ => None,
     }
 }
@@ -244,7 +260,7 @@ mod tests {
                 Segment::Done(code) => format!("done {code:?}"),
                 Segment::Cwd(path) => format!("cwd {path}"),
                 Segment::Continuation => "continuation".into(),
-                Segment::Notify => "notify".into(),
+                Segment::Notify(title, body) => format!("notify {title:?} {body}"),
                 Segment::Progress(busy) => format!("progress {busy}"),
                 Segment::Path(path) => format!("path {path}"),
                 Segment::Iterm(body) => format!("iterm {body}"),
@@ -394,9 +410,9 @@ mod tests {
     fn temino_marks_notifications_and_progress() {
         assert_eq!(scan(b"\x1b]6973;cont\x07"), ["continuation"]);
         assert_eq!(scan(b"\x1b]6973;path;/usr/bin:/bin\x07"), ["path /usr/bin:/bin"]);
-        assert_eq!(scan(b"\x1b]9;Build done\x07"), ["notify"]);
-        assert_eq!(scan(b"\x1b]777;notify;Title;Body\x07"), ["notify"]);
-        assert_eq!(scan(b"\x1b]99;i=1;hello\x1b\\"), ["notify"]);
+        assert_eq!(scan(b"\x1b]9;Build done\x07"), ["notify None Build done"]);
+        assert_eq!(scan(b"\x1b]777;notify;Title;Body\x07"), ["notify Some(\"Title\") Body"]);
+        assert_eq!(scan(b"\x1b]99;i=1;hello\x1b\\"), ["notify None hello"]);
         assert_eq!(scan(b"\x1b]9;4;1;50\x07"), ["progress true"]);
         assert_eq!(scan(b"\x1b]9;4;3;\x07"), ["progress true"]);
         assert_eq!(scan(b"\x1b]9;4;0;\x07"), ["progress false"]);

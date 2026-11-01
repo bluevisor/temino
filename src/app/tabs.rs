@@ -409,6 +409,27 @@ impl App {
             format!("{folders} · {}", recent.join(", "))
         }
     }
+    /// The tab holding pane `id`, by index.
+    fn tab_index_of(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|tab| {
+            let mut leaves = Vec::new();
+            tab.root.leaves(&mut leaves);
+            leaves.contains(&id)
+        })
+    }
+    /// Desktop notifications programs asked for, for the panes you can't
+    /// see right now (another tab, or the window isn't in front); titled
+    /// with the tab when the program gave no title.
+    pub(super) fn show_notifications(&mut self) {
+        for (id, title, body) in std::mem::take(&mut self.ctx.notifications) {
+            let Some(tab) = self.tab_index_of(id) else { continue };
+            if self.focused && tab == self.active {
+                continue;
+            }
+            let title = title.unwrap_or_else(|| self.tab_title(tab));
+            crate::notify::show(&title, &body);
+        }
+    }
     /// Reads what every pane's agent is doing, once a frame; a pane whose
     /// agent came or went makes room for its header, or gives it back.
     /// Returns the most urgent state in each tab.
@@ -417,6 +438,7 @@ impl App {
         let mut moved = false;
         // Away from the Mac (no Temino window in front): phones get pinged.
         let away = !self.focused;
+        let mut alerts = Vec::new();
         let agents = (0..self.tabs.len())
             .map(|index| {
                 let mut leaves = Vec::new();
@@ -433,12 +455,17 @@ impl App {
                         // Newly waiting or done while you're away from the
                         // Mac: the phones hear of it.
                         if let Some(need @ (AgentState::Waiting | AgentState::Done)) = state {
-                            if away && pane.needs_since.map(|(was, _)| was) != Some(need) {
+                            let new = pane.needs_since.map(|(was, _)| was) != Some(need);
+                            if away && new {
                                 #[cfg(not(target_os = "haiku"))]
                                 crate::relay::notify(
                                     if need == AgentState::Waiting { "waiting" } else { "done" },
                                     index + 1,
                                 );
+                            }
+                            // Out of sight on this computer: the desktop says so.
+                            if !seen && new {
+                                alerts.push((index, need));
                             }
                         }
                         pane.agent_now = state;
@@ -457,6 +484,10 @@ impl App {
                     .max()
             })
             .collect();
+        for (index, need) in alerts {
+            let body = if need == AgentState::Waiting { "Waiting for you" } else { "Finished" };
+            crate::notify::show(&self.tab_title(index), body);
+        }
         if moved {
             self.relayout();
         }

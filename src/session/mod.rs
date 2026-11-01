@@ -146,8 +146,9 @@ enum Segment {
     Done(Option<i32>),
     Cwd(String),
     Continuation,
-    /// A desktop notification (OSC 9, 777 or 99): the program wants you.
-    Notify,
+    /// A desktop notification (OSC 9, 777 or 99): the program wants you,
+    /// with a title if it gave one, and what it says.
+    Notify(Option<String>, String),
     /// A progress report (OSC 9;4): busy or not.
     Progress(bool),
     /// The shell's $PATH, reported at each prompt.
@@ -208,7 +209,8 @@ pub enum Notice {
     Title(String),
     Clipboard(String),
     Bell,
-    Notify,
+    /// A program asked for a desktop notification: its title, and body.
+    Notify(Option<String>, String),
     Progress(bool),
     /// A command finished and wants the block list cleared (`clear`).
     Clear,
@@ -616,7 +618,7 @@ impl Session {
                         self.continuation_since = Some(Instant::now());
                     }
                 }
-                Segment::Notify => notices.push(Notice::Notify),
+                Segment::Notify(title, body) => notices.push(Notice::Notify(title, body)),
                 Segment::Path(path) => self.path = Some(path),
                 Segment::Progress(busy) => notices.push(Notice::Progress(busy)),
                 Segment::Iterm(body) => self.show_picture(crate::picture::iterm(&body)),
@@ -871,13 +873,20 @@ mod tests {
         let kinds: Vec<_> = notices
             .iter()
             .map(|n| match n {
-                Notice::Notify => "notify",
+                Notice::Notify(None, body) if body == "Claude needs you" => "notify",
                 Notice::Progress(true) => "busy",
                 Notice::Progress(false) => "idle",
                 _ => "other",
             })
             .collect();
         assert_eq!(kinds, ["notify", "busy", "idle"]);
+        let mut said = |bytes: &[u8]| match session.feed(bytes, &theme).pop() {
+            Some(Notice::Notify(title, body)) => (title, body),
+            _ => panic!("no notification"),
+        };
+        assert_eq!(said(b"\x1b]777;notify;Build;done in 3s\x07"), (Some("Build".into()), "done in 3s".into()));
+        assert_eq!(said(b"\x1b]99;i=1:d=0;Tests passed\x07"), (None, "Tests passed".into()));
+        assert_eq!(said(b"\x1b]99;i=1:p=title;Deploy\x07"), (Some("Deploy".into()), String::new()));
     }
 
     #[test]

@@ -54,6 +54,8 @@ pub struct Values {
     pub tabs_top: bool,
     /// The side tab list says, under the active tab, what each pane is doing.
     pub extended: bool,
+    /// Desktop notifications for panes out of sight.
+    pub notifications: bool,
     /// As a percentage of the default size.
     pub zoom: f32,
     pub updates: bool,
@@ -135,6 +137,7 @@ pub enum Action {
     FetchConfig,
     TabsTop(bool),
     Extended(bool),
+    Notifications(bool),
     /// Smaller (-1), the default (0) or bigger (+1).
     Zoom(i32),
     Updates(bool),
@@ -234,7 +237,7 @@ impl Page {
             keys.push(Row::QuickTerminal);
         }
         y = ui.section(x, y, width, "Keys", &keys, values);
-        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended], values);
+        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Notifications], values);
         let provider = PROVIDERS[values.provider];
         let mut ai = vec![Row::Provider];
         if provider.is("custom") {
@@ -297,6 +300,7 @@ enum Row {
     FetchConfig,
     TabsTop,
     Extended,
+    Notifications,
     Updates,
     Analytics,
     CheckForUpdates,
@@ -415,6 +419,10 @@ impl Ui<'_> {
                 };
                 format!("Under the active tab, what each pane is doing · {keys}")
             }),
+            Row::Notifications => (
+                "Desktop notifications",
+                "When an agent waits or finishes, or a program asks, in a tab you can't see".to_owned(),
+            ),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::Analytics => (
                 "Share anonymous usage data",
@@ -513,6 +521,9 @@ impl Ui<'_> {
                 self.segments(right, control_y, &labels, Some(values.tabs_top as usize), |i| Action::TabsTop(i == 1));
             }
             Row::Extended => self.toggle(right, rect.y, values.extended, Action::Extended(!values.extended)),
+            Row::Notifications => {
+                self.toggle(right, rect.y, values.notifications, Action::Notifications(!values.notifications))
+            }
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::Analytics => self.toggle(right, rect.y, values.analytics, Action::Analytics(!values.analytics)),
             Row::CheckForUpdates => self.button(right, control_y, "Check for Updates", Action::CheckForUpdates),
@@ -818,6 +829,7 @@ mod tests {
             fetches_installed: [true, false, true],
             tabs_top: false,
             extended: false,
+            notifications: true,
             zoom: 100.0,
             updates: true,
             analytics: true,
@@ -850,7 +862,12 @@ mod tests {
         expected.extend((0..=FETCHES.len()).map(Action::Fetch));
         expected.push(Action::FetchConfig);
         expected.extend([Action::EditKeys, Action::QuickTerminal(true)]);
-        expected.extend([Action::TabsTop(false), Action::TabsTop(true), Action::Extended(true)]);
+        expected.extend([
+            Action::TabsTop(false),
+            Action::TabsTop(true),
+            Action::Extended(true),
+            Action::Notifications(false),
+        ]);
         expected.extend((0..PROVIDERS.len()).map(Action::Provider));
         expected.extend(Field::ALL.map(Action::Edit));
         expected.extend([Action::Updates(false), Action::Analytics(false), Action::CheckForUpdates]);

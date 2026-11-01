@@ -504,6 +504,7 @@ impl App {
             device_name: gpu.device_name.clone(),
             blink_epoch: Instant::now(),
             toast: None,
+            notifications: Vec::new(),
             shell,
             composing: false,
         };
@@ -705,6 +706,7 @@ impl App {
                 if moved {
                     self.save_tabs();
                 }
+                self.show_notifications();
                 self.check_install(id);
                 self.dirty = true;
             }

@@ -242,6 +242,7 @@ impl App {
             fetches_installed: self.fetches_installed,
             tabs_top: self.strip == TabStrip::Top,
             extended: self.extended,
+            notifications: crate::notify::enabled(),
             zoom: self.zoom_percent(),
             updates: crate::setting("updates").as_deref() != Some("off"),
             analytics: crate::analytics::enabled(),
@@ -340,6 +341,12 @@ impl App {
                 self.check_for_updates();
             }
             Action::Extended(on) => self.set_extended(on),
+            Action::Notifications(on) => {
+                crate::save_setting("notifications", if on { "on" } else { "off" });
+                if on {
+                    crate::notify::show("Temino", "Notifications are on");
+                }
+            }
             #[cfg(not(target_os = "haiku"))]
             Action::Remote(true) => crate::relay::sign_in(),
             #[cfg(not(target_os = "haiku"))]
