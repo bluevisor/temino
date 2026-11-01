@@ -10,7 +10,8 @@ impl Block {
         size: GridSize,
         listener: Listener,
     ) -> Block {
-        let config = Config { scrolling_history: HISTORY_LINES, ..Config::default() };
+        // Programs may ask for the Kitty keyboard protocol (keys::encode).
+        let config = Config { scrolling_history: HISTORY_LINES, kitty_keyboard: true, ..Config::default() };
         let clears = kind == BlockKind::Command && matches!(command.trim(), "clear" | "reset" | "cls");
         Block {
             id,
