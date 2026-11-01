@@ -48,6 +48,8 @@ pub struct Values {
     pub fetch: usize,
     pub fetches_installed: [bool; FETCHES.len()],
     pub tabs_top: bool,
+    /// The side tab list says, under the active tab, what each pane is doing.
+    pub extended: bool,
     /// As a percentage of the default size.
     pub zoom: f32,
     pub updates: bool,
@@ -153,6 +155,7 @@ pub enum Action {
     /// Open the picked fetch's config file.
     FetchConfig,
     TabsTop(bool),
+    Extended(bool),
     /// Smaller (-1), the default (0) or bigger (+1).
     Zoom(i32),
     Updates(bool),
@@ -236,7 +239,7 @@ impl Page {
             keys.push(Row::QuickTerminal);
         }
         y = ui.section(x, y, width, "Keys", &keys, values);
-        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Headers], values);
+        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Headers], values);
         let fields = Field::ALL.map(Row::Field);
         y = ui.section(x, y, width, "AI", &fields, values);
         y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::CheckForUpdates], values);
@@ -275,6 +278,7 @@ enum Row {
     Fetch,
     FetchConfig,
     TabsTop,
+    Extended,
     Updates,
     CheckForUpdates,
     Headers,
@@ -362,6 +366,13 @@ impl Ui<'_> {
                 .to_owned(),
             ),
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
+            Row::Extended => (
+                "Extended tab list",
+                format!(
+                    "Under the active tab, what each pane is doing · {}+Shift+B",
+                    crate::platform::COMMAND_NAME
+                ),
+            ),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
             Row::Field(Field::LlmUrl) => ("Model server", "OpenAI-compatible, for AI mode and tab recaps".to_owned()),
@@ -430,6 +441,7 @@ impl Ui<'_> {
                 let labels = ["Side".to_owned(), "Top".to_owned()];
                 self.segments(right, control_y, &labels, Some(values.tabs_top as usize), |i| Action::TabsTop(i == 1));
             }
+            Row::Extended => self.toggle(right, rect.y, values.extended, Action::Extended(!values.extended)),
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::CheckForUpdates => self.button(right, control_y, "Check for Updates", Action::CheckForUpdates),
             Row::Headers => {
@@ -665,6 +677,7 @@ mod tests {
             fetch: 1,
             fetches_installed: [true, false, true],
             tabs_top: false,
+            extended: false,
             zoom: 100.0,
             updates: true,
             see_through: true,
@@ -694,6 +707,7 @@ mod tests {
         expected.extend([
             Action::TabsTop(false),
             Action::TabsTop(true),
+            Action::Extended(true),
             Action::Headers(Headers::Off),
             Action::Headers(Headers::Auto),
             Action::Headers(Headers::On),

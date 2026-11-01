@@ -441,7 +441,6 @@ pub struct App {
     close_hits: Vec<(Rect, usize)>,
     new_tab_hit: Rect,
     collapse_hit: Rect,
-    extend_hit: Rect,
     /// The extended sidebar's pane lines and the agent headers, by pane.
     pane_hits: Vec<(Rect, usize, u64)>,
     /// Each agent header, with its extension while open: a click there
@@ -743,7 +742,6 @@ impl App {
             close_hits: Vec::new(),
             new_tab_hit: Rect::default(),
             collapse_hit: Rect::default(),
-            extend_hit: Rect::default(),
             pane_hits: Vec::new(),
             header_hits: Vec::new(),
             header_hover: None,
@@ -2210,6 +2208,7 @@ impl App {
             fetch: fetch::chosen().map_or(0, |index| index + 1),
             fetches_installed: self.fetches_installed,
             tabs_top: self.strip == TabStrip::Top,
+            extended: self.extended,
             zoom: self.zoom_percent(),
             updates: crate::setting("updates").as_deref() != Some("off"),
             see_through: cfg!(target_os = "macos"),
@@ -2284,6 +2283,7 @@ impl App {
             Action::CheckForUpdates => {
                 self.check_for_updates();
             }
+            Action::Extended(on) => self.set_extended(on),
             Action::Headers(headers) => {
                 self.headers = headers;
                 self.ctx.headers = headers != Headers::Off;
@@ -2665,10 +2665,6 @@ impl App {
         if self.tab_area().contains(x, y) {
             if self.collapse_hit.contains(x, y) {
                 self.set_compact(!self.compact);
-                return;
-            }
-            if self.extend_hit.contains(x, y) {
-                self.set_extended(!self.extended);
                 return;
             }
             // Control+click is the secondary click on macOS.
@@ -3199,7 +3195,6 @@ impl App {
         self.more_hits.clear();
         self.new_tab_hit = Rect::default();
         self.collapse_hit = Rect::default();
-        self.extend_hit = Rect::default();
         if !self.tab_list_visible() {
             return;
         }
@@ -3494,23 +3489,6 @@ impl App {
         let baseline = (collapse.y + (collapse.h + ascent * 0.72) / 2.0).round();
         text.draw_text(scene, glyph, collapse.x + (collapse.w - w) / 2.0, baseline, UI, 14.0, theme.text_faint);
         self.collapse_hit = collapse;
-        // Beside it, the extended rows' switch: a row with lines under it.
-        if !self.compact {
-            let extend = Rect::new(collapse.right() + 4.0, collapse.y, 28.0, 26.0);
-            if self.extended {
-                scene.quad(Quad::new(extend, theme.accent.alpha(0.18)).radius(5.0));
-            } else if extend.contains(self.mouse.0, self.mouse.1) {
-                scene.quad(Quad::new(extend, theme.raised).radius(5.0));
-            }
-            let ink = if self.extended { theme.accent } else { theme.text_faint };
-            let (x, y) = (extend.x + 8.0, extend.y + 7.0);
-            scene.quad(Quad::new(Rect::new(x, y, 12.0, 3.0), ink).radius(1.0));
-            for i in 0..2 {
-                let line = Rect::new(x + 3.0, y + 6.0 + i as f32 * 4.0, 9.0, 1.5);
-                scene.quad(Quad::new(line, ink.alpha(0.8)).radius(0.75));
-            }
-            self.extend_hit = extend;
-        }
         scene.pop_clip();
         self.draw_tab_hint(tabs);
     }
