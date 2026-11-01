@@ -25,6 +25,7 @@ mod graphemes;
 mod json;
 mod keys;
 mod llm;
+mod notify;
 mod pane;
 mod picture;
 mod platform;

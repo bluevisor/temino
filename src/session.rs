@@ -443,8 +443,9 @@ enum Segment {
     Done(Option<i32>),
     Cwd(String),
     Continuation,
-    /// A desktop notification (OSC 9, 777 or 99): the program wants you.
-    Notify,
+    /// A desktop notification (OSC 9, 777 or 99): the program wants you,
+    /// with a title if it gave one, and what it says.
+    Notify(Option<String>, String),
     /// A progress report (OSC 9;4): busy or not.
     Progress(bool),
     /// The shell's $PATH, reported at each prompt.
@@ -583,10 +584,23 @@ fn parse_osc(body: &[u8]) -> Option<Segment> {
         "6973" => rest.strip_prefix("path;").map(|path| Segment::Path(path.to_owned())),
         "9" => match rest.strip_prefix("4;") {
             Some(progress) => Some(Segment::Progress(!matches!(progress.split(';').next(), Some("0" | "")))),
-            None => Some(Segment::Notify),
+            None => Some(Segment::Notify(None, rest.to_owned())),
         },
-        "777" if rest.starts_with("notify;") => Some(Segment::Notify),
-        "99" => Some(Segment::Notify),
+        // OSC 777;notify;title;body (urxvt, Ghostty, WezTerm).
+        "777" => {
+            let mut parts = rest.strip_prefix("notify;")?.splitn(2, ';');
+            let title = parts.next().unwrap_or_default();
+            Some(Segment::Notify(Some(title.to_owned()).filter(|t| !t.is_empty()), parts.next().unwrap_or_default().to_owned()))
+        }
+        // Kitty's OSC 99;metadata;payload: p=title makes the payload the title.
+        "99" => {
+            let (meta, payload) = rest.split_once(';').unwrap_or(("", rest));
+            if meta.split(':').any(|kv| kv == "p=title") {
+                Some(Segment::Notify(Some(payload.to_owned()), String::new()))
+            } else {
+                Some(Segment::Notify(None, payload.to_owned()))
+            }
+        }
         _ => None,
     }
 }
@@ -694,7 +708,8 @@ pub enum Notice {
     Title(String),
     Clipboard(String),
     Bell,
-    Notify,
+    /// A program asked for a desktop notification: its title, and body.
+    Notify(Option<String>, String),
     Progress(bool),
     /// A command finished and wants the block list cleared (`clear`).
     Clear,
@@ -1100,7 +1115,7 @@ impl Session {
                         self.continuation_since = Some(Instant::now());
                     }
                 }
-                Segment::Notify => notices.push(Notice::Notify),
+                Segment::Notify(title, body) => notices.push(Notice::Notify(title, body)),
                 Segment::Path(path) => self.path = Some(path),
                 Segment::Progress(busy) => notices.push(Notice::Progress(busy)),
                 Segment::Iterm(body) => self.show_picture(crate::picture::iterm(&body)),
@@ -1552,13 +1567,20 @@ mod tests {
         let kinds: Vec<_> = notices
             .iter()
             .map(|n| match n {
-                Notice::Notify => "notify",
+                Notice::Notify(None, body) if body == "Claude needs you" => "notify",
                 Notice::Progress(true) => "busy",
                 Notice::Progress(false) => "idle",
                 _ => "other",
             })
             .collect();
         assert_eq!(kinds, ["notify", "busy", "idle"]);
+        let mut said = |bytes: &[u8]| match session.feed(bytes, &theme).pop() {
+            Some(Notice::Notify(title, body)) => (title, body),
+            _ => panic!("no notification"),
+        };
+        assert_eq!(said(b"\x1b]777;notify;Build;done in 3s\x07"), (Some("Build".into()), "done in 3s".into()));
+        assert_eq!(said(b"\x1b]99;i=1:d=0;Tests passed\x07"), (None, "Tests passed".into()));
+        assert_eq!(said(b"\x1b]99;i=1:p=title;Deploy\x07"), (Some("Deploy".into()), String::new()));
     }
 
     #[test]

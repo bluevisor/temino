@@ -53,6 +53,8 @@ pub struct Values {
     pub tabs_top: bool,
     /// The side tab list says, under the active tab, what each pane is doing.
     pub extended: bool,
+    /// Desktop notifications for panes out of sight.
+    pub notifications: bool,
     /// As a percentage of the default size.
     pub zoom: f32,
     pub updates: bool,
@@ -165,6 +167,7 @@ pub enum Action {
     FetchConfig,
     TabsTop(bool),
     Extended(bool),
+    Notifications(bool),
     /// Smaller (-1), the default (0) or bigger (+1).
     Zoom(i32),
     Updates(bool),
@@ -252,7 +255,7 @@ impl Page {
             keys.push(Row::QuickTerminal);
         }
         y = ui.section(x, y, width, "Keys", &keys, values);
-        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Headers], values);
+        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Headers, Row::Notifications], values);
         let fields = Field::ALL.map(Row::Field);
         y = ui.section(x, y, width, "AI", &fields, values);
         if values.remote.is_some() {
@@ -298,6 +301,7 @@ enum Row {
     FetchConfig,
     TabsTop,
     Extended,
+    Notifications,
     Updates,
     CheckForUpdates,
     Headers,
@@ -413,6 +417,10 @@ impl Ui<'_> {
                     format!("Under the active tab, what each pane is doing · {command}{shift}+B")
                 },
             ),
+            Row::Notifications => (
+                "Desktop notifications",
+                "When an agent waits or finishes, or a program asks, in a tab you can't see".to_owned(),
+            ),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
             Row::Remote => (
@@ -495,6 +503,9 @@ impl Ui<'_> {
                 self.segments(right, control_y, &labels, Some(values.tabs_top as usize), |i| Action::TabsTop(i == 1));
             }
             Row::Extended => self.toggle(right, rect.y, values.extended, Action::Extended(!values.extended)),
+            Row::Notifications => {
+                self.toggle(right, rect.y, values.notifications, Action::Notifications(!values.notifications))
+            }
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::CheckForUpdates => self.button(right, control_y, "Check for Updates", Action::CheckForUpdates),
             Row::Remote => match values.remote {
@@ -795,6 +806,7 @@ mod tests {
             fetches_installed: [true, false, true],
             tabs_top: false,
             extended: false,
+            notifications: true,
             zoom: 100.0,
             updates: true,
             see_through: true,
@@ -831,6 +843,7 @@ mod tests {
             Action::Headers(Headers::Off),
             Action::Headers(Headers::Auto),
             Action::Headers(Headers::On),
+            Action::Notifications(false),
         ]);
         expected.extend(Field::ALL.map(Action::Edit));
         expected.extend([Action::Updates(false), Action::CheckForUpdates]);
