@@ -17,6 +17,7 @@ mod e2e;
 mod editor;
 mod fetch;
 mod find;
+mod fonts;
 #[cfg(not(target_os = "macos"))]
 mod gpu;
 #[cfg(target_os = "macos")]

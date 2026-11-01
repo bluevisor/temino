@@ -34,6 +34,31 @@ impl App {
             None => self.apply_theme(),
         }
     }
+    /// Settings ▸ Text ▸ Font: the monospaced family `step` places along
+    /// the installed ones, the bundled JetBrains Mono first.
+    pub(super) fn step_font(&mut self, step: i32) {
+        let mut choices: Vec<Option<String>> = vec![None];
+        choices.extend(crate::fonts::families().into_iter().filter(|f| f != "JetBrains Mono").map(Some));
+        let current = crate::setting("font").filter(|f| !f.is_empty());
+        let at = choices.iter().position(|c| *c == current).unwrap_or(0) as i32;
+        let n = choices.len() as i32;
+        // A family that won't load is passed over, in the same direction.
+        for tries in 1..n {
+            let next = &choices[(at + step * tries).rem_euclid(n) as usize];
+            match self.ctx.text.set_mono(next.as_deref()) {
+                Ok(()) => {
+                    crate::save_setting("font", next.as_deref().unwrap_or(""));
+                    for pane in &mut self.panes {
+                        pane.cells_changed(&self.ctx.text);
+                    }
+                    self.relayout();
+                    return;
+                }
+                Err(error) => crate::trace(&format!("font {next:?}: {error}")),
+            }
+        }
+        self.ctx.show_toast("No other monospaced fonts to choose from");
+    }
     /// Settings ▸ Theme: the scheme `step` places along the library; its
     /// own background replaces one picked before.
     pub(super) fn step_theme(&mut self, step: i32) {
@@ -233,6 +258,7 @@ impl App {
             palette: self.palette,
             bindings: self.bindings.list.len(),
             ligatures: self.ctx.text.ligatures,
+            font: crate::setting("font").filter(|f| !f.is_empty()).unwrap_or_else(|| "JetBrains Mono".to_owned()),
             quick_terminal: platform::QUICK_TERMINAL.then(App::quick_terminal_key),
             opacity: self.opacity,
             blur: self.blur,
@@ -279,6 +305,7 @@ impl App {
         match action {
             Action::Background(index) => self.set_background(index),
             Action::Theme(step) => self.step_theme(step),
+            Action::Font(step) => self.step_font(step),
             Action::ThemeList => {
                 self.themes = theme::library(&themes_dir());
                 self.settings.toggle_themes();

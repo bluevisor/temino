@@ -483,6 +483,11 @@ impl App {
         let gpu = Gpu::new()?;
         let mut text = TextSystem::new(BASE_FONT_SIZE);
         text.ligatures = crate::setting("ligatures").as_deref() != Some("off");
+        if let Some(family) = crate::setting("font").filter(|f| !f.is_empty()) {
+            if let Err(error) = text.set_mono(Some(&family)) {
+                crate::store::log(&format!("font {family}: {error}; JetBrains Mono instead"));
+            }
+        }
         crate::trace("app: fonts ready");
         let background = load_background();
         let opacity = load_opacity();
