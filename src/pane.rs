@@ -56,7 +56,8 @@ const AGENT_ECHO: Duration = Duration::from_millis(400);
 const AGENT_ASKED: Duration = Duration::from_secs(10);
 /// A turn shorter than this was a repaint, not work: no green pop for it.
 const AGENT_MIN_TURN: Duration = Duration::from_secs(3);
-/// How long a recap stays up, and at most while its summary is on the way.
+/// How long a recap without a summary stays up, and at most while its
+/// summary is on the way.
 const RECAP_SHOWN: Duration = Duration::from_secs(6);
 const RECAP_WAIT: Duration = Duration::from_secs(20);
 const RECAP_SYSTEM: &str = "Someone is coming back to a terminal tab after a break. From what ran there, \
@@ -281,12 +282,15 @@ impl Recap {
         }
     }
 
-    /// When it goes away: a while after it, or its summary, appeared.
-    fn until(&self) -> Instant {
-        match (self.summary_at, llm::enabled()) {
-            (Some(at), _) => at.max(self.shown) + RECAP_SHOWN,
-            (None, true) => self.shown + RECAP_WAIT,
-            (None, false) => self.shown + RECAP_SHOWN,
+    /// When it goes away on its own: the model's summary stays until you
+    /// type; facts alone go a while after they appeared, or after the
+    /// summary didn't come.
+    fn until(&self) -> Option<Instant> {
+        match (self.summary(), llm::enabled()) {
+            (Some(Some(_)), _) => None,
+            (Some(None), _) => Some(self.summary_at.unwrap_or(self.shown).max(self.shown) + RECAP_SHOWN),
+            (None, true) => Some(self.shown + RECAP_WAIT),
+            (None, false) => Some(self.shown + RECAP_SHOWN),
         }
     }
 }
@@ -951,7 +955,7 @@ impl Pane {
                 recap.summary_at = Some(now);
                 dirty = true;
             }
-            if now >= recap.until() {
+            if recap.until().is_some_and(|until| now >= until) {
                 self.recap = None;
                 dirty = true;
             }
@@ -1003,10 +1007,10 @@ impl Pane {
         if let Some(recap) = &self.recap {
             // Going away, or waiting on its summary.
             let until = recap.until();
-            times.push(Some(match recap.summary_at {
-                None => (Instant::now() + Duration::from_millis(250)).min(until),
+            times.push(match recap.summary_at {
+                None => until.map(|until| (Instant::now() + Duration::from_millis(250)).min(until)),
                 Some(_) => until,
-            }));
+            });
         }
         if (self.scroll - self.scroll_target).abs() > 0.0 {
             times.push(Some(Instant::now() + Duration::from_millis(16)));
