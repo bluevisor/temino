@@ -1531,7 +1531,10 @@ mod tests {
     #[test]
     fn exec_line_reads_alike_in_every_shell() {
         let line = exec_line("/usr/bin/fish").unwrap();
-        assert!(line.starts_with("exec env TEMINO_INTEGRATION="), "{line}");
+        // The assignment is quoted whole when the path has a space (macOS's
+        // "Application Support"): still one word to env.
+        let assignment = line.strip_prefix("exec env ").unwrap_or_default().trim_start_matches('\'');
+        assert!(assignment.starts_with("TEMINO_INTEGRATION="), "{line}");
         assert!(line.ends_with("/usr/bin/fish --login --interactive --init-command 'source $TEMINO_INTEGRATION'"));
         let line = exec_line("/bin/bash").unwrap();
         assert!(line.starts_with("exec env /bin/bash --rcfile "), "{line}");
