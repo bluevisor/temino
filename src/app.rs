@@ -2890,9 +2890,12 @@ impl App {
                 self.close_tab(index);
             } else if let Some(&(r, index)) = self.more_hits.iter().find(|(r, _)| r.contains(x, y)) {
                 self.open_tab_menu(index, r.x, r.bottom() + 4.0);
-            } else if let Some(&(_, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)) {
+            } else if let Some(&(tab, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)) {
                 if secondary {
-                    self.open_tab_menu(index, x, y);
+                    // Same as clicking the tab's ⋯: the menu drops from the button.
+                    let more = self.more_hits.iter().find(|(_, i)| *i == index).map(|&(r, _)| r);
+                    let (mx, my) = more.map_or((tab.right() - 42.0, tab.y + (tab.h + 16.0) / 2.0), |r| (r.x, r.bottom()));
+                    self.open_tab_menu(index, mx, my + 4.0);
                 } else if pressed & buttons::TERTIARY != 0 {
                     self.close_tab(index);
                 } else if clicks == 2 && !on_renamed {
@@ -3783,7 +3786,8 @@ impl App {
     /// A label beside the hovered row: a compact row's title at once, a
     /// full row's folder after a moment, when its title doesn't show it.
     fn draw_tab_hint(&mut self, tabs: &[TabView]) {
-        if !matches!(self.pointer, Pointer::Idle) {
+        // An open menu would sit under the hint.
+        if !matches!(self.pointer, Pointer::Idle) || self.tab_menu.is_some() {
             return;
         }
         let (mx, my) = self.mouse;
