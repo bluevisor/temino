@@ -2393,7 +2393,8 @@ impl App {
             zoom: self.zoom_percent(),
             updates: crate::setting("updates").as_deref() != Some("off"),
             see_through: cfg!(target_os = "macos"),
-            fields: Field::ALL.map(|field| crate::setting(field.key()).unwrap_or_default()),
+            provider: crate::llm::PROVIDERS.iter().position(|&p| p == crate::llm::chosen()).unwrap_or(0),
+            fields: Field::ALL.map(|field| crate::setting(&field.key()).unwrap_or_default()),
             editing: self.field.clone(),
             headers: self.headers,
             #[cfg(not(target_os = "haiku"))]
@@ -2500,8 +2501,13 @@ impl App {
             }
             Action::Edit(field) => {
                 self.finish_field();
-                let text = crate::setting(field.key()).unwrap_or_default();
+                let text = crate::setting(&field.key()).unwrap_or_default();
                 self.field = Some((field, text, true));
+            }
+            Action::Provider(index) => {
+                self.finish_field();
+                crate::save_setting("llm_provider", crate::llm::PROVIDERS[index].id);
+                crate::llm::forget_model();
             }
         }
     }
@@ -2509,8 +2515,8 @@ impl App {
     /// Ends typing in a Settings field, keeping what was typed.
     fn finish_field(&mut self) {
         let Some((field, text, _)) = self.field.take() else { return };
-        crate::save_setting(field.key(), text.trim());
-        if matches!(field, Field::LlmUrl | Field::LlmKey) {
+        crate::save_setting(&field.key(), text.trim());
+        if matches!(field, Field::LlmUrl | Field::LlmKey | Field::LlmModel) {
             crate::llm::forget_model();
         }
         self.dirty = true;

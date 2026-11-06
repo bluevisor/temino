@@ -7,24 +7,112 @@ use std::sync::Mutex;
 
 use crate::json;
 
-/// The development model server, until there's a chosen one: the Orin on
-/// the local network, else over the tailnet. Off both, every call just
-/// fails and nothing is shown.
-const DEV_URLS: [&str; 2] = ["http://orin.local:8080/v1", "http://jetson-orin.heron-minor.ts.net:8080/v1"];
+/// Where the model comes from: the `llm_provider` setting, picked in
+/// Settings. Hosted ones list hundreds of models, so each names a quick,
+/// cheap one rather than taking the first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Provider {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// Empty for Off and Custom (`llm_url`).
+    url: &'static str,
+    /// Empty: the first model the server lists.
+    pub model: &'static str,
+    /// Where its key is kept, and the environment variable read without one.
+    key_setting: &'static str,
+    key_env: &'static str,
+}
+
+const fn provider(id: &'static str, name: &'static str, url: &'static str, model: &'static str) -> Provider {
+    Provider { id, name, url, model, key_setting: "", key_env: "" }
+}
+
+pub const PROVIDERS: [Provider; 5] = [
+    provider("off", "Off", "", ""),
+    Provider {
+        key_setting: "llm_key_vercel",
+        key_env: "AI_GATEWAY_API_KEY",
+        ..provider("vercel", "Vercel", "https://ai-gateway.vercel.sh/v1", "anthropic/claude-haiku-5.5")
+    },
+    Provider {
+        key_setting: "llm_key_openai",
+        key_env: "OPENAI_API_KEY",
+        ..provider("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4.1-mini")
+    },
+    Provider {
+        key_setting: "llm_key_openrouter",
+        key_env: "OPENROUTER_API_KEY",
+        ..provider("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "anthropic/claude-haiku-5.5")
+    },
+    Provider { key_setting: "llm_key", ..provider("custom", "Custom", "", "") },
+];
+
+impl Provider {
+    pub fn is(self, id: &str) -> bool {
+        self.id == id
+    }
+
+    /// Whether it asks for a key: every hosted one, and a custom server may.
+    pub fn takes_key(self) -> bool {
+        !self.key_setting.is_empty()
+    }
+
+    /// The setting its model is kept under: hosted ones each their own,
+    /// since one's model names mean nothing to another.
+    pub fn model_setting(self) -> String {
+        if self.url.is_empty() {
+            "llm_model".to_owned()
+        } else {
+            format!("llm_model_{}", self.id)
+        }
+    }
+
+    /// The setting its key is kept under.
+    pub fn key_setting(self) -> &'static str {
+        if self.takes_key() {
+            self.key_setting
+        } else {
+            "llm_key"
+        }
+    }
+}
+
+/// The provider in use: the `llm_provider` setting; before there was one,
+/// what `llm_url` says (empty or `off`: none, else a custom server).
+pub fn chosen() -> Provider {
+    let by_id = |id: &str| PROVIDERS.iter().copied().find(|p| p.is(id));
+    if let Some(provider) = crate::setting("llm_provider").as_deref().and_then(by_id) {
+        return provider;
+    }
+    match crate::setting("llm_url").unwrap_or_default().as_str() {
+        "" | "off" => by_id("off"),
+        _ => by_id("custom"),
+    }
+    .unwrap()
+}
 
 /// The server that answered and its model, once asked: the first model it
 /// lists, unless one is set.
 static SERVER: Mutex<Option<(String, String)>> = Mutex::new(None);
 
-/// The server's base URL as set: `TEMINO_LLM_URL`, then the `llm_url`
-/// setting; None for the development server. `off` turns the model off.
-fn configured() -> Option<Option<String>> {
-    let url = std::env::var("TEMINO_LLM_URL").ok().or_else(|| crate::setting("llm_url")).filter(|url| !url.is_empty());
-    match url {
-        Some(url) if url == "off" => None,
-        Some(url) => Some(Some(url.trim_end_matches('/').to_owned())),
-        None => Some(None),
-    }
+/// The servers' base URLs, the first that answers wins: `TEMINO_LLM_URL`
+/// (`off` for none), else the provider's, or for Custom the `llm_url`
+/// setting, which may list several (one on the LAN, then over a VPN). None
+/// when off.
+fn configured() -> Option<Vec<String>> {
+    let urls = match std::env::var("TEMINO_LLM_URL").ok().filter(|url| !url.is_empty()) {
+        Some(url) => url,
+        None => match chosen() {
+            provider if provider.is("custom") => crate::setting("llm_url").unwrap_or_default(),
+            provider => provider.url.to_owned(),
+        },
+    };
+    let urls: Vec<String> = urls
+        .split([',', ' '])
+        .filter(|url| !url.is_empty() && *url != "off")
+        .map(|url| url.trim_end_matches('/').to_owned())
+        .collect();
+    (!urls.is_empty()).then_some(urls)
 }
 
 /// Asks for the server and its model again: after its address or key
@@ -37,13 +125,10 @@ pub fn enabled() -> bool {
     configured().is_some()
 }
 
-/// The base URL to call and the model to ask for: the configured server,
-/// or the first development server that answers.
+/// The base URL to call and the model to ask for: the first configured
+/// server that answers.
 fn server() -> Result<(String, String), String> {
-    let urls = match configured().ok_or("no model server")? {
-        Some(url) => vec![url],
-        None => DEV_URLS.map(str::to_owned).to_vec(),
-    };
+    let urls = configured().ok_or("no model server")?;
     let mut cached = SERVER.lock().unwrap();
     if let Some((base, model)) = cached.as_ref().filter(|(base, _)| urls.contains(base)) {
         return Ok((base.clone(), model.clone()));
@@ -63,8 +148,12 @@ fn server() -> Result<(String, String), String> {
 
 fn model(base: &str) -> Result<String, String> {
     let listed = curl(&format!("{base}/models"), None, 3)?;
-    if let Some(model) = crate::setting("llm_model").filter(|model| !model.is_empty()) {
+    let provider = chosen();
+    if let Some(model) = crate::setting(&provider.model_setting()).filter(|model| !model.is_empty()) {
         return Ok(model);
+    }
+    if !provider.model.is_empty() && base == provider.url {
+        return Ok(provider.model.to_owned());
     }
     let list = json::parse(&listed).ok_or("unreadable model list")?;
     let first = list.get("data").and_then(|data| data.array().first()).and_then(|model| model.str_at("id"));
@@ -76,8 +165,11 @@ pub fn complete(system: &str, prompt: &str, max_tokens: u32) -> Result<String, S
     let (base, model) = server()?;
     // Thinking models (Gemma 4, Qwen 3) otherwise spend the whole budget
     // reasoning and answer nothing; llama.cpp's templates take this switch.
+    // Hosted APIs pass it on to models that may refuse it, or refuse it.
+    let hosted = PROVIDERS.iter().any(|p| !p.url.is_empty() && p.url == base);
+    let thinking = if hosted { "" } else { r#""chat_template_kwargs":{"enable_thinking":false},"# };
     let body = format!(
-        r#"{{"model":{},"temperature":0.2,"chat_template_kwargs":{{"enable_thinking":false}},"max_tokens":{max_tokens},"messages":[{{"role":"system","content":{}}},{{"role":"user","content":{}}}]}}"#,
+        r#"{{"model":{},"temperature":0.2,{thinking}"max_tokens":{max_tokens},"messages":[{{"role":"system","content":{}}},{{"role":"user","content":{}}}]}}"#,
         quote(&model),
         quote(system),
         quote(prompt),
@@ -96,9 +188,13 @@ pub fn post_with_key(url: &str, key: &str, body: &str, seconds: u32) -> Result<S
     request(url, Some(body), Some(key), seconds)
 }
 
-/// The model server's key (the `llm_key` setting), if it wants one.
+/// The provider's key, if it wants one: its own setting, else its usual
+/// environment variable.
 fn server_key() -> Option<String> {
-    crate::setting("llm_key").filter(|key| !key.is_empty())
+    let provider = chosen();
+    let set = crate::setting(provider.key_setting()).filter(|key| !key.is_empty());
+    set.or_else(|| std::env::var(provider.key_env).ok().filter(|_| !provider.key_env.is_empty()))
+        .filter(|key| !key.is_empty())
 }
 
 fn curl(url: &str, body: Option<&str>, seconds: u32) -> Result<String, String> {
@@ -159,6 +255,16 @@ pub fn quote(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::json::Value;
+
+    #[test]
+    fn providers_keep_their_keys_apart() {
+        let keys: Vec<_> = PROVIDERS.iter().filter(|p| p.takes_key()).map(|p| p.key_setting()).collect();
+        assert_eq!(keys, ["llm_key_vercel", "llm_key_openai", "llm_key_openrouter", "llm_key"]);
+        // Hosted ones have a server and a model; Custom brings its own.
+        for p in PROVIDERS.iter().filter(|p| p.takes_key() && !p.is("custom")) {
+            assert!(p.url.starts_with("https://") && !p.model.is_empty(), "{}", p.id);
+        }
+    }
 
     #[test]
     fn quoted_text_reads_back() {

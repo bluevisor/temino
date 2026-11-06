@@ -3,6 +3,7 @@
 //! app.rs applies it and remembers it in the settings file.
 
 use crate::fetch::FETCHES;
+use crate::llm::{self, PROVIDERS};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::shells::KINDS;
 use crate::text::{TextSystem, UI, UI_BOLD};
@@ -66,6 +67,8 @@ pub struct Values {
     pub remote_url: String,
     /// The phones controlling this machine now, by name.
     pub remote_phones: Vec<String>,
+    /// Where the model comes from: an index into llm::PROVIDERS.
+    pub provider: usize,
     /// What each text field holds now, in `Field::ALL` order.
     pub fields: [String; Field::ALL.len()],
     /// The field being typed in, its text, and whether that's all selected.
@@ -112,29 +115,32 @@ impl Headers {
     }
 }
 
-/// A setting typed in rather than picked: the model server and the keys.
+/// A setting typed in rather than picked: the model server, model and keys.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
     LlmUrl,
     LlmKey,
+    LlmModel,
     TypesafeKey,
 }
 
 impl Field {
-    pub const ALL: [Field; 3] = [Field::LlmUrl, Field::LlmKey, Field::TypesafeKey];
+    pub const ALL: [Field; 4] = [Field::LlmUrl, Field::LlmKey, Field::LlmModel, Field::TypesafeKey];
 
-    /// Its line in the settings file.
-    pub fn key(self) -> &'static str {
+    /// Its line in the settings file; the model's key and model are the
+    /// chosen provider's own.
+    pub fn key(self) -> String {
         match self {
-            Field::LlmUrl => "llm_url",
-            Field::LlmKey => "llm_key",
-            Field::TypesafeKey => "typesafe_key",
+            Field::LlmUrl => "llm_url".to_owned(),
+            Field::LlmKey => llm::chosen().key_setting().to_owned(),
+            Field::LlmModel => llm::chosen().model_setting(),
+            Field::TypesafeKey => "typesafe_key".to_owned(),
         }
     }
 
     /// Keys show as dots.
     fn secret(self) -> bool {
-        self != Field::LlmUrl
+        matches!(self, Field::LlmKey | Field::TypesafeKey)
     }
 
     fn index(self) -> usize {
@@ -176,6 +182,8 @@ pub enum Action {
     Remote(bool),
     /// Start typing in a text field.
     Edit(Field),
+    /// The model from the provider at this place in llm::PROVIDERS.
+    Provider(usize),
 }
 
 #[derive(Default)]
@@ -253,8 +261,19 @@ impl Page {
         }
         y = ui.section(x, y, width, "Keys", &keys, values);
         y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Headers], values);
-        let fields = Field::ALL.map(Row::Field);
-        y = ui.section(x, y, width, "AI", &fields, values);
+        let provider = PROVIDERS[values.provider];
+        let mut ai = vec![Row::Provider];
+        if provider.is("custom") {
+            ai.push(Row::Field(Field::LlmUrl));
+        }
+        if provider.takes_key() {
+            ai.push(Row::Field(Field::LlmKey));
+        }
+        if !provider.is("off") {
+            ai.push(Row::Field(Field::LlmModel));
+        }
+        ai.push(Row::Field(Field::TypesafeKey));
+        y = ui.section(x, y, width, "AI", &ai, values);
         if values.remote.is_some() {
             let mut rows = vec![Row::Remote];
             rows.extend((0..values.remote_phones.len()).map(Row::Connected));
@@ -306,6 +325,7 @@ enum Row {
     Connected(usize),
     /// What to do on the phone, with a QR code of its web app.
     Phone,
+    Provider,
     Field(Field),
 }
 
@@ -428,8 +448,14 @@ impl Ui<'_> {
                 values.remote_phones[index].as_str(),
                 "Connected · Disconnect takes back its OK: it has to ask again".to_owned(),
             ),
-            Row::Field(Field::LlmUrl) => ("Model server", "OpenAI-compatible, for AI mode and tab recaps".to_owned()),
-            Row::Field(Field::LlmKey) => ("Model server key", "If the server asks for one".to_owned()),
+            Row::Provider => ("Model", "For AI mode and tab recaps".to_owned()),
+            Row::Field(Field::LlmUrl) => ("Server", "OpenAI-compatible; list several with commas".to_owned()),
+            Row::Field(Field::LlmKey) => {
+                let provider = PROVIDERS[values.provider];
+                let detail = if provider.is("custom") { "If the server asks for one" } else { "Kept for this provider only" };
+                ("API key", detail.to_owned())
+            }
+            Row::Field(Field::LlmModel) => ("Model name", "As the provider names it".to_owned()),
             Row::Field(Field::TypesafeKey) => ("TypeSafe key", "Lets Jev decide: command or answer".to_owned()),
         };
         let left = rect.x + 16.0;
@@ -505,6 +531,10 @@ impl Ui<'_> {
                 let labels = Headers::ALL.map(|h| h.label().to_owned());
                 let selected = Headers::ALL.iter().position(|&h| h == values.headers);
                 self.segments(right, control_y, &labels, selected, |i| Action::Headers(Headers::ALL[i]));
+            }
+            Row::Provider => {
+                let labels = PROVIDERS.map(|p| p.name.to_owned());
+                self.segments(right, control_y, &labels, Some(values.provider), Action::Provider);
             }
             Row::Field(field) => self.field(right, control_y, field, values),
             Row::Connected(index) => self.button(right, control_y, "Disconnect", Action::Disconnect(index)),
@@ -610,8 +640,13 @@ impl Ui<'_> {
             }
             None => {
                 let value = &values.fields[field.index()];
+                let provider = PROVIDERS[values.provider];
                 let (text, color) = match (value.is_empty(), field) {
-                    (true, Field::LlmUrl) => ("Orin: orin.local, then tailnet".to_owned(), theme.text_faint),
+                    (true, Field::LlmUrl) => ("http://host:8080/v1".to_owned(), theme.text_faint),
+                    (true, Field::LlmModel) if provider.model.is_empty() => {
+                        ("The first it lists".to_owned(), theme.text_faint)
+                    }
+                    (true, Field::LlmModel) => (provider.model.to_owned(), theme.text_faint),
                     (true, _) => ("Not set".to_owned(), theme.text_faint),
                     (false, _) => (shown(value), theme.text),
                 };
@@ -802,6 +837,8 @@ mod tests {
             remote: None,
             remote_url: String::new(),
             remote_phones: Vec::new(),
+            // Custom shows every AI field.
+            provider: PROVIDERS.len() - 1,
             fields: Default::default(),
             editing: None,
         };
@@ -832,6 +869,7 @@ mod tests {
             Action::Headers(Headers::Auto),
             Action::Headers(Headers::On),
         ]);
+        expected.extend((0..PROVIDERS.len()).map(Action::Provider));
         expected.extend(Field::ALL.map(Action::Edit));
         expected.extend([Action::Updates(false), Action::CheckForUpdates]);
         assert_eq!(actions, expected);
