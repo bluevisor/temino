@@ -208,6 +208,48 @@ impl Editor {
         self.cursor = self.text.len();
     }
 
+    /// Selects the word under the caret (a double click), or the run of
+    /// spaces or of punctuation there.
+    pub fn select_word(&mut self) {
+        let kind = |c: char| {
+            if is_word(c) {
+                0
+            } else if c.is_whitespace() {
+                1
+            } else {
+                2
+            }
+        };
+        // At a line's end the click was on its last character.
+        let Some(c) = self.text[self.cursor..]
+            .chars()
+            .next()
+            .filter(|&c| c != '\n')
+            .or_else(|| self.text[..self.cursor].chars().next_back())
+        else {
+            return;
+        };
+        let k = kind(c);
+        let start = self.text[..self.cursor]
+            .char_indices()
+            .rev()
+            .take_while(|&(_, c)| kind(c) == k && c != '\n')
+            .last()
+            .map_or(self.cursor, |(i, _)| i);
+        let end = self.text[self.cursor..]
+            .char_indices()
+            .find(|&(_, c)| kind(c) != k || c == '\n')
+            .map_or(self.text.len(), |(i, _)| self.cursor + i);
+        self.anchor = Some(start);
+        self.cursor = end;
+    }
+
+    /// Selects the caret's line, without its newline (a triple click).
+    pub fn select_line(&mut self) {
+        self.anchor = Some(self.line_start(self.cursor));
+        self.cursor = self.line_end(self.cursor);
+    }
+
     pub fn line_count(&self) -> usize {
         self.text.split('\n').count()
     }
@@ -374,6 +416,39 @@ pub fn columns(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn double_click_selects_the_word_or_run_under_the_caret() {
+        let mut editor = Editor::new();
+        editor.insert("echo can't  select_this\nnext");
+        let select_at = |editor: &mut Editor, at: usize| {
+            editor.cursor = at;
+            editor.select_word();
+            editor.selected_text().unwrap_or("").to_owned()
+        };
+        assert_eq!(select_at(&mut editor, 0), "echo");
+        assert_eq!(select_at(&mut editor, 2), "echo");
+        assert_eq!(select_at(&mut editor, 5), "can");
+        assert_eq!(select_at(&mut editor, 8), "'");
+        assert_eq!(select_at(&mut editor, 10), "  ");
+        assert_eq!(select_at(&mut editor, 14), "select_this");
+        // at the end of a line: the word before the caret, not the newline
+        assert_eq!(select_at(&mut editor, 23), "select_this");
+        let end = editor.text.len();
+        assert_eq!(select_at(&mut editor, end), "next");
+    }
+
+    #[test]
+    fn triple_click_selects_the_line_without_its_newline() {
+        let mut editor = Editor::new();
+        editor.insert("first line\nsecond");
+        editor.cursor = 3;
+        editor.select_line();
+        assert_eq!(editor.selected_text(), Some("first line"));
+        editor.cursor = editor.text.len() - 1;
+        editor.select_line();
+        assert_eq!(editor.selected_text(), Some("second"));
+    }
 
     #[test]
     fn wide_characters_take_two_columns() {
