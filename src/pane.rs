@@ -189,6 +189,8 @@ pub struct Pane {
     selected: Option<u64>,
     selection: Option<Selection>,
     dragging: bool,
+    /// A press in the command input is dragging its selection.
+    editor_dragging: bool,
     layout: Layout,
     pub bell: Option<Instant>,
     reflow_at: Option<Instant>,
@@ -359,6 +361,7 @@ impl Pane {
             selected: None,
             selection: None,
             dragging: false,
+            editor_dragging: false,
             layout: Layout::default(),
             bell: None,
             reflow_at: None,
@@ -1951,8 +1954,34 @@ impl Pane {
         }
         self.completion = None;
         if self.layout.input.contains(x, y) {
-            self.place_editor_cursor(ctx, x, y, shift);
+            // A click places the caret and starts a drag selection, a double
+            // click selects a word and a triple click the line, like any text
+            // field; Shift+click extends the selection.
             self.selected = None;
+            if !self.session.editor_active() {
+                return;
+            }
+            if shift || button != 0 {
+                self.place_editor_cursor(ctx, x, y, shift);
+                return;
+            }
+            match clicks {
+                n if n >= 2 => {
+                    // the character under the pointer, not the nearest gap
+                    let Some(at) = self.editor_offset_at(ctx, x, y, false) else { return };
+                    self.editor.cursor = at;
+                    if clicks == 2 {
+                        self.editor.select_word();
+                    } else {
+                        self.editor.select_line();
+                    }
+                }
+                _ => {
+                    self.place_editor_cursor(ctx, x, y, false);
+                    self.editor.anchor = Some(self.editor.cursor);
+                    self.editor_dragging = true;
+                }
+            }
             return;
         }
         let hit = self
@@ -2025,6 +2054,14 @@ impl Pane {
                 return cursor;
             }
         }
+        if self.editor_dragging {
+            if buttons != 0 {
+                if let Some(at) = self.editor_offset_at(ctx, x, y, true) {
+                    self.editor.cursor = at;
+                }
+            }
+            return cursor;
+        }
         if !self.dragging || buttons == 0 {
             return cursor;
         }
@@ -2054,6 +2091,7 @@ impl Pane {
     }
 
     pub fn mouse_up(&mut self, ctx: &Ctx, x: f32, y: f32) {
+        self.editor_dragging = false;
         let link = self.link_click.take();
         if let Some((index, _, _)) = self.layout.alt {
             let mode = *self.session.blocks[index].term.mode();
@@ -2160,15 +2198,22 @@ impl Pane {
         }
     }
 
-    fn place_editor_cursor(&mut self, ctx: &Ctx, x: f32, y: f32, extend: bool) {
+    /// The command input's byte offset at (`x`, `y`): the nearest gap
+    /// between characters, or with `gap` false the character under it.
+    fn editor_offset_at(&self, ctx: &Ctx, x: f32, y: f32, gap: bool) -> Option<usize> {
         if !self.session.editor_active() {
-            return;
+            return None;
         }
         let cell = ctx.text.cell;
         let line = ((y - self.layout.editor_y) / cell.height).floor().max(0.0) as usize;
-        let column = ((x - self.layout.editor_x) / cell.width).round().max(0.0) as usize;
+        let column = (x - self.layout.editor_x) / cell.width;
+        let column = if gap { column.round() } else { column.floor() }.max(0.0) as usize;
         let line = line.min(self.editor.line_count() - 1);
-        let to = self.editor.offset(line, column);
+        Some(self.editor.offset(line, column))
+    }
+
+    fn place_editor_cursor(&mut self, ctx: &Ctx, x: f32, y: f32, extend: bool) {
+        let Some(to) = self.editor_offset_at(ctx, x, y, true) else { return };
         if extend {
             self.editor.anchor.get_or_insert(self.editor.cursor);
         } else {
