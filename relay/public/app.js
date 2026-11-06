@@ -305,6 +305,7 @@ function render() {
     const stick = !main.firstElementChild || main.scrollHeight - main.scrollTop - main.clientHeight < 40;
     main.innerHTML = `<div id="screen" class="${p && p.screen && p.screen.mode === "grid" ? "full" : ""}">${screenHtml(p, true)}</div>`;
     fit(main.querySelector("#screen"), p);
+    drawMag(p);
     if (stick) main.scrollTop = main.scrollHeight;
     $("screen").onclick = (e) => {
       const item = e.target.closest("[data-mi]");
@@ -567,6 +568,46 @@ function screenHtml(p, live) {
     <div class="cmd"><span class="pr">${ed.ai ? "✦" : "❯"}</span> ${line}${caret}${ghost}${!ed.text && !ghost && live ? `<span class="hint">Tap to type</span>` : ""}</div>${menu}</div>`;
 }
 
+// ---- the magnifier: the lines around the cursor, large, above the keys
+// A phone fits a whole pane only in small type, so the line being typed on
+// is repeated big. It follows the cursor: the Mac's command line when one
+// is up, else the row the cursor is on in a full-screen program (Claude
+// Code's input box, vim) or a running command, with a row either side.
+const MAG_CONTEXT = 1;
+let magOn = store.get("temino-mag") != null ? store.get("temino-mag") === "1" : !matchMedia("(min-width: 768px)").matches;
+function magHtml(p) {
+  const sc = p && p.screen;
+  if (!sc) return "";
+  const around = (lines, cr, cc) => {
+    if (cr < 0 || cr >= lines.length) return "";
+    const from = Math.max(0, cr - MAG_CONTEXT), to = Math.min(lines.length, cr + MAG_CONTEXT + 1);
+    return `<pre class="term">${lines.slice(from, to).map((r, i) => rowHtml(r, from + i === cr ? cc : null)).join("\n")}</pre>`;
+  };
+  if (sc.mode === "grid") {
+    const [cr, cc] = sc.cursor || [-1, -1];
+    return around(sc.lines, cr, cc);
+  }
+  const ed = sc.editor && shown(p.id, sc.editor);
+  if (ed) {
+    const atEnd = ed.cursor >= Array.from(ed.text).length, ghost = atEnd && ed.suggestion;
+    return `<div class="cmd"><span class="pr">${ed.ai ? "✦" : "❯"}</span> ${rowHtml(colored(ed), ghost ? null : ed.cursor)}`
+      + (ghost ? `<span class="cur"> </span><span class="ghost">${esc(ed.suggestion)}</span>` : "") + `</div>`;
+  }
+  const b = [...sc.blocks].reverse().find((x) => x.running && x.cursor);
+  return b ? around(b.lines, b.cursor[0], b.cursor[1]) : "";
+}
+function drawMag(p) {
+  const mag = $("mag");
+  const html = magOn && level === "pane" ? magHtml(p) : "";
+  mag.hidden = !html;
+  $("magkey").classList.toggle("on", magOn);
+  if (!html) return;
+  mag.innerHTML = html;
+  // Keep the cursor in view, a third in from the left so what follows shows.
+  const cur = mag.querySelector(".cur");
+  if (cur) mag.scrollLeft = Math.max(0, cur.offsetLeft - mag.clientWidth / 3);
+}
+
 // ---- an agent waiting on you, or done
 // A tab whose agent goes from running to waiting or done gets a banner,
 // unless you're already looking at it. Waiting ones answer from here.
@@ -704,7 +745,7 @@ document.addEventListener("gestureend", (e) => {
 
 const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["^C", "c", ["ctrl"]], ["↑", "Up"], ["↓", "Down"], ["←", "Left"], ["→", "Right"],
   ["⌫", "Backspace"], ["⏎", "Enter"], ["^D", "d", ["ctrl"]], ["^R", "r", ["ctrl"]], ["^L", "l", ["ctrl"]]];
-$("keys").innerHTML = `<button id="kb" aria-label="Keyboard">⌨︎</button>` + KEYS.map(([label], i) => `<button data-key="${i}">${label}</button>`).join("");
+$("keys").innerHTML = `<button id="kb" aria-label="Keyboard">⌨︎</button><button id="magkey" aria-label="Magnifier">🔍</button>` + KEYS.map(([label], i) => `<button data-key="${i}">${label}</button>`).join("");
 const key = (k, mods = []) => {
   if (!at) return;
   if (follow || starting) return held.push(() => key(k, mods));
@@ -714,10 +755,12 @@ const key = (k, mods = []) => {
 const held = []; // typed before a new tab arrived: for that tab
 const text = (t) => { if (!at || !t) return; if (follow || starting) return held.push(() => text(t)); predict("text", t); send({ type: "text", window: at.window, pane: at.pane, text: t }); };
 $("keys").onpointerdown = (e) => e.preventDefault(); // keep the keyboard up
+$("mag").onclick = () => $("type").focus();
 $("keys").onclick = (e) => {
   const b = e.target.closest("button");
   if (!b) return;
   if (b.id === "kb") { const t = $("type"); document.activeElement === t ? t.blur() : t.focus(); return; }
+  if (b.id === "magkey") { magOn = !magOn; store.set("temino-mag", magOn ? "1" : "0"); drawMag(currentPane()); return; }
   const [, k, mods] = KEYS[b.dataset.key];
   key(k, mods || []);
 };
