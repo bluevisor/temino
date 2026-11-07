@@ -53,6 +53,8 @@ const AGENT_DONE: u32 = 0x8ccf7e;
 const AGENT_HEADER: f32 = 26.0;
 /// The extended sidebar's line per pane, under each tab's title.
 const SIDEBAR_LINE: f32 = 18.0;
+/// A sidebar row's line under its title: the pane count and the mark.
+const SIDEBAR_META: f32 = 18.0;
 /// How long the pointer rests on a tab before its folder shows beside it.
 const TAB_HINT_DELAY: Duration = Duration::from_millis(600);
 
@@ -81,6 +83,13 @@ const MENU_ROW: f32 = 26.0;
 const REMOTE_EVERY: Duration = Duration::from_millis(150);
 /// The colors a tab can be marked with, from its menu: a row of
 /// SWATCHES, then a row of alternates shown while Option is held.
+/// An unnamed tab's AI title: asked once what its panes do has held still
+/// this long, and at most this often.
+const TITLE_SETTLE: Duration = Duration::from_secs(3);
+const TITLE_EVERY: Duration = Duration::from_secs(20);
+const TITLE_SYSTEM: &str = "Name a terminal tab from what its panes are doing, in 2 to 5 words, \
+the way a person would label it (for example: Temino tab colors, API deploy logs, Haiku VM build). \
+Plain text, no quotes, no final period.";
 const TAB_COLORS: [u32; 12] = [
     0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5, // red … purple
     0xf28fbf, 0x4fc1b0, 0x8f95f2, 0xb7d36a, 0xc9a27e, 0x9aa5b1, // pink, teal, indigo, lime, sand, slate
@@ -285,6 +294,21 @@ impl Divider {
     }
 }
 
+/// An unnamed tab's title, written by the model from what its panes are
+/// doing. Asked again once what they're doing has changed and settled,
+/// and not more often than TITLE_EVERY; the old title stays meanwhile.
+#[derive(Default)]
+struct AiTitle {
+    title: Option<String>,
+    /// What the last ask was written from, and its answer on the way.
+    asked_for: String,
+    asked_at: Option<Instant>,
+    answer: Option<Arc<std::sync::Mutex<Option<Option<String>>>>>,
+    /// What the panes are doing now, and since when.
+    seen: String,
+    seen_at: Option<Instant>,
+}
+
 struct Tab {
     root: Node,
     focus: u64,
@@ -301,6 +325,7 @@ struct Tab {
     mark: Option<Mark>,
     /// When the mark was set, this run; a restored mark doesn't know.
     marked_at: Option<Instant>,
+    ai_title: AiTitle,
 }
 
 /// What a row of the tab menu does.
@@ -455,7 +480,6 @@ pub struct App {
     /// opens or closes it. And the one under the pointer.
     header_hits: Vec<(Rect, u64)>,
     header_hover: Option<u64>,
-    more_hits: Vec<(Rect, usize)>,
     menu_hits: Vec<(Rect, MenuAction)>,
     menu_rect: Rect,
     dividers: Vec<Divider>,
@@ -763,7 +787,6 @@ impl App {
             pane_hits: Vec::new(),
             header_hits: Vec::new(),
             header_hover: None,
-            more_hits: Vec::new(),
             menu_hits: Vec::new(),
             menu_rect: Rect::default(),
             dividers: Vec::new(),
@@ -874,6 +897,7 @@ impl App {
             slide: None,
             mark: None,
             marked_at: None,
+            ai_title: AiTitle::default(),
         });
         self.switch_tab(self.tabs.len() - 1);
         self.save_tabs();
@@ -907,6 +931,7 @@ impl App {
                 slide: None,
                 mark: mark.and_then(Mark::from_code),
                 marked_at: None,
+                ai_title: AiTitle::default(),
             });
             if current == "*" {
                 active = self.tabs.len() - 1;
@@ -2369,6 +2394,7 @@ impl App {
             slide: None,
             mark: None,
             marked_at: None,
+            ai_title: AiTitle::default(),
         });
         self.switch_tab(self.tabs.len() - 1);
     }
@@ -2889,14 +2915,10 @@ impl App {
                 pressed & buttons::SECONDARY != 0 || (cfg!(target_os = "macos") && mods & platform::mods::CONTROL != 0);
             if let Some(&(_, index)) = self.close_hits.iter().find(|(r, _)| r.contains(x, y)) {
                 self.close_tab(index);
-            } else if let Some(&(r, index)) = self.more_hits.iter().find(|(r, _)| r.contains(x, y)) {
-                self.open_tab_menu(index, r.x, r.bottom() + 4.0);
-            } else if let Some(&(tab, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)) {
+            } else if let Some(&(_, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)) {
                 if secondary {
-                    // Same as clicking the tab's ⋯: the menu drops from the button.
-                    let more = self.more_hits.iter().find(|(_, i)| *i == index).map(|&(r, _)| r);
-                    let (mx, my) = more.map_or((tab.right() - 42.0, tab.y + (tab.h + 16.0) / 2.0), |r| (r.x, r.bottom()));
-                    self.open_tab_menu(index, mx, my + 4.0);
+                    // The tab's menu opens at the pointer.
+                    self.open_tab_menu(index, x, y + 2.0);
                 } else if pressed & buttons::TERTIARY != 0 {
                     self.close_tab(index);
                 } else if clicks == 2 && !on_renamed {
@@ -3236,7 +3258,96 @@ impl App {
         tab.name
             .clone()
             .or_else(|| self.viewers.iter().find(|v| v.id == tab.focus).map(|v| v.title.clone()))
+            .or_else(|| tab.ai_title.title.clone())
             .unwrap_or_else(|| self.auto_title(index))
+    }
+
+    /// What the model titles tab `index` from: each terminal pane's folder
+    /// and branch, its agent's task, and what it has been running.
+    fn title_context(&self, index: usize, now: Instant) -> String {
+        let mut leaves = Vec::new();
+        self.tabs[index].root.leaves(&mut leaves);
+        let mut parts = Vec::new();
+        for pane in leaves.iter().filter_map(|id| self.panes.iter().find(|p| p.id == *id)) {
+            let mut part = format!("Pane in {}", ui::short_path(&pane.session.cwd));
+            if let Some(branch) = &pane.session.branch {
+                part += &format!(" (git branch {branch})");
+            }
+            if let Some(info) = pane.agent_info(now) {
+                let name = info.program.map_or("A coding agent", |p| agent::agent_brand(p).0);
+                match (&info.gist, &info.prompt) {
+                    (Some(gist), _) => part += &format!(". {name} is working on: {gist}"),
+                    (None, Some(prompt)) => part += &format!(". {name} was asked: {}", agent::one_line(prompt)),
+                    (None, None) => part += &format!(". {name} runs here"),
+                }
+            } else {
+                let recent = pane.recent_commands();
+                if !recent.is_empty() {
+                    part += &format!(". Recent commands: {}", recent.join(", "));
+                }
+            }
+            parts.push(part);
+        }
+        parts.join("\n")
+    }
+
+    /// Keeps unnamed tabs' AI titles current: takes in answers, and asks
+    /// again for a tab whose panes have settled on something new.
+    fn refresh_titles(&mut self, now: Instant) {
+        if !crate::llm::enabled() {
+            return;
+        }
+        let mut wake: Option<Instant> = None;
+        for index in 0..self.tabs.len() {
+            let tab = &self.tabs[index];
+            if tab.name.is_some() || tab.focus == SETTINGS || self.viewers.iter().any(|v| v.id == tab.focus) {
+                continue;
+            }
+            let context = self.title_context(index, now);
+            let title = &mut self.tabs[index].ai_title;
+            if let Some(answer) = &title.answer {
+                let Some(answer) = answer.lock().unwrap().clone() else {
+                    wake = Some(now + Duration::from_millis(250));
+                    continue;
+                };
+                title.answer = None;
+                if let Some(answer) = answer {
+                    title.title = Some(answer);
+                    self.dirty = true;
+                }
+            }
+            if context.is_empty() || context == title.asked_for {
+                continue;
+            }
+            if context != title.seen {
+                title.seen = context.clone();
+                title.seen_at = Some(now);
+            }
+            let due = [title.seen_at.map(|at| at + TITLE_SETTLE), title.asked_at.map(|at| at + TITLE_EVERY)]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(now);
+            if now < due {
+                wake = Some(wake.map_or(due, |w| w.min(due)));
+                continue;
+            }
+            let answer = Arc::new(std::sync::Mutex::new(None));
+            let theirs = answer.clone();
+            let prompt = context.clone();
+            let _ = std::thread::Builder::new().name("tab title".into()).spawn(move || {
+                let reply = crate::llm::complete(TITLE_SYSTEM, &prompt, 30).ok();
+                let reply = reply.map(|r| agent::one_line(&r).trim_matches(['"', '.', ' ']).to_owned());
+                *theirs.lock().unwrap() = Some(reply.filter(|r| !r.is_empty() && r.chars().count() <= 60));
+            });
+            title.asked_for = context;
+            title.asked_at = Some(now);
+            title.answer = Some(answer);
+            wake = Some(wake.map_or(now + Duration::from_millis(250), |w| w.min(now + Duration::from_millis(250))));
+        }
+        if let Some(at) = wake {
+            self.animation_at = Some(self.animation_at.map_or(at, |a| a.min(at)));
+        }
     }
 
     /// A tab's title when it isn't named: its panes' folders, in layout
@@ -3441,13 +3552,13 @@ impl App {
     fn draw_tab_bar(&mut self, agents: &[Option<AgentState>]) {
         self.tab_hits.clear();
         self.close_hits.clear();
-        self.more_hits.clear();
         self.new_tab_hit = Rect::default();
         self.collapse_hit = Rect::default();
         if !self.tab_list_visible() {
             return;
         }
         let now = Instant::now();
+        self.refresh_titles(now);
         let extended = self.extended && !self.compact && self.strip == TabStrip::Left;
         let tabs: Vec<TabView> = (0..self.tabs.len())
             .map(|index| {
@@ -3540,16 +3651,16 @@ impl App {
         lines
     }
 
-    /// One tab's row: number, title (or the rename field), the
-    /// ⋯ menu button while hovered or active, an optional badge, and ×;
-    /// records the hit areas.
+    /// One tab's row: number, title (or the rename field), an optional
+    /// badge, and × while hovered (its menu is a right-click); records the
+    /// hit areas.
     fn draw_tab(&mut self, index: usize, tab: &TabView, rect: Rect, badge: Option<String>) {
         let current = index == self.active;
         let hovered = self.hover_tab == Some(index);
         let left = self.strip == TabStrip::Left;
         let (font, number) = if left { (SIDEBAR_FONT, 22.0) } else { (12.0, 18.0) };
         let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
-        let Self { scene, ctx, tab_hits, close_hits, more_hits, .. } = self;
+        let Self { scene, ctx, tab_hits, close_hits, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         let ascent = text.ui_ascent(font);
         let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
@@ -3560,16 +3671,8 @@ impl App {
             x += number + 8.0;
         }
         let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
-        let mut right = close.x - 4.0;
-        if (hovered || current) && tab.editing.is_none() {
-            let more = Rect::new(close.x - 20.0, close.y, 18.0, 16.0);
-            for i in 0..3 {
-                let dot = Rect::new(more.x + 4.0 + i as f32 * 4.0, more.y + 7.0, 2.4, 2.4);
-                scene.quad(Quad::new(dot, theme.text_faint).radius(1.2));
-            }
-            more_hits.push((more, index));
-            right = more.x - 2.0;
-        }
+        let closable = hovered && tab.editing.is_none();
+        let mut right = if closable { close.x - 4.0 } else { rect.right() - 8.0 };
         if let Some(label) = badge {
             // A small badge with the pane count.
             let w = text.measure(&label, UI, 10.0) + 10.0;
@@ -3578,7 +3681,8 @@ impl App {
             text.draw_text(scene, &label, badge.x + 5.0, badge.y + 12.0, UI, 10.0, theme.text_dim);
             right = badge.x - 6.0;
         }
-        if let Some(mark) = tab.mark {
+        // In the sidebar the mark goes under the title (draw_tab_meta).
+        if let Some(mark) = tab.mark.filter(|_| !left) {
             let ink = mark.color(theme);
             let w = text.measure(mark.label(), UI_BOLD, 10.0) + 12.0;
             let chip = Rect::new(right - w, rect.y + (rect.h - 16.0) / 2.0, w, 16.0);
@@ -3611,12 +3715,15 @@ impl App {
             } else {
                 theme.text_dim
             };
-            text.draw_text(scene, &tab.title, x, baseline, UI, font, color);
+            let shown = text.elide(&tab.title, UI, font, (right - x).max(0.0));
+            text.draw_text(scene, &shown, x, baseline, UI, font, color);
             scene.pop_clip();
         }
-        text.draw_text(scene, "×", close.x + 4.0, baseline, UI, font + 1.0, theme.text_faint);
         tab_hits.push((rect, index));
-        close_hits.push((close, index));
+        if closable {
+            text.draw_text(scene, "×", close.x + 4.0, baseline, UI, font + 1.0, theme.text_faint);
+            close_hits.push((close, index));
+        }
     }
 
     /// Where tab `index` draws, given the `rect` it belongs at: on its way
@@ -3695,8 +3802,15 @@ impl App {
                 y += SIDEBAR_ROW + 4.0;
                 continue;
             }
+            // The pane count (where the pane lines don't show the panes)
+            // and the mark go on a line under the title; the title moves
+            // up to make room.
+            let count = (tab.panes > 1 && tab.lines.is_empty()).then(|| format!("{} panes", tab.panes));
+            let meta = if count.is_some() || tab.mark.is_some() { SIDEBAR_META } else { 0.0 };
+            let rect = Rect::new(rect.x, rect.y, rect.w, rect.h - meta / 2.0);
             let extra = if tab.lines.is_empty() { 0.0 } else { tab.lines.len() as f32 * SIDEBAR_LINE + 6.0 };
-            let row = Rect::new(rect.x, rect.y, rect.w, rect.h + extra);
+            let under = if meta > 0.0 { meta - 2.0 } else { 0.0 };
+            let row = Rect::new(rect.x, rect.y, rect.w, rect.h + under + extra);
             draw_tab_background(
                 &mut self.scene,
                 &self.ctx.theme,
@@ -3705,12 +3819,15 @@ impl App {
                 index == self.active,
                 dragged == Some(index),
             );
-            let badge = (tab.panes > 1 && tab.lines.is_empty()).then(|| format!("{}", tab.panes));
-            self.draw_tab(index, tab, rect, badge);
+            self.draw_tab(index, tab, rect, None);
             if let Some(hit) = self.tab_hits.last_mut() {
                 hit.0 = Rect::new(place.x, place.y, row.w, row.h);
             }
-            self.draw_pane_lines(index, tab, Rect::new(rect.x, rect.bottom() - 4.0, rect.w, extra));
+            let below = rect.bottom() - 6.0;
+            if meta > 0.0 {
+                self.draw_tab_meta(index, tab, count.as_deref(), Rect::new(rect.x, below, rect.w, meta));
+            }
+            self.draw_pane_lines(index, tab, Rect::new(rect.x, below + meta + 2.0, rect.w, extra));
             y += row.h + 4.0;
         }
         let Self { scene, ctx, new_tab_hit, .. } = self;
@@ -3740,6 +3857,29 @@ impl App {
         self.collapse_hit = collapse;
         scene.pop_clip();
         self.draw_tab_hint(tabs);
+    }
+
+    /// A sidebar row's line under its title, lined up with it: how many
+    /// panes, and the mark's chip.
+    fn draw_tab_meta(&mut self, index: usize, tab: &TabView, count: Option<&str>, area: Rect) {
+        let Self { scene, ctx, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        let numbered = index < 9 || tab.agent.is_some();
+        let mut x = area.x + if numbered { 10.0 + 22.0 + 8.0 } else { 10.0 };
+        let cy = area.y + area.h / 2.0;
+        if let Some(count) = count {
+            let baseline = (cy + text.ui_ascent(11.0) * 0.36).round();
+            text.draw_text(scene, count, x, baseline, UI, 11.0, theme.text_faint);
+            x += text.measure(count, UI, 11.0) + 8.0;
+        }
+        if let Some(mark) = tab.mark {
+            let ink = mark.color(theme);
+            let w = text.measure(mark.label(), UI_BOLD, 10.0) + 12.0;
+            let chip = Rect::new(x, cy - 7.5, w, 15.0);
+            scene.quad(Quad::new(chip, ink.alpha(0.16)).radius(7.5).border(1.0, ink.alpha(0.45)));
+            let baseline = (cy + text.ui_ascent(10.0) * 0.36).round();
+            text.draw_text(scene, mark.label(), chip.x + 6.0, baseline, UI_BOLD, 10.0, ink);
+        }
     }
 
     /// The extended sidebar's lines under a tab's title, one per pane:
