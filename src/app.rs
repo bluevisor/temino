@@ -343,15 +343,30 @@ enum MenuAction {
     SplitRight,
     SplitDown,
     ClosePane,
+    // The account menu, from the sidebar's foot.
+    Account,
+    Settings,
+    SignIn,
+    SignOut,
 }
 
-/// A tab's menu, or with `pane` the focused pane's (a right click in
-/// it), open at a point.
+/// Which menu is open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuKind {
+    Tab,
+    /// The focused pane's (a right click in it).
+    Pane,
+    /// The account button's, at the sidebar's foot: who's signed in,
+    /// Settings, signing in or out. It opens upward from the point.
+    Account,
+}
+
+/// A tab's menu, the focused pane's or the account's, open at a point.
 struct TabMenu {
     tab: usize,
     x: f32,
     y: f32,
-    pane: bool,
+    kind: MenuKind,
 }
 
 /// The release the update check found, and its card.
@@ -474,6 +489,8 @@ pub struct App {
     close_hits: Vec<(Rect, usize)>,
     new_tab_hit: Rect,
     collapse_hit: Rect,
+    /// The account button at the sidebar's foot.
+    account_hit: Rect,
     /// The extended sidebar's pane lines and the agent headers, by pane.
     pane_hits: Vec<(Rect, usize, u64)>,
     /// Each agent header, with its extension while open: a click there
@@ -784,6 +801,7 @@ impl App {
             close_hits: Vec::new(),
             new_tab_hit: Rect::default(),
             collapse_hit: Rect::default(),
+            account_hit: Rect::default(),
             pane_hits: Vec::new(),
             header_hits: Vec::new(),
             header_hover: None,
@@ -1743,6 +1761,13 @@ impl App {
         }
         if self.recap_test.is_some_and(|at| now >= at) {
             self.recap_test = None;
+            // With TEMINO_MENU_TEST=account, the account menu instead.
+            if std::env::var("TEMINO_MENU_TEST").is_ok_and(|menu| menu == "account") && self.account_hit.w > 0.0 {
+                let hit = self.account_hit;
+                self.tab_menu = Some(TabMenu { tab: self.active, x: hit.x, y: hit.y - 6.0, kind: MenuKind::Account });
+                self.dirty = true;
+                return;
+            }
             if let Some(id) = self.focused_id() {
                 // With TEMINO_FIND_TEST=<query>, the search bar instead.
                 let find = std::env::var("TEMINO_FIND_TEST").ok();
@@ -2768,7 +2793,7 @@ impl App {
     fn open_tab_menu(&mut self, tab: usize, x: f32, y: f32) {
         self.finish_rename();
         self.switch_tab(tab);
-        self.tab_menu = Some(TabMenu { tab, x, y, pane: false });
+        self.tab_menu = Some(TabMenu { tab, x, y, kind: MenuKind::Tab });
     }
 
     fn menu_action(&mut self, tab: usize, action: MenuAction) {
@@ -2795,6 +2820,21 @@ impl App {
                     self.close_pane(id);
                 }
             }
+            MenuAction::Settings => self.open_settings(),
+            MenuAction::Account => {
+                self.open_settings();
+                self.settings.to_remote = true;
+                self.dirty = true;
+            }
+            #[cfg(not(target_os = "haiku"))]
+            MenuAction::SignIn => crate::relay::sign_in(),
+            #[cfg(not(target_os = "haiku"))]
+            MenuAction::SignOut => {
+                crate::relay::sign_out();
+                self.dirty = true;
+            }
+            #[cfg(target_os = "haiku")]
+            MenuAction::SignIn | MenuAction::SignOut => {}
             MenuAction::Copy | MenuAction::Paste | MenuAction::Clear => {
                 let Some(id) = self.focused_id() else { return };
                 let Self { panes, ctx, .. } = self;
@@ -2910,6 +2950,12 @@ impl App {
                 self.set_compact(!self.compact);
                 return;
             }
+            if self.account_hit.contains(x, y) {
+                let hit = self.account_hit;
+                self.tab_menu = Some(TabMenu { tab: self.active, x: hit.x, y: hit.y - 6.0, kind: MenuKind::Account });
+                self.dirty = true;
+                return;
+            }
             // Control+click is the secondary click on macOS.
             let secondary =
                 pressed & buttons::SECONDARY != 0 || (cfg!(target_os = "macos") && mods & platform::mods::CONTROL != 0);
@@ -2955,7 +3001,7 @@ impl App {
         let reports = self.panes.iter().find(|p| p.id == id).is_some_and(|p| p.reports_mouse());
         if secondary && !(reports && mods & platform::mods::SHIFT == 0) {
             self.finish_rename();
-            self.tab_menu = Some(TabMenu { tab: self.active, x, y, pane: true });
+            self.tab_menu = Some(TabMenu { tab: self.active, x, y, kind: MenuKind::Pane });
             return;
         }
         self.pointer = Pointer::Pane(id);
@@ -3190,6 +3236,9 @@ impl App {
                 let values = self.settings_values();
                 let Self { settings, scene, ctx, mouse, .. } = self;
                 settings.draw(scene, &mut ctx.text, &ctx.theme, rect, &values, *mouse);
+                if std::mem::take(&mut settings.redraw) {
+                    self.dirty = true;
+                }
             }
         }
         for (id, _) in &visible {
@@ -3526,27 +3575,40 @@ impl App {
         }
     }
 
-    /// The title bar over the window's top, where the system's would be:
-    /// the sidebar's color across, the title centered. AppKit keeps the
-    /// traffic lights and the dragging; this is only the look.
+    /// The title bar over the window's top, where the system's would be.
+    /// With the full sidebar, as in cmux, the sidebar runs from the very
+    /// top (the traffic lights sit in it) and the bar spans only the right
+    /// side, on its background, the title centered over it. Otherwise
+    /// (compact, too narrow for the lights; the strip; no list) it goes
+    /// across in the sidebar's color. AppKit keeps the traffic lights and
+    /// the dragging; this is only the look.
     fn draw_titlebar(&mut self) {
         let top = self.top();
         if top <= 0.0 {
             return;
         }
-        let bar = Rect::new(0.0, 0.0, self.width, top);
+        let side = self.tab_area();
+        let column = self.strip == TabStrip::Left && !self.compact && side.w > 0.0;
+        let bar = if column { Rect::new(side.w, 0.0, self.width - side.w, top) } else { Rect::new(0.0, 0.0, self.width, top) };
         let Self { scene, ctx, title, .. } = self;
         let Ctx { text, theme, .. } = ctx;
-        scene.fill(bar, theme.panel(SURFACE_LIFT / 2.0));
-        scene.fill(Rect::new(0.0, top - 1.0, bar.w, 1.0), theme.divider);
-        // Clear of the traffic lights on the left, centered in what's left.
-        // Fixed in points, like the bar: zoom leaves it alone.
+        if column {
+            scene.fill(Rect::new(0.0, 0.0, side.w, top), theme.panel(SURFACE_LIFT / 2.0));
+            scene.fill(Rect::new(side.w - 1.0, 0.0, 1.0, top), theme.divider);
+            scene.fill(bar, theme.background);
+        } else {
+            scene.fill(bar, theme.panel(SURFACE_LIFT / 2.0));
+        }
+        scene.fill(Rect::new(bar.x, top - 1.0, bar.w, 1.0), theme.divider);
+        // Clear of the traffic lights (when they're over the bar), centered
+        // in what's left. Fixed in points, like the bar: zoom leaves it alone.
         let font = 18.0 / self.zoom;
-        let room = (bar.w - 2.0 * 84.0 / self.zoom).max(0.0);
+        let lights = if column { 16.0 } else { 84.0 / self.zoom };
+        let room = (bar.w - 2.0 * lights).max(0.0);
         let shown = text.elide(title, UI_BOLD, font, room);
         let w = text.measure(&shown, UI_BOLD, font);
         let baseline = (top / 2.0 + text.ui_ascent(font) * 0.36).round();
-        text.draw_text(scene, &shown, (bar.w - w) / 2.0, baseline, UI_BOLD, font, theme.text_dim);
+        text.draw_text(scene, &shown, bar.x + (bar.w - w) / 2.0, baseline, UI_BOLD, font, theme.text_dim);
     }
 
     fn draw_tab_bar(&mut self, agents: &[Option<AgentState>]) {
@@ -3554,6 +3616,7 @@ impl App {
         self.close_hits.clear();
         self.new_tab_hit = Rect::default();
         self.collapse_hit = Rect::default();
+        self.account_hit = Rect::default();
         if !self.tab_list_visible() {
             return;
         }
@@ -3830,6 +3893,7 @@ impl App {
             self.draw_pane_lines(index, tab, Rect::new(rect.x, below + meta + 2.0, rect.w, extra));
             y += row.h + 4.0;
         }
+        let menu_open = self.tab_menu.as_ref().is_some_and(|menu| menu.kind == MenuKind::Account);
         let Self { scene, ctx, new_tab_hit, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         let plus = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
@@ -3843,10 +3907,22 @@ impl App {
             text.draw_text(scene, &label, plus.x + 16.0, baseline, UI, SIDEBAR_FONT, theme.text_faint);
         }
         *new_tab_hit = plus;
-        // Collapse to compact, or expand back, from the bottom corner.
-        let collapse = Rect::new(6.0, area.bottom() - 34.0, 28.0, 26.0);
-        let collapse =
-            if self.compact { Rect::new((area.w - 1.0 - 28.0) / 2.0, collapse.y, 28.0, 26.0) } else { collapse };
+        // The foot: the account button in the corner, and the button
+        // that collapses to compact at the other end (above it when
+        // compact, as it expands back).
+        let foot = area.bottom() - 34.0;
+        let (account, collapse) = if self.compact {
+            let x = (area.w - 1.0 - 28.0) / 2.0;
+            (Rect::new(x, foot, 28.0, 26.0), Rect::new(x, foot - 30.0, 28.0, 26.0))
+        } else {
+            (Rect::new(6.0, foot, 28.0, 26.0), Rect::new(area.w - 1.0 - 6.0 - 28.0, foot, 28.0, 26.0))
+        };
+        if account.contains(self.mouse.0, self.mouse.1) || menu_open {
+            scene.quad(Quad::new(account, theme.raised).radius(5.0));
+        }
+        let face = Rect::new(account.x + 4.0, account.y + 3.0, 20.0, 20.0);
+        draw_account_face(scene, text, theme, face, account_info().as_ref());
+        self.account_hit = account;
         if collapse.contains(self.mouse.0, self.mouse.1) {
             scene.quad(Quad::new(collapse, theme.raised).radius(5.0));
         }
@@ -3973,8 +4049,10 @@ impl App {
         self.menu_hits.clear();
         self.menu_rect = Rect::default();
         let Some(menu) = &self.tab_menu else { return };
-        if menu.pane {
-            return self.draw_pane_menu();
+        match menu.kind {
+            MenuKind::Pane => return self.draw_pane_menu(),
+            MenuKind::Account => return self.draw_account_menu(),
+            MenuKind::Tab => {}
         }
         let Some(tab) = self.tabs.get(menu.tab) else { return };
         let selected = tab.color;
@@ -4067,6 +4145,78 @@ impl App {
     }
 
     /// The focused pane's menu: Copy, Paste, Clear, the splits, Close.
+    /// The account menu, opening up from its button: who's signed in (to
+    /// Settings ▸ Remote Control), Settings, and signing in or out.
+    fn draw_account_menu(&mut self) {
+        let Some(menu) = &self.tab_menu else { return };
+        let who = account_info();
+        let cmd = platform::COMMAND_NAME;
+        let remote = cfg!(not(target_os = "haiku"));
+        let profile = 46.0;
+        let mut h = 12.0 + MENU_ROW;
+        if who.is_some() {
+            h += profile + 9.0 + 9.0 + MENU_ROW;
+        } else if remote {
+            h += MENU_ROW;
+        }
+        let x = menu.x.min(self.width - MENU_WIDTH - 8.0).max(4.0);
+        let y = (menu.y - h).max(4.0);
+        let rect = Rect::new(x, y, MENU_WIDTH, h);
+        let (mx, my) = self.mouse;
+        let Self { scene, ctx, menu_hits, menu_rect, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        scene.set_layer(LAYER_OVERLAY);
+        scene.shadow(rect, Color::hex(0x000000).alpha(0.5), 8.0, 10.0);
+        scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
+        let ascent = text.ui_ascent(12.0);
+        let mut row_y = y + 6.0;
+        type Hits = Vec<(Rect, MenuAction)>;
+        let item = |scene: &mut Scene, text: &mut TextSystem, hits: &mut Hits, label: &str, shortcut: &str, action, row_y| {
+            let row = Rect::new(x + 5.0, row_y, MENU_WIDTH - 10.0, MENU_ROW);
+            if row.contains(mx, my) {
+                scene.quad(Quad::new(row, theme.accent.alpha(0.22)).radius(5.0));
+            }
+            let baseline = (row.y + (row.h + ascent * 0.72) / 2.0).round();
+            text.draw_text(scene, label, row.x + 9.0, baseline, UI, 12.0, theme.text);
+            let w = text.measure(shortcut, UI, 11.0);
+            text.draw_text(scene, shortcut, row.right() - 9.0 - w, baseline, UI, 11.0, theme.text_faint);
+            hits.push((row, action));
+        };
+        let divider = |scene: &mut Scene, row_y: f32| {
+            scene.fill(Rect::new(x + 10.0, row_y + 4.0, MENU_WIDTH - 20.0, 1.0), theme.divider);
+        };
+        if let Some(who) = &who {
+            // Who: their photo and name; it opens Settings at Remote Control.
+            let row = Rect::new(x + 5.0, row_y, MENU_WIDTH - 10.0, profile);
+            if row.contains(mx, my) {
+                scene.quad(Quad::new(row, theme.accent.alpha(0.22)).radius(5.0));
+            }
+            let face = Rect::new(row.x + 8.0, row.y + (profile - 28.0) / 2.0, 28.0, 28.0);
+            draw_account_face(scene, text, theme, face, Some(who));
+            let tx = face.right() + 10.0;
+            let room = (row.right() - 8.0 - tx).max(0.0);
+            let name = text.elide(&who.0, UI_BOLD, 12.5, room);
+            text.draw_text(scene, &name, tx, row.y + 20.0, UI_BOLD, 12.5, theme.text);
+            text.draw_text(scene, "Remote Control", tx, row.y + 35.0, UI, 11.0, theme.text_faint);
+            menu_hits.push((row, MenuAction::Account));
+            row_y += profile + 4.0;
+            divider(scene, row_y);
+            row_y += 9.0;
+        } else if remote {
+            item(scene, text, menu_hits, "Sign In…", "", MenuAction::SignIn, row_y);
+            row_y += MENU_ROW;
+        }
+        item(scene, text, menu_hits, "Settings…", &format!("{cmd},"), MenuAction::Settings, row_y);
+        row_y += MENU_ROW;
+        if who.is_some() {
+            divider(scene, row_y);
+            row_y += 9.0;
+            item(scene, text, menu_hits, "Sign Out", "", MenuAction::SignOut, row_y);
+        }
+        scene.set_layer(LAYER_CONTENT);
+        *menu_rect = rect;
+    }
+
     fn draw_pane_menu(&mut self) {
         let Some(menu) = &self.tab_menu else { return };
         let cmd = platform::COMMAND_NAME;
@@ -4133,10 +4283,10 @@ impl App {
         let pill = if !sidebar {
             None
         } else if *compact {
-            Some(Rect::new((area.w - 1.0 - 28.0) / 2.0, area.bottom() - 64.0, 28.0, 26.0))
+            Some(Rect::new((area.w - 1.0 - 28.0) / 2.0, area.bottom() - 94.0, 28.0, 26.0))
         } else {
             let label = "Update Available…";
-            let w = (text.measure(label, UI_BOLD, 12.0) + 38.0).min(area.w - 48.0);
+            let w = (text.measure(label, UI_BOLD, 12.0) + 38.0).min(area.w - 48.0 - 34.0);
             Some(Rect::new(40.0, area.bottom() - 34.0, w, 26.0))
         };
         if let Some(pill) = pill {
@@ -4342,6 +4492,62 @@ fn recap_idle() -> Duration {
 
 fn tabs_path() -> String {
     format!("{}/tabs", crate::settings_dir())
+}
+
+/// Who's signed in to Remote Control here: their first name, and their
+/// photo where the sign-in gave one (Google's does, Apple's doesn't).
+fn account_info() -> Option<(String, Option<String>)> {
+    #[cfg(not(target_os = "haiku"))]
+    if crate::relay::signed_in() {
+        let name = crate::setting("account_name").filter(|n| !n.is_empty()).unwrap_or_else(|| "Signed in".to_owned());
+        let picture = crate::setting("account_picture").filter(|p| p.starts_with("https://"));
+        if let Some(picture) = &picture {
+            crate::avatar::fetch(picture);
+        }
+        return Some((name, picture));
+    }
+    None
+}
+
+/// The account's face in `rect` (a square): the photo, else the name's
+/// initial on the accent; signed out, the outline of a person.
+fn draw_account_face(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    rect: Rect,
+    who: Option<&(String, Option<String>)>,
+) {
+    let size = rect.w;
+    let Some((name, picture)) = who else {
+        scene.quad(Quad::new(rect, Color::hex(0x000000).alpha(0.0)).radius(size / 2.0).border(1.5, theme.text_faint));
+        let head = size * 0.32;
+        scene.quad(
+            Quad::new(Rect::new(rect.x + (size - head) / 2.0, rect.y + size * 0.2, head, head), theme.text_faint)
+                .radius(head / 2.0),
+        );
+        let body = Rect::new(rect.x + size * 0.24, rect.y + size * 0.58, size * 0.52, size * 0.26);
+        scene.quad(Quad::new(body, theme.text_faint).radius(size * 0.13));
+        return;
+    };
+    #[cfg(not(target_os = "haiku"))]
+    let photo = picture.as_deref().and_then(crate::avatar::get);
+    #[cfg(target_os = "haiku")]
+    let photo: Option<Arc<Picture>> = {
+        let _ = picture;
+        None
+    };
+    match photo {
+        Some(photo) => text.draw_picture(scene, &photo, rect),
+        None => {
+            scene.quad(Quad::new(rect, theme.accent).radius(size / 2.0));
+            let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+            let font = size * 0.55;
+            let w = text.measure(&initial, UI_BOLD, font);
+            let baseline = (rect.y + (rect.h + text.ui_ascent(font) * 0.72) / 2.0).round();
+            text.draw_text(scene, &initial, rect.x + (rect.w - w) / 2.0, baseline, UI_BOLD, font, Color::hex(0x0b0d12));
+        }
+    }
 }
 
 /// A tab's background, in the sidebar or the strip: a tab with a color is

@@ -191,6 +191,10 @@ pub struct Page {
     pub themes_open: bool,
     list: Rect,
     list_scroll: f32,
+    /// Asked to scroll to Remote Control (from the account menu); set
+    /// again once drawn there, for one more frame.
+    pub to_remote: bool,
+    pub redraw: bool,
 }
 
 impl Page {
@@ -255,6 +259,7 @@ impl Page {
         y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Headers], values);
         let fields = Field::ALL.map(Row::Field);
         y = ui.section(x, y, width, "AI", &fields, values);
+        let remote_at = y - top;
         if values.remote.is_some() {
             let mut rows = vec![Row::Remote];
             rows.extend((0..values.remote_phones.len()).map(Row::Connected));
@@ -277,6 +282,11 @@ impl Page {
 
         self.content_height = y + self.scroll - rect.y + PAD;
         scene.pop_clip();
+        if std::mem::take(&mut self.to_remote) {
+            let most = (self.content_height - self.view_height).max(0.0);
+            self.scroll = remote_at.clamp(0.0, most);
+            self.redraw = true;
+        }
     }
 }
 

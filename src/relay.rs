@@ -186,6 +186,8 @@ fn set_connected(now: Vec<(String, String)>) {
 /// Signs this machine out here; the relay forgets it on the next connect.
 pub fn sign_out() {
     crate::save_setting("relay_token", "");
+    crate::save_setting("account_name", "");
+    crate::save_setting("account_picture", "");
 }
 
 struct Device {
@@ -334,6 +336,20 @@ fn relay_message(
                         picture: d.str_at("picture").filter(|p| p.starts_with("https://")).map(str::to_owned),
                     },
                 );
+            }
+            // Who signed this machine in, for the sidebar's account
+            // button: kept in the settings so it shows offline too.
+            let me = crate::setting("relay_device").and_then(|id| devices.get(&id));
+            if let Some(me) = me {
+                let picture = me.picture.clone().unwrap_or_default();
+                let person = me.person.clone().unwrap_or_default();
+                if crate::setting("account_name").unwrap_or_default() != person
+                    || crate::setting("account_picture").unwrap_or_default() != picture
+                {
+                    crate::save_setting("account_name", &person);
+                    crate::save_setting("account_picture", &picture);
+                    remote::ask(Command::Refresh);
+                }
             }
             // Phones gone from the account are gone from here.
             peers.retain(|id, peer| {
