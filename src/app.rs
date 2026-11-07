@@ -77,10 +77,15 @@ const TAB_SLIDE: Duration = Duration::from_millis(160);
 const MENU_WIDTH: f32 = 200.0;
 const MENU_ROW: f32 = 26.0;
 
-/// The colors a tab can be marked with, from its menu.
 /// How often a window's state is rebuilt for remotes watching it.
 const REMOTE_EVERY: Duration = Duration::from_millis(150);
-const TAB_COLORS: [u32; 6] = [0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5];
+/// The colors a tab can be marked with, from its menu: a row of
+/// SWATCHES, then a row of alternates shown while Option is held.
+const TAB_COLORS: [u32; 12] = [
+    0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5, // red … purple
+    0xf28fbf, 0x4fc1b0, 0x8f95f2, 0xb7d36a, 0xc9a27e, 0x9aa5b1, // pink, teal, indigo, lime, sand, slate
+];
+const SWATCHES: usize = 6;
 
 /// What a tab is waiting on you for, set by hand so a glance at the list
 /// says what to do with it.
@@ -2947,6 +2952,10 @@ impl App {
     /// Photoshop; the divider then follows the pointer the new way.
     fn modifiers_changed(&mut self, mods: u32) {
         let pressed = mods & platform::mods::OPTION != 0 && self.held & platform::mods::OPTION == 0;
+        if self.tab_menu.is_some() && (mods ^ self.held) & platform::mods::OPTION != 0 {
+            // The menu's colors swap to their alternates while Option is held.
+            self.dirty = true;
+        }
         self.held = mods;
         if !pressed {
             return;
@@ -3833,6 +3842,7 @@ impl App {
         }
         let Some(tab) = self.tabs.get(menu.tab) else { return };
         let selected = tab.color;
+        let first = if self.held & platform::mods::OPTION != 0 { SWATCHES } else { 0 };
         let marked = tab.mark;
         let several = self.tabs.len() > 1;
         let rows = if several { 5.0 } else { 4.0 };
@@ -3859,12 +3869,12 @@ impl App {
         };
         item(scene, "Rename Tab…", MenuAction::Rename, row_y);
         row_y += MENU_ROW;
-        // The colors: none, then each of TAB_COLORS.
+        // The colors: none, then a row of TAB_COLORS (the alternates with Option).
         let size = 16.0;
-        let step = (MENU_WIDTH - 28.0 - size) / TAB_COLORS.len() as f32;
+        let step = (MENU_WIDTH - 28.0 - size) / SWATCHES as f32;
         let mut swatches = Vec::new();
-        for choice in std::iter::once(None).chain((0..TAB_COLORS.len()).map(Some)) {
-            let i = choice.map_or(0.0, |c| c as f32 + 1.0);
+        for choice in std::iter::once(None).chain((first..first + SWATCHES).map(Some)) {
+            let i = choice.map_or(0.0, |c| (c - first) as f32 + 1.0);
             let swatch = Rect::new(x + 14.0 + i * step, row_y + (MENU_ROW - size) / 2.0, size, size);
             let hit = swatch.inset(-3.0, -3.0);
             let ring = if selected == choice {
@@ -4198,11 +4208,9 @@ fn tabs_path() -> String {
     format!("{}/tabs", crate::settings_dir())
 }
 
-/// TEMINO_CAPTURE: saves each frame, straight from the GPU readback, for
-/// screenshots that no other window or the pointer can get into.
-/// A tab's background, in the sidebar or the strip: a tab with a color is tinted with it all
-/// over, more strongly and outlined in it while active; an uncolored tab
-/// is raised only while active.
+/// A tab's background, in the sidebar or the strip: a tab with a color is
+/// tinted with it all over; the current tab is raised and drawn round with
+/// a clear border, in its color if it has one.
 fn draw_tab_background(
     scene: &mut Scene,
     theme: &Theme,
@@ -4212,13 +4220,14 @@ fn draw_tab_background(
     dragged: bool,
 ) {
     let (fill, border) = match (color, current) {
-        (Some(color), true) => (theme.raised.mix(color, 0.42), color.mix(theme.text, 0.15)),
+        (Some(color), true) => (theme.raised.mix(color, 0.42), color.mix(theme.text, 0.25)),
         (Some(color), false) => (color.alpha(0.22), color.alpha(0.0)),
-        (None, true) => (theme.raised.mix(theme.text, 0.06), theme.divider),
+        (None, true) => (theme.raised.mix(theme.text, 0.06), theme.text_dim),
         (None, false) => return,
     };
     let fill = if dragged { fill.mix(theme.text, 0.06) } else { fill };
-    scene.quad(Quad::new(rect, fill).radius(6.0).border(1.0, border));
+    let width = if current { 1.5 } else { 1.0 };
+    scene.quad(Quad::new(rect, fill).radius(6.0).border(width, border));
 }
 
 /// A tab's number in a circle `size` across, ringed and colored by what its
