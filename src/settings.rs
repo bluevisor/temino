@@ -84,13 +84,14 @@ pub enum Headers {
 impl Headers {
     pub const ALL: [Headers; 3] = [Headers::Off, Headers::Auto, Headers::On];
 
-    /// From its line in the settings file. "on" meant agents only before
-    /// there was a third choice, so every terminal is "all".
+    /// From its line in the settings file: every terminal unless "off"
+    /// or "auto" (agents only). "on" is from before there was a third
+    /// choice, and gets every terminal too.
     pub fn parse(value: Option<&str>) -> Headers {
         match value {
             Some("off") => Headers::Off,
-            Some("all") => Headers::On,
-            _ => Headers::Auto,
+            Some("auto") => Headers::Auto,
+            _ => Headers::On,
         }
     }
 

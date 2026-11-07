@@ -3330,6 +3330,9 @@ impl App {
                     (None, None) => part += &format!(". {name} runs here"),
                 }
             } else {
+                if let Some(gist) = pane.gist() {
+                    part += &format!(". What they're doing: {gist}");
+                }
                 let recent = pane.recent_commands();
                 if !recent.is_empty() {
                     part += &format!(". Recent commands: {}", recent.join(", "));
@@ -3511,10 +3514,15 @@ impl App {
             let program = pane.program_now.clone();
             let shell = (info.is_none() && program.is_none()).then(|| {
                 pane.refresh_git(&sender, now);
-                let (busy, line) = pane.activity();
-                let detail =
-                    if busy { ui::short_path(&pane.session.cwd) } else { pane.idle_line(&pane.session.cwd, now) };
-                (busy, pane.last_failed(), line, detail)
+                let (busy, running) = pane.activity();
+                ShellHeader {
+                    busy,
+                    failed: pane.last_failed(),
+                    path: ui::short_path(&pane.session.cwd),
+                    running: busy.then_some(running),
+                    gist: pane.gist(),
+                    detail: if busy { String::new() } else { pane.idle_line(&pane.session.cwd, now) },
+                }
             });
             let bar = Rect::new(rect.x, rect.y - AGENT_HEADER, rect.w, AGENT_HEADER);
             let hover = self.header_hover == Some(id);
@@ -3531,9 +3539,7 @@ impl App {
                 (None, Some((name, started)), _) => {
                     draw_program_header(scene, text, theme, bar, &name, now.duration_since(started))
                 }
-                (None, None, Some((busy, failed, line, detail))) => {
-                    draw_shell_header(scene, text, theme, bar, busy, failed, &line, &detail)
-                }
+                (None, None, Some(shell)) => draw_shell_header(scene, text, theme, bar, &shell),
                 (None, None, None) => {}
             }
             pane_hits.push((bar, self.active, id));
@@ -4861,6 +4867,12 @@ fn draw_agent_header(
     };
     text.draw_text(scene, &summary, x, baseline, UI_BOLD, font, ink);
     x += text.measure(&summary, UI_BOLD, font) + 14.0;
+    // The folder it works in, kept to a third of the bar.
+    if !info.cwd.is_empty() {
+        let path = text.elide(&ui::short_path(&info.cwd), UI, font, (bar.w / 3.0).max(0.0));
+        text.draw_text(scene, &path, x, baseline, UI, font, theme.text_dim);
+        x += text.measure(&path, UI, font) + 14.0;
+    }
     // The toggle at the right end: a triangle pointing the way it goes.
     let toggle = if hover { theme.text } else { theme.text_faint };
     draw_triangle(scene, bar.right() - 16.0, cy, if info.open { -1.0 } else { 1.0 }, toggle);
@@ -5063,20 +5075,26 @@ fn draw_program_header(
     text.draw_text(scene, &uptime, bar.right() - 12.0 - w, baseline, UI, 11.0, theme.text_faint);
 }
 
-/// The bar over a plain terminal (headers on): a dot (lit while a command
-/// runs, red after one failed), the command or the folder, then the folder
-/// or the last command and the git branch.
-#[allow(clippy::too_many_arguments)]
-fn draw_shell_header(
-    scene: &mut Scene,
-    text: &mut TextSystem,
-    theme: &Theme,
-    bar: Rect,
+/// What the bar over a plain terminal says.
+struct ShellHeader {
     busy: bool,
     failed: bool,
-    line: &str,
-    detail: &str,
-) {
+    /// The folder it's in.
+    path: String,
+    /// The command running, while one is.
+    running: Option<String>,
+    /// The model's line on what you're doing here.
+    gist: Option<String>,
+    /// At rest: the last command, how it ended and when, and the branch.
+    detail: String,
+}
+
+/// The bar over a plain terminal (headers on): a dot (lit while a command
+/// runs, red after one failed), the folder, the command running, then the
+/// model's line on what you're doing here, or else the last command and
+/// the git branch.
+fn draw_shell_header(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, bar: Rect, shell: &ShellHeader) {
+    let ShellHeader { busy, failed, .. } = *shell;
     scene.fill(bar, theme.panel(SURFACE_LIFT));
     scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
     let font = 12.0;
@@ -5093,12 +5111,24 @@ fn draw_shell_header(
     scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), dot).radius(4.0));
     x += 16.0;
     let right = bar.right() - 12.0;
-    let shown = text.elide(line, UI_BOLD, font, (right - x - 14.0).max(0.0));
+    // The folder keeps at most half the bar, so what's going on still shows.
+    let shown = text.elide(&shell.path, UI_BOLD, font, ((right - x) / 2.0).max(0.0));
     text.draw_text(scene, &shown, x, baseline, UI_BOLD, font, theme.text);
     x += text.measure(&shown, UI_BOLD, font) + 14.0;
-    if !detail.is_empty() && detail != line && right - x > 40.0 {
-        let shown = text.elide(detail, UI, font, right - x - 14.0);
-        text.draw_text(scene, &shown, x, baseline, UI, font, theme.text_dim);
+    let running = shell.running.as_ref().filter(|command| !command.is_empty()).map(|command| format!("▸ {command}"));
+    let gist = shell.gist.as_ref().map(|gist| format!("✦ {gist}"));
+    let rest = [
+        (running, theme.text),
+        (gist, theme.text),
+        (shell.gist.is_none().then(|| shell.detail.clone()).filter(|d| !d.is_empty()), theme.text_dim),
+    ];
+    for (part, ink) in rest.into_iter().filter_map(|(part, ink)| part.map(|part| (part, ink))) {
+        if right - x < 40.0 {
+            break;
+        }
+        let shown = text.elide(&part, UI, font, right - x);
+        text.draw_text(scene, &shown, x, baseline, UI, font, ink);
+        x += text.measure(&shown, UI, font) + 14.0;
     }
 }
 
