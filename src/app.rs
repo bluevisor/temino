@@ -3577,8 +3577,8 @@ impl App {
 
     /// The title bar over the window's top, where the system's would be.
     /// With the full sidebar, as in cmux, the sidebar runs from the very
-    /// top (the traffic lights sit in it) and the bar spans only the right
-    /// side, on its background, the title centered over it. Otherwise
+    /// top (the traffic lights and the title sit in it) and the bar spans
+    /// only the right side, on its background. Otherwise
     /// (compact, too narrow for the lights; the strip; no list) it goes
     /// across in the sidebar's color. AppKit keeps the traffic lights and
     /// the dragging; this is only the look.
@@ -3600,15 +3600,26 @@ impl App {
             scene.fill(bar, theme.panel(SURFACE_LIFT / 2.0));
         }
         scene.fill(Rect::new(bar.x, top - 1.0, bar.w, 1.0), theme.divider);
-        // Clear of the traffic lights (when they're over the bar), centered
-        // in what's left. Fixed in points, like the bar: zoom leaves it alone.
+        // Fixed in points, like the bar: zoom leaves it alone. With the
+        // sidebar, the title sits at the top of the tabs, beside the traffic
+        // lights; the bar over the panes is left to drag the window by.
+        // Otherwise it's centered clear of the lights.
+        let lights = 84.0 / self.zoom;
+        let baseline = |font: f32, text: &TextSystem| (top / 2.0 + text.ui_ascent(font) * 0.36).round();
+        if column {
+            let font = 13.0 / self.zoom;
+            let room = (side.w - lights - 10.0).max(0.0);
+            let shown = text.elide(title, UI_BOLD, font, room);
+            let y = baseline(font, text);
+            text.draw_text(scene, &shown, lights - 6.0 / self.zoom, y, UI_BOLD, font, theme.text_dim);
+            return;
+        }
         let font = 18.0 / self.zoom;
-        let lights = if column { 16.0 } else { 84.0 / self.zoom };
         let room = (bar.w - 2.0 * lights).max(0.0);
         let shown = text.elide(title, UI_BOLD, font, room);
         let w = text.measure(&shown, UI_BOLD, font);
-        let baseline = (top / 2.0 + text.ui_ascent(font) * 0.36).round();
-        text.draw_text(scene, &shown, bar.x + (bar.w - w) / 2.0, baseline, UI_BOLD, font, theme.text_dim);
+        let y = baseline(font, text);
+        text.draw_text(scene, &shown, bar.x + (bar.w - w) / 2.0, y, UI_BOLD, font, theme.text_dim);
     }
 
     fn draw_tab_bar(&mut self, agents: &[Option<AgentState>]) {
