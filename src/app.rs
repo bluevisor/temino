@@ -81,13 +81,19 @@ const MENU_ROW: f32 = 26.0;
 
 /// How often a window's state is rebuilt for remotes watching it.
 const REMOTE_EVERY: Duration = Duration::from_millis(150);
-/// An unnamed tab's AI title: asked once what its panes do has held still
-/// this long, and at most this often.
+/// A tab's AI title and summary: asked once what its panes do has held
+/// still this long, and at most this often.
 const TITLE_SETTLE: Duration = Duration::from_secs(3);
 const TITLE_EVERY: Duration = Duration::from_secs(20);
-const TITLE_SYSTEM: &str = "Name a terminal tab from what its panes are doing, in 2 to 5 words, \
-the way a person would label it (for example: Temino tab colors, API deploy logs, Haiku VM build). \
-Plain text, no quotes, no final period.";
+const TITLE_SYSTEM: &str = "You see what is going on in the panes of one terminal tab: their folders, \
+the coding agents and what they were asked, the commands run and the end of their output. Answer with \
+exactly two lines. Line 1: a title for the tab in 2 to 5 words, the way a person would label it \
+(for example: Temino tab colors, API deploy logs, Haiku VM build). Line 2: at most 16 words on what \
+is being done in this tab and where it stands, starting with a verb and naming no one (for example: \
+Fixing the login redirect bug; tests passing, PR not opened yet). Plain text, no labels, no quotes.";
+/// How much of each pane's history a tab's summary is written from, in
+/// all.
+const TITLE_CHARS: usize = 8000;
 /// The colors a tab can be marked with, from its menu: a row of
 /// SWATCHES, then a row of alternates shown while Option is held. Each
 /// alternate is its color's lighter sibling (hue turned 14°, a little
@@ -296,16 +302,18 @@ impl Divider {
     }
 }
 
-/// An unnamed tab's title, written by the model from what its panes are
-/// doing. Asked again once what they're doing has changed and settled,
-/// and not more often than TITLE_EVERY; the old title stays meanwhile.
+/// A tab's title (used while it has no name) and one-line summary,
+/// written by the model from what its panes are doing. Asked again once
+/// what they're doing has changed and settled, and not more often than
+/// TITLE_EVERY; the old ones stay meanwhile.
 #[derive(Default)]
 struct AiTitle {
     title: Option<String>,
+    summary: Option<String>,
     /// What the last ask was written from, and its answer on the way.
     asked_for: String,
     asked_at: Option<Instant>,
-    answer: Option<Arc<std::sync::Mutex<Option<Option<String>>>>>,
+    answer: Option<Arc<std::sync::Mutex<Option<Option<(String, Option<String>)>>>>>,
     /// What the panes are doing now, and since when.
     seen: String,
     seen_at: Option<Instant>,
@@ -3326,15 +3334,11 @@ impl App {
             }
             if let Some(info) = pane.agent_info(now) {
                 let name = info.program.map_or("A coding agent", |p| agent::agent_brand(p).0);
-                match (&info.gist, &info.prompt) {
-                    (Some(gist), _) => part += &format!(". {name} is working on: {gist}"),
-                    (None, Some(prompt)) => part += &format!(". {name} was asked: {}", agent::one_line(prompt)),
-                    (None, None) => part += &format!(". {name} runs here"),
+                match &info.prompt {
+                    Some(prompt) => part += &format!(". {name} was asked: {}", agent::one_line(prompt)),
+                    None => part += &format!(". {name} runs here"),
                 }
             } else {
-                if let Some(gist) = pane.gist() {
-                    part += &format!(". What they're doing: {gist}");
-                }
                 let recent = pane.recent_commands();
                 if !recent.is_empty() {
                     part += &format!(". Recent commands: {}", recent.join(", "));
@@ -3345,8 +3349,29 @@ impl App {
         parts.join("\n")
     }
 
-    /// Keeps unnamed tabs' AI titles current: takes in answers, and asks
-    /// again for a tab whose panes have settled on something new.
+    /// What the model writes a tab's title and summary from: the summary
+    /// before, then each pane's folder, agent and prompt, and its last few
+    /// commands with the end of their output.
+    fn summary_context(&mut self, index: usize, now: Instant) -> String {
+        let mut leaves = Vec::new();
+        self.tabs[index].root.leaves(&mut leaves);
+        let mut parts = Vec::new();
+        if let Some(before) = &self.tabs[index].ai_title.summary {
+            parts.push(format!("Before, the summary was: {before}"));
+        }
+        let panes: Vec<&mut Pane> = self.panes.iter_mut().filter(|p| leaves.contains(&p.id)).collect();
+        let each = TITLE_CHARS / panes.len().max(1);
+        for (i, pane) in panes.into_iter().enumerate() {
+            let context = pane.recap_context(now);
+            // Keep the end: it's the most recent.
+            let skip = context.chars().count().saturating_sub(each);
+            parts.push(format!("Pane {}:\n{}", i + 1, context.chars().skip(skip).collect::<String>()));
+        }
+        parts.join("\n\n")
+    }
+
+    /// Keeps tabs' AI titles and summaries current: takes in answers, and
+    /// asks again for a tab whose panes have settled on something new.
     fn refresh_titles(&mut self, now: Instant) {
         if !crate::llm::enabled() {
             return;
@@ -3354,7 +3379,7 @@ impl App {
         let mut wake: Option<Instant> = None;
         for index in 0..self.tabs.len() {
             let tab = &self.tabs[index];
-            if tab.name.is_some() || tab.focus == SETTINGS || self.viewers.iter().any(|v| v.id == tab.focus) {
+            if tab.focus == SETTINGS || self.viewers.iter().any(|v| v.id == tab.focus) {
                 continue;
             }
             let context = self.title_context(index, now);
@@ -3365,8 +3390,9 @@ impl App {
                     continue;
                 };
                 title.answer = None;
-                if let Some(answer) = answer {
-                    title.title = Some(answer);
+                if let Some((name, summary)) = answer {
+                    title.title = Some(name);
+                    title.summary = summary.or(title.summary.take());
                     self.dirty = true;
                 }
             }
@@ -3386,17 +3412,15 @@ impl App {
                 wake = Some(wake.map_or(due, |w| w.min(due)));
                 continue;
             }
-            let answer = Arc::new(std::sync::Mutex::new(None));
-            let theirs = answer.clone();
-            let prompt = context.clone();
-            let _ = std::thread::Builder::new().name("tab title".into()).spawn(move || {
-                let reply = crate::llm::complete(TITLE_SYSTEM, &prompt, 30).ok();
-                let reply = reply.map(|r| agent::one_line(&r).trim_matches(['"', '.', ' ']).to_owned());
-                *theirs.lock().unwrap() = Some(reply.filter(|r| !r.is_empty() && r.chars().count() <= 60));
-            });
             title.asked_for = context;
             title.asked_at = Some(now);
-            title.answer = Some(answer);
+            let answer = Arc::new(std::sync::Mutex::new(None));
+            title.answer = Some(answer.clone());
+            let prompt = self.summary_context(index, now);
+            let _ = std::thread::Builder::new().name("tab title".into()).spawn(move || {
+                let reply = crate::llm::complete(TITLE_SYSTEM, &prompt, 90).ok();
+                *answer.lock().unwrap() = Some(reply.as_deref().and_then(title_and_summary));
+            });
             wake = Some(wake.map_or(now + Duration::from_millis(250), |w| w.min(now + Duration::from_millis(250))));
         }
         if let Some(at) = wake {
@@ -3522,7 +3546,6 @@ impl App {
                     failed: pane.last_failed(),
                     path: ui::short_path(&pane.session.cwd),
                     running: busy.then_some(running),
-                    gist: pane.gist(),
                     detail: if busy { String::new() } else { pane.idle_line(&pane.session.cwd, now) },
                 }
             });
@@ -3586,7 +3609,7 @@ impl App {
     /// The title bar over the window's top, where the system's would be.
     /// With the full sidebar, as in cmux, the sidebar runs from the very
     /// top (the traffic lights and the title sit in it) and the bar spans
-    /// only the right side, on its background. Otherwise
+    /// only the right side, on its background, with the tab's AI summary. Otherwise
     /// (compact, too narrow for the lights; the strip; no list) it goes
     /// across in the sidebar's color. AppKit keeps the traffic lights and
     /// the dragging; this is only the look.
@@ -3598,6 +3621,7 @@ impl App {
         let side = self.tab_area();
         let column = self.strip == TabStrip::Left && !self.compact && side.w > 0.0;
         let bar = if column { Rect::new(side.w, 0.0, self.width - side.w, top) } else { Rect::new(0.0, 0.0, self.width, top) };
+        let summary = self.tabs.get(self.active).and_then(|tab| tab.ai_title.summary.clone());
         let Self { scene, ctx, title, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         if column {
@@ -3615,11 +3639,22 @@ impl App {
         let lights = 84.0 / self.zoom;
         let baseline = |font: f32, text: &TextSystem| (top / 2.0 + text.ui_ascent(font) * 0.36).round();
         if column {
+            // The title, without the app's name: the window is Temino's.
             let font = 13.0 / self.zoom;
             let room = (side.w - lights - 10.0).max(0.0);
-            let shown = text.elide(title, UI_BOLD, font, room);
+            let name = title.strip_suffix(" — Temino").unwrap_or(title);
+            let shown = text.elide(name, UI_BOLD, font, room);
             let y = baseline(font, text);
             text.draw_text(scene, &shown, lights - 6.0 / self.zoom, y, UI_BOLD, font, theme.text_dim);
+            // Over the panes: the model's summary of what goes on in the tab.
+            if let Some(summary) = summary {
+                let font = 13.0 / self.zoom;
+                let line = format!("✦ {summary}");
+                let shown = text.elide(&line, UI, font, (bar.w - 32.0 / self.zoom).max(0.0));
+                let w = text.measure(&shown, UI, font);
+                let y = baseline(font, text);
+                text.draw_text(scene, &shown, bar.x + (bar.w - w) / 2.0, y, UI, font, theme.text_dim);
+            }
             return;
         }
         let font = 18.0 / self.zoom;
@@ -4513,6 +4548,25 @@ fn tabs_path() -> String {
     format!("{}/tabs", crate::settings_dir())
 }
 
+/// The model's two lines: a tab's title and its summary. Labels it may
+/// add anyway ("Title:", "2.") come off; a title too long isn't one.
+fn title_and_summary(reply: &str) -> Option<(String, Option<String>)> {
+    let mut lines = reply.lines().map(str::trim).filter(|line| !line.is_empty()).map(|line| {
+        let line = line.trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | ' '));
+        let line = ["Title:", "Summary:", "Line 1:", "Line 2:"]
+            .iter()
+            .find_map(|label| line.strip_prefix(label))
+            .unwrap_or(line);
+        line.trim().trim_matches(['"', '*', ' '])
+    });
+    let title = lines.next()?.trim_end_matches('.').to_owned();
+    if title.is_empty() || title.chars().count() > 60 {
+        return None;
+    }
+    let summary = lines.next().filter(|s| !s.is_empty() && s.chars().count() <= 200).map(str::to_owned);
+    Some((title, summary))
+}
+
 /// Who's signed in to Remote Control here: their first name, and their
 /// photo where the sign-in gave one (Google's does, Apple's doesn't).
 fn account_info() -> Option<(String, Option<String>)> {
@@ -4913,13 +4967,11 @@ fn draw_agent_header(
         text.draw_text(scene, chip, right - w, baseline, UI, 11.0, theme.text_faint);
         right -= w + 14.0;
     }
-    // The model's line on what it's working on stands in for the prompt,
-    // and coming back to the pane, its recap. Opened, the prompt shows
-    // whole underneath, so the bar doesn't repeat it.
-    let line = match (&info.recap, &info.gist, &info.prompt) {
-        (Some(recap), _, _) => Some((recap.clone(), theme.text)),
-        (None, Some(gist), _) => Some((format!("✦ {gist}"), theme.text)),
-        (None, None, Some(prompt)) if !info.open => Some((format!("› {prompt}"), theme.text_dim)),
+    // Coming back to the pane, its recap stands in for the prompt. Opened,
+    // the prompt shows whole underneath, so the bar doesn't repeat it.
+    let line = match (&info.recap, &info.prompt) {
+        (Some(recap), _) => Some((recap.clone(), theme.text)),
+        (None, Some(prompt)) if !info.open => Some((format!("› {prompt}"), theme.text_dim)),
         _ => None,
     };
     if let Some((line, ink)) = line {
@@ -5096,16 +5148,13 @@ struct ShellHeader {
     path: String,
     /// The command running, while one is.
     running: Option<String>,
-    /// The model's line on what you're doing here.
-    gist: Option<String>,
     /// At rest: the last command, how it ended and when, and the branch.
     detail: String,
 }
 
 /// The bar over a plain terminal (headers on): a dot (lit while a command
 /// runs, red after one failed), the folder, the command running, then the
-/// model's line on what you're doing here, or else the last command and
-/// the git branch.
+/// last command, how it ended and when, and the git branch.
 fn draw_shell_header(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, bar: Rect, shell: &ShellHeader) {
     let ShellHeader { busy, failed, .. } = *shell;
     scene.fill(bar, theme.panel(SURFACE_LIFT));
@@ -5129,12 +5178,7 @@ fn draw_shell_header(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, ba
     text.draw_text(scene, &shown, x, baseline, UI_BOLD, font, theme.text);
     x += text.measure(&shown, UI_BOLD, font) + 14.0;
     let running = shell.running.as_ref().filter(|command| !command.is_empty()).map(|command| format!("▸ {command}"));
-    let gist = shell.gist.as_ref().map(|gist| format!("✦ {gist}"));
-    let rest = [
-        (running, theme.text),
-        (gist, theme.text),
-        (shell.gist.is_none().then(|| shell.detail.clone()).filter(|d| !d.is_empty()), theme.text_dim),
-    ];
+    let rest = [(running, theme.text), (Some(shell.detail.clone()).filter(|d| !d.is_empty()), theme.text_dim)];
     for (part, ink) in rest.into_iter().filter_map(|(part, ink)| part.map(|part| (part, ink))) {
         if right - x < 40.0 {
             break;
@@ -5197,4 +5241,24 @@ pub fn draw_people(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, rect
         right = pill.x - 6.0;
     }
     scene.set_layer(LAYER_CONTENT);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::title_and_summary;
+
+    #[test]
+    fn reads_the_title_and_summary_lines() {
+        let (title, summary) = title_and_summary("Temino tab colors\nTuning the tab palette; PR open.\n").unwrap();
+        assert_eq!(title, "Temino tab colors");
+        assert_eq!(summary.as_deref(), Some("Tuning the tab palette; PR open."));
+        // Labels and numbering the model adds anyway come off.
+        let (title, summary) = title_and_summary("1. Title: \"API logs\"\n\n2. Summary: Tailing the deploy").unwrap();
+        assert_eq!(title, "API logs");
+        assert_eq!(summary.as_deref(), Some("Tailing the deploy"));
+        // One line is a title alone; nothing, or a paragraph, isn't one.
+        assert_eq!(title_and_summary("Haiku VM build"), Some(("Haiku VM build".to_owned(), None)));
+        assert_eq!(title_and_summary("  \n"), None);
+        assert_eq!(title_and_summary(&"word ".repeat(20)), None);
+    }
 }
