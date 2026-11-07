@@ -66,6 +66,12 @@ Plain text, no preamble, no quotes.";
 const GIST_SYSTEM: &str = "A coding agent in a terminal was just given a new prompt. Say in a short phrase \
 (at most 10 words) what it is working on now. The prompt may only make sense next to what it was doing \
 before; keep that in view. Plain text, no preamble, no quotes, no final period.";
+const SHELL_GIST_SYSTEM: &str = "Someone works in a terminal. From what ran there, say in a short phrase \
+(at most 10 words) what they are doing in it. Plain text, no preamble, no quotes, no final period.";
+/// A shell's line is asked once its last command has held this long, and
+/// at most this often.
+const SHELL_GIST_SETTLE: Duration = Duration::from_secs(2);
+const SHELL_GIST_EVERY: Duration = Duration::from_secs(10);
 /// How much of a pane's recent history the summary is written from.
 const RECAP_BLOCKS: usize = 5;
 const RECAP_LINES: usize = 30;
@@ -245,8 +251,12 @@ pub struct Pane {
     /// on coming back to it after a while.
     left_at: Option<Instant>,
     recap: Option<Recap>,
-    /// The model's line on what the agent is working on, for its header.
+    /// The model's line on what the agent is working on, or what you're
+    /// doing in the shell, for the header; and a shell's next ask: what
+    /// it would be written from, since when, and when it's due.
     gist: Option<Gist>,
+    gist_seen: Option<(String, Instant)>,
+    gist_due: Option<Instant>,
     /// AI mode: Enter sends the editor's text to the model instead of the
     /// shell. The request on its way: its block and the model's reply.
     ai: bool,
@@ -302,30 +312,34 @@ impl Recap {
     }
 }
 
-/// "What's this agent on?": a line the model writes from each new prompt,
-/// with the line before it for context (a prompt like "yes, merge it"
-/// says little alone). The old line stays up until the new one comes.
+/// "What's going on here?": a line the model writes from each new prompt
+/// to an agent, or each command a shell finishes, with the line before it
+/// for context (a prompt like "yes, merge it" says little alone). The old
+/// line stays up until the new one comes.
 struct Gist {
-    prompt: String,
+    /// What it was asked for: the prompt, or the shell's folder and last
+    /// command.
+    key: String,
     before: Option<String>,
     /// The line, once the model answered (None if it couldn't).
     line: Arc<Mutex<Option<Option<String>>>>,
     landed: bool,
+    asked: Instant,
 }
 
 impl Gist {
-    fn new(prompt: String, before: Option<String>) -> Gist {
+    fn new(key: String, system: &'static str, context: String, before: Option<String>) -> Gist {
         let line = Arc::new(Mutex::new(None));
         let theirs = line.clone();
         let context = match &before {
-            Some(before) => format!("Before, it was: {before}\nNew prompt: {prompt}"),
-            None => format!("Prompt: {prompt}"),
+            Some(before) => format!("Before, it was: {before}\n{context}"),
+            None => context,
         };
         let _ = std::thread::Builder::new().name("gist".into()).spawn(move || {
-            let answer = llm::complete(GIST_SYSTEM, &context, 60).ok().map(|answer| agent::one_line(&answer));
+            let answer = llm::complete(system, &context, 60).ok().map(|answer| agent::one_line(&answer));
             *theirs.lock().unwrap() = Some(answer.filter(|answer| !answer.is_empty()));
         });
-        Gist { prompt, before, line, landed: false }
+        Gist { key, before, line, landed: false, asked: Instant::now() }
     }
 
     fn line(&self) -> Option<String> {
@@ -430,6 +444,8 @@ impl Pane {
             left_at: None,
             recap: None,
             gist: None,
+            gist_seen: None,
+            gist_due: None,
             ai: false,
             asking: None,
             find: None,
@@ -532,7 +548,7 @@ impl Pane {
             self.typed_prompt = None;
             self.turn = None;
             self.last_turn = None;
-            self.gist = None;
+            self.update_shell_gist(now);
             return None;
         }
         if self.agent_program.is_none() {
@@ -607,17 +623,53 @@ impl Pane {
 
     /// A new prompt to the agent: the model writes a new line on it.
     fn update_gist(&mut self) {
+        self.gist_due = None;
         if !llm::enabled() {
             self.gist = None;
             return;
         }
         let report = self.watcher.as_ref().and_then(agent::Watcher::report);
         let Some(prompt) = report.and_then(|r| r.prompt).or_else(|| self.typed_prompt.clone()) else { return };
-        if prompt.trim().is_empty() || self.gist.as_ref().is_some_and(|gist| gist.prompt == prompt) {
+        let key = format!("agent\u{1f}{prompt}");
+        if prompt.trim().is_empty() || self.gist.as_ref().is_some_and(|gist| gist.key == key) {
             return;
         }
         let before = self.gist.as_ref().and_then(Gist::line);
-        self.gist = Some(Gist::new(prompt, before));
+        self.gist = Some(Gist::new(key, GIST_SYSTEM, format!("New prompt: {prompt}"), before));
+    }
+
+    /// A shell that finished a command (or moved): once that has held a
+    /// moment, the model writes a new line on what you're doing in it,
+    /// from its last few commands and their output.
+    fn update_shell_gist(&mut self, now: Instant) {
+        self.gist_due = None;
+        if !llm::enabled() {
+            self.gist = None;
+            return;
+        }
+        let Some(last) = self.session.last_finished().map(|block| block.id) else { return };
+        let key = format!("shell\u{1f}{}\u{1f}{last}", self.session.cwd);
+        if self.gist.as_ref().is_some_and(|gist| gist.key == key) {
+            return;
+        }
+        if self.gist_seen.as_ref().is_none_or(|(seen, _)| *seen != key) {
+            self.gist_seen = Some((key.clone(), now));
+        }
+        let seen = self.gist_seen.as_ref().map_or(now, |(_, at)| *at);
+        let asked = self.gist.as_ref().map(|gist| gist.asked);
+        let due = (seen + SHELL_GIST_SETTLE).max(asked.map_or(now, |at| at + SHELL_GIST_EVERY));
+        if now < due {
+            self.gist_due = Some(due);
+            return;
+        }
+        let context = self.recap_context(now);
+        let before = self.gist.as_ref().and_then(Gist::line);
+        self.gist = Some(Gist::new(key, SHELL_GIST_SYSTEM, context, before));
+    }
+
+    /// The model's line on what's going on here, once it wrote one.
+    pub fn gist(&self) -> Option<String> {
+        self.gist.as_ref().and_then(Gist::line)
     }
 
     /// What the header over the agent here shows, as of the last `agent()`.
@@ -1072,6 +1124,7 @@ impl Pane {
         if self.gist.as_ref().is_some_and(|gist| !gist.landed) {
             times.push(Some(Instant::now() + Duration::from_millis(250)));
         }
+        times.push(self.gist_due);
         if let Some(recap) = &self.recap {
             // Going away, or waiting on its summary.
             let until = recap.until();
