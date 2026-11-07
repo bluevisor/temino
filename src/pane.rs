@@ -1213,6 +1213,13 @@ impl Pane {
         self.find = Some(find);
     }
 
+    /// TEMINO_ASK_TEST: `request` asked in AI mode, for screenshots.
+    pub fn ask_test(&mut self, ctx: &mut Ctx, request: &str) {
+        self.editor.take();
+        self.editor.insert(request);
+        self.ask(ctx);
+    }
+
     pub fn close_find(&mut self) {
         if let Some(find) = self.find.take() {
             self.last_query = find.query;
@@ -2352,6 +2359,9 @@ impl Pane {
         let mut height = BLOCK_PAD_TOP + META_HEIGHT + command_lines as f32 * cell.height + BLOCK_PAD_BOTTOM;
         if output > 0 {
             height += OUTPUT_GAP + output as f32 * cell.height;
+        } else if waiting_on_ai(block, output) {
+            // Room for the "Thinking…" line.
+            height += OUTPUT_GAP + cell.height;
         }
         (height + 1.0, output)
     }
@@ -2661,6 +2671,12 @@ impl Pane {
                     if room.w * aspect <= room.h { (room.w, room.w * aspect) } else { (room.h / aspect, room.h) };
                 text.draw_picture(scene, picture, Rect::new(room.x, room.y, w, h));
             }
+        } else if waiting_on_ai(block, output) {
+            // Where the answer will go, so it's plain the request was taken.
+            let frame = (block.started.elapsed().as_millis() / 80) as usize % SPINNER.len();
+            let spinner = SPINNER[frame].to_string();
+            text.draw_mono(scene, &spinner, PAD_X, output_y, Style::default(), theme.accent);
+            text.draw_mono(scene, "Thinking…", PAD_X + 2.0 * cell.width, output_y, Style::default(), theme.text_dim);
         }
         scene.fill(Rect::new(0.0, y + block_height - 1.0, width, 1.0), theme.divider);
         self.layout.blocks.push(BlockLayout {
@@ -2925,6 +2941,11 @@ fn draw_menu(
 
 /// A command's rows as drawn, wrapped to the grid width; the flag marks
 /// the last row of each of its lines.
+/// An AI request with no answer yet: its block shows a spinner in the answer's place.
+fn waiting_on_ai(block: &Block, output: usize) -> bool {
+    block.kind == BlockKind::Ai && block.running() && output == 0
+}
+
 fn command_rows(command: &str, columns: usize) -> Vec<(String, bool)> {
     let mut rows = Vec::new();
     for line in command.split('\n') {

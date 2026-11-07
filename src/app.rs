@@ -568,6 +568,9 @@ pub struct App {
     /// `TEMINO_OPEN_TEST=<link>`: open it from the focused pane two
     /// seconds after launch, as a click on it would, for screenshots.
     open_test: Option<(Instant, String)>,
+    /// `TEMINO_ASK_TEST=<request>`: ask it in AI mode from the focused pane
+    /// two seconds after launch, as typing it and Enter would, for screenshots.
+    ask_test: Option<(Instant, String)>,
     /// When the state for remotes is next built, while any watch.
     remote_at: Instant,
 }
@@ -848,6 +851,9 @@ impl App {
             open_test: std::env::var("TEMINO_OPEN_TEST")
                 .ok()
                 .map(|link| (Instant::now() + Duration::from_secs(2), link)),
+            ask_test: std::env::var("TEMINO_ASK_TEST")
+                .ok()
+                .map(|request| (Instant::now() + Duration::from_secs(2), request)),
             recap_test: std::env::var("TEMINO_RECAP_TEST")
                 .ok()
                 .and_then(|seconds| seconds.parse::<f32>().ok())
@@ -1769,6 +1775,14 @@ impl App {
             }
             self.dirty = true;
         }
+        if self.ask_test.as_ref().is_some_and(|(at, _)| now >= *at) {
+            let (_, request) = self.ask_test.take().unwrap();
+            let id = self.focused_id();
+            if let Some(pane) = self.panes.iter_mut().find(|p| Some(p.id) == id) {
+                pane.ask_test(&mut self.ctx, &request);
+            }
+            self.dirty = true;
+        }
         if self.recap_test.is_some_and(|at| now >= at) {
             self.recap_test = None;
             // With TEMINO_MENU_TEST=account, the account menu instead.
@@ -1798,6 +1812,7 @@ impl App {
         times.push(self.animation_at);
         times.push(self.recap_test);
         times.push(self.open_test.as_ref().map(|(at, _)| *at));
+        times.push(self.ask_test.as_ref().map(|(at, _)| *at));
         times.push(self.ctx.toast.as_ref().map(|(_, at)| *at));
         times.push(remote::watched().then_some(self.remote_at));
         times.into_iter().flatten().min()
