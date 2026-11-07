@@ -72,7 +72,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("tab_6", "cmd+6"),
     ("tab_7", "cmd+7"),
     ("tab_8", "cmd+8"),
-    ("last_tab", "cmd+9"),
+    ("tab_9", "cmd+9"),
     ("toggle_tab_list", "cmd+b"),
     ("extend_tab_list", "cmd+shift+b"),
     ("jump_to_agent", "cmd+`"),
