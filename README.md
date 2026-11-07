@@ -171,6 +171,10 @@ target/release/temino --selftest /tmp/frame.ppm
 target/release/temino
 ```
 
+On Linux, `linux/install.sh` (also in the release download, next to the
+binary) puts Temino in `~/.local/bin` and adds it to the app menu with its
+icon; `--system` installs to `/usr/local`, `--uninstall` removes it.
+
 Settings live in `~/.config/temino` on Linux and `~/Library/Application
 Support/Temino` on macOS. On macOS Temino prefers Homebrew's bash; the
 system's bash 3.2 also works (the integration marks command output with a
