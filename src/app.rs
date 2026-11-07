@@ -20,7 +20,7 @@ use crate::picture::Picture;
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::remote;
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
-use crate::settings::{self, Action, Field, Headers};
+use crate::settings::{self, Action, Field};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{self, Color, Palette, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
@@ -515,9 +515,6 @@ pub struct App {
     /// The Settings text field being typed in, its text, and whether
     /// that's all selected.
     field: Option<(Field, String, bool)>,
-    /// Which panes get a header: those running an agent (or a listed
-    /// program), every terminal, or none.
-    headers: Headers,
     hover_tab: Option<usize>,
     /// When the pointer came onto the hovered tab, for its path's label.
     hover_at: Instant,
@@ -770,7 +767,6 @@ impl App {
             toast: None,
             shell,
             composing: false,
-            headers: Headers::parse(crate::setting("headers").as_deref()) != Headers::Off,
         };
         let mut app = App {
             gpu,
@@ -821,7 +817,6 @@ impl App {
             tab_menu: None,
             renaming: None,
             field: None,
-            headers: Headers::parse(crate::setting("headers").as_deref()),
             hover_tab: None,
             hover_at: Instant::now(),
             mouse: (0.0, 0.0),
@@ -1621,8 +1616,21 @@ impl App {
         }
     }
 
-    /// Lays out one tab: its panes' rectangles and its dividers.
+    /// Lays out one tab: its panes' rectangles, under their headers, and
+    /// its dividers.
     fn tab_layout(&self, index: usize) -> (Vec<(u64, Rect)>, Vec<Divider>) {
+        let (mut panes, dividers) = self.tab_slots(index);
+        for (id, rect) in &mut panes {
+            if let Some(pane) = self.panes.iter().find(|pane| pane.id == *id) {
+                *rect = under_header(*rect, pane.header_reach);
+            }
+        }
+        (panes, dividers)
+    }
+
+    /// Each pane's whole place in tab `index`, its header's included, and
+    /// the tab's dividers.
+    fn tab_slots(&self, index: usize) -> (Vec<(u64, Rect)>, Vec<Divider>) {
         let tab = &self.tabs[index];
         let rect = self.content_rect();
         let (mut panes, mut dividers) = (Vec::new(), Vec::new());
@@ -1631,25 +1639,7 @@ impl App {
         } else {
             tab.root.layout(rect, &mut Vec::new(), &mut panes, &mut dividers);
         }
-        // A pane with an agent (or a listed program) in it gives its top
-        // to the header; with headers on, every terminal does.
-        for (id, rect) in &mut panes {
-            let header = self.panes.iter().any(|pane| pane.id == *id && self.has_header(pane));
-            if header && rect.h > 3.0 * AGENT_HEADER {
-                rect.y += AGENT_HEADER;
-                rect.h -= AGENT_HEADER;
-            }
-        }
         (panes, dividers)
-    }
-
-    /// Whether `pane` gets a header over it, by Settings ▸ Status header.
-    fn has_header(&self, pane: &Pane) -> bool {
-        match self.headers {
-            Headers::Off => false,
-            Headers::Auto => pane.agent_now.is_some() || pane.program_now.is_some(),
-            Headers::On => true,
-        }
     }
 
     fn visible_panes(&self) -> Vec<(u64, Rect)> {
@@ -2458,7 +2448,6 @@ impl App {
             provider: crate::llm::PROVIDERS.iter().position(|&p| p == crate::llm::chosen()).unwrap_or(0),
             fields: Field::ALL.map(|field| crate::setting(&field.key()).unwrap_or_default()),
             editing: self.field.clone(),
-            headers: self.headers,
             #[cfg(not(target_os = "haiku"))]
             remote: Some(crate::relay::signed_in()),
             #[cfg(target_os = "haiku")]
@@ -2555,12 +2544,6 @@ impl App {
             }
             #[cfg(target_os = "haiku")]
             Action::Disconnect(_) => {}
-            Action::Headers(headers) => {
-                self.headers = headers;
-                self.ctx.headers = headers != Headers::Off;
-                crate::save_setting("headers", headers.key());
-                self.relayout();
-            }
             Action::Edit(field) => {
                 self.finish_field();
                 let text = crate::setting(&field.key()).unwrap_or_default();
@@ -3281,7 +3264,7 @@ impl App {
         self.draw_viewers(&visible);
         self.wake_for_agents(&agents);
         self.pane_hits.clear();
-        self.draw_agent_headers(&visible);
+        self.draw_agent_headers();
         self.draw_remote_marks(&visible);
         for divider in &self.dividers {
             self.scene.set_layer(LAYER_OVERLAY);
@@ -3528,24 +3511,23 @@ impl App {
         }
     }
 
-    /// The bar over each pane with an agent: what it's doing and for how
-    /// long, what you last asked it, its subagents and its session. A
-    /// listed program gets its name and how long it has run; any other
-    /// terminal (headers on) its running command, or its folder at rest.
-    fn draw_agent_headers(&mut self, visible: &[(u64, Rect)]) {
+    /// The bar over every pane: over an agent, what it's doing and for
+    /// how long, what you last asked it, its subagents and its session; over
+    /// a listed program, its name and how long it has run; over any other
+    /// terminal, its running command, or its folder at rest. The focused
+    /// pane's is lit. An agent's, opened, pushes its terminal down.
+    fn draw_agent_headers(&mut self) {
         self.header_hits.clear();
-        if self.headers == Headers::Off {
+        if self.tabs.is_empty() {
             return;
         }
         let now = Instant::now();
         let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
         let focus = self.focused_id();
         let sender = self.ctx.sender.clone();
-        for &(id, rect) in visible {
+        let mut moved = false;
+        for (id, slot) in self.tab_slots(self.active).0 {
             let Some(index) = self.panes.iter().position(|pane| pane.id == id) else { continue };
-            if !self.has_header(&self.panes[index]) || rect.h <= 2.0 * AGENT_HEADER {
-                continue;
-            }
             let pane = &mut self.panes[index];
             let info = pane.agent_info(now);
             let program = pane.program_now.clone();
@@ -3560,25 +3542,39 @@ impl App {
                     detail: if busy { String::new() } else { pane.idle_line(&pane.session.cwd, now) },
                 }
             });
-            let bar = Rect::new(rect.x, rect.y - AGENT_HEADER, rect.w, AGENT_HEADER);
+            let bar = Rect::new(slot.x, slot.y, slot.w, AGENT_HEADER.min(slot.h));
             let hover = self.header_hover == Some(id);
-            let Self { scene, ctx, pane_hits, header_hits, .. } = self;
+            let focused = Some(id) == focus;
+            let Self { scene, ctx, pane_hits, header_hits, panes, .. } = self;
             let Ctx { text, theme, .. } = ctx;
-            match (info, program, shell) {
+            let reach = match (info, program, shell) {
                 (Some(info), _, _) => {
-                    // Extended, it reaches over the top of the pane, at most
-                    // most of the way down.
-                    let room = (rect.h * 0.6).floor();
-                    let reach = draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, hover, room, t);
+                    let room = header_room(slot);
+                    let reach = draw_agent_header(scene, text, theme, bar, &info, focused, hover, room, t);
                     header_hits.push((Rect::new(bar.x, bar.y, bar.w, bar.h + reach), id));
+                    reach
                 }
                 (None, Some((name, started)), _) => {
-                    draw_program_header(scene, text, theme, bar, &name, now.duration_since(started))
+                    draw_program_header(scene, text, theme, bar, &name, now.duration_since(started), focused);
+                    0.0
                 }
-                (None, None, Some(shell)) => draw_shell_header(scene, text, theme, bar, &shell),
-                (None, None, None) => {}
-            }
+                (None, None, Some(shell)) => {
+                    draw_shell_header(scene, text, theme, bar, &shell, focused);
+                    0.0
+                }
+                (None, None, None) => 0.0,
+            };
             pane_hits.push((bar, self.active, id));
+            // The terminal makes room for what the header now takes.
+            let pane = &mut panes[index];
+            if (reach - pane.header_reach).abs() >= 1.0 {
+                pane.header_reach = reach;
+                moved = true;
+            }
+        }
+        if moved {
+            self.relayout();
+            self.dirty = true;
         }
     }
 
@@ -4889,12 +4885,44 @@ fn draw_agent_icon(
     x + size
 }
 
+/// What's left of pane place `slot` under its header, which reaches
+/// `reach` below its bar.
+fn under_header(slot: Rect, reach: f32) -> Rect {
+    let top = (AGENT_HEADER + reach.min(header_room(slot))).min(slot.h - 1.0).max(0.0);
+    Rect::new(slot.x, slot.y + top, slot.w, slot.h - top)
+}
+
+/// How far an opened agent header may reach below its bar in pane place
+/// `slot`: at most half of it, leaving the terminal a few rows.
+fn header_room(slot: Rect) -> f32 {
+    (slot.h * 0.5).floor().min(slot.h - 4.0 * AGENT_HEADER).max(0.0)
+}
+
+/// A header's ground, tinted with the accent while its pane is focused.
+fn header_ground(theme: &Theme, ground: Color, focused: bool) -> Color {
+    if focused {
+        ground.mix(theme.accent, 0.14)
+    } else {
+        ground
+    }
+}
+
+/// The edge under a header at `bottom`: a hairline, or while its pane is
+/// focused, a 2-point line in `lit`.
+fn draw_header_edge(scene: &mut Scene, theme: &Theme, bar: Rect, bottom: f32, focused: bool, lit: Color) {
+    if focused {
+        scene.fill(Rect::new(bar.x, bottom - 2.0, bar.w, 2.0), lit);
+    } else {
+        scene.fill(Rect::new(bar.x, bottom - 1.0, bar.w, 1.0), theme.divider);
+    }
+}
+
 /// The bar over an agent's pane. Left: the agent's mark and name, then a
 /// dot and what it's doing, with the turn's clock; then your last prompt.
 /// Right: its subagents, the prompts queued behind this turn, its
 /// session's name and how long it has run, and the toggle that extends it
-/// over the top of the pane (`header_details`), up to `room` tall. Returns
-/// how far it reaches below the bar.
+/// down (`header_details`), up to `room` tall, the terminal moving down to
+/// make room. Returns how far it reaches below the bar.
 fn draw_agent_header(
     scene: &mut Scene,
     text: &mut TextSystem,
@@ -4907,22 +4935,16 @@ fn draw_agent_header(
     t: f32,
 ) -> f32 {
     let color = agent_color(theme, info.state, t);
-    let ground = agent_ground(theme, info.state, t);
+    let ground = header_ground(theme, agent_ground(theme, info.state, t), focused);
     scene.fill(bar, ground);
     if info.state == AgentState::Running {
         draw_running_sweep(scene, theme, bar, t);
     }
     let reach = if info.open { draw_header_details(scene, text, theme, bar, info, ground, room, t) } else { 0.0 };
-    // The edge under it all, lit while the pane is focused and the agent busy.
-    let edge = bar.bottom() + reach;
-    if reach > 0.0 {
-        scene.set_layer(LAYER_OVERLAY);
-    }
-    scene.fill(Rect::new(bar.x, edge - 1.0, bar.w, 1.0), theme.divider);
-    if focused && info.state != AgentState::Idle {
-        scene.fill(Rect::new(bar.x, edge - 2.0, bar.w, 2.0), color.alpha(0.6));
-    }
-    scene.set_layer(LAYER_CONTENT);
+    // The edge under it all, lit while the pane is focused: in the agent's
+    // color while it's busy, else the accent.
+    let lit = if info.state == AgentState::Idle { theme.accent } else { color };
+    draw_header_edge(scene, theme, bar, bar.bottom() + reach, focused, lit);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
@@ -4993,8 +5015,8 @@ fn draw_agent_header(
     reach
 }
 
-/// The extended header, under the bar and over the top of the pane, on the
-/// same ground: the recap and your prompt whole, what each subagent was
+/// The extended header, under the bar and above the terminal, on the same
+/// ground: the recap and your prompt whole, what each subagent was
 /// sent to do, the prompts queued, and where the session runs. At most
 /// `room` tall, cut short with an ellipsis. Returns its height.
 fn draw_header_details(
@@ -5065,11 +5087,6 @@ fn draw_header_details(
         return 0.0;
     }
     let panel = Rect::new(bar.x, bar.bottom(), bar.w, height);
-    scene.set_layer(LAYER_OVERLAY);
-    scene.shadow(Rect::new(panel.x, panel.y + 8.0, panel.w, panel.h - 8.0), Color::hex(0x000000).alpha(0.3), 0.0, 8.0);
-    // Opaque first: the ground is a see-through tint, and the pane's text
-    // is underneath.
-    scene.fill(panel, theme.background);
     scene.fill(panel, ground);
     // Where the bar meets its extension, a hairline.
     scene.fill(Rect::new(panel.x + PAD, panel.y, panel.w - 2.0 * PAD, 1.0), theme.divider.alpha(0.6));
@@ -5086,7 +5103,6 @@ fn draw_header_details(
     let baseline = (y + facts_h / 2.0 + text.ui_ascent(11.0) * 0.36).round();
     text.draw_text(scene, &facts, panel.x + PAD, baseline, UI, 11.0, theme.text_faint);
     scene.pop_clip();
-    scene.set_layer(LAYER_CONTENT);
     height
 }
 
@@ -5137,9 +5153,10 @@ fn draw_program_header(
     bar: Rect,
     name: &str,
     uptime: Duration,
+    focused: bool,
 ) {
-    scene.fill(bar, theme.panel(SURFACE_LIFT));
-    scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
+    scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focused));
+    draw_header_edge(scene, theme, bar, bar.bottom(), focused, theme.accent);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
@@ -5163,13 +5180,20 @@ struct ShellHeader {
     detail: String,
 }
 
-/// The bar over a plain terminal (headers on): a dot (lit while a command
+/// The bar over a plain terminal: a dot (lit while a command
 /// runs, red after one failed), the folder, the command running, then the
 /// last command, how it ended and when, and the git branch.
-fn draw_shell_header(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, bar: Rect, shell: &ShellHeader) {
+fn draw_shell_header(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    bar: Rect,
+    shell: &ShellHeader,
+    focused: bool,
+) {
     let ShellHeader { busy, failed, .. } = *shell;
-    scene.fill(bar, theme.panel(SURFACE_LIFT));
-    scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
+    scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focused));
+    draw_header_edge(scene, theme, bar, bar.bottom(), focused, theme.accent);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;

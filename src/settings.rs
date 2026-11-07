@@ -59,8 +59,6 @@ pub struct Values {
     pub updates: bool,
     /// The window can be see-through (macOS).
     pub see_through: bool,
-    /// Which panes get a status header.
-    pub headers: Headers,
     /// Signed in for remote control; None where there's no relay (Haiku).
     pub remote: Option<bool>,
     /// The phone's web app, which the QR code under it opens.
@@ -73,47 +71,6 @@ pub struct Values {
     pub fields: [String; Field::ALL.len()],
     /// The field being typed in, its text, and whether that's all selected.
     pub editing: Option<(Field, String, bool)>,
-}
-
-/// Which panes get a status header: none, those running an agent (or a
-/// listed program), or every terminal.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Headers {
-    Off,
-    Auto,
-    On,
-}
-
-impl Headers {
-    pub const ALL: [Headers; 3] = [Headers::Off, Headers::Auto, Headers::On];
-
-    /// From its line in the settings file: every terminal unless "off"
-    /// or "auto" (agents only). "on" is from before there was a third
-    /// choice, and gets every terminal too.
-    pub fn parse(value: Option<&str>) -> Headers {
-        match value {
-            Some("off") => Headers::Off,
-            Some("auto") => Headers::Auto,
-            _ => Headers::On,
-        }
-    }
-
-    /// Its line in the settings file.
-    pub fn key(self) -> &'static str {
-        match self {
-            Headers::Off => "off",
-            Headers::Auto => "auto",
-            Headers::On => "all",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Headers::Off => "Off",
-            Headers::Auto => "Auto",
-            Headers::On => "On",
-        }
-    }
 }
 
 /// A setting typed in rather than picked: the model server, model and keys.
@@ -176,7 +133,6 @@ pub enum Action {
     Zoom(i32),
     Updates(bool),
     CheckForUpdates,
-    Headers(Headers),
     /// End the session of the connected phone at this place in the list.
     Disconnect(usize),
     /// Sign in to remote control (true) or out.
@@ -265,7 +221,7 @@ impl Page {
             keys.push(Row::QuickTerminal);
         }
         y = ui.section(x, y, width, "Keys", &keys, values);
-        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Headers], values);
+        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended], values);
         let provider = PROVIDERS[values.provider];
         let mut ai = vec![Row::Provider];
         if provider.is("custom") {
@@ -330,7 +286,6 @@ enum Row {
     Extended,
     Updates,
     CheckForUpdates,
-    Headers,
     Remote,
     /// A phone in control now, at this place in the list.
     Connected(usize),
@@ -425,15 +380,6 @@ impl Ui<'_> {
             Row::FetchConfig => {
                 ("Fetch config", format!("What {} shows, and how", FETCHES[values.fetch.saturating_sub(1)].name))
             }
-            Row::Headers => (
-                "Status header",
-                match values.headers {
-                    Headers::Off => "None over any pane",
-                    Headers::Auto => "Over a pane running an agent: what it's doing, for how long",
-                    Headers::On => "Over every terminal: an agent's status, or the shell's command and folder",
-                }
-                .to_owned(),
-            ),
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
             Row::Extended => (
                 "Extended tab list",
@@ -538,11 +484,6 @@ impl Ui<'_> {
                 Some(true) => self.button(right, control_y, "Sign Out", Action::Remote(false)),
                 _ => self.button(right, control_y, "Sign In…", Action::Remote(true)),
             },
-            Row::Headers => {
-                let labels = Headers::ALL.map(|h| h.label().to_owned());
-                let selected = Headers::ALL.iter().position(|&h| h == values.headers);
-                self.segments(right, control_y, &labels, selected, |i| Action::Headers(Headers::ALL[i]));
-            }
             Row::Provider => {
                 let labels = PROVIDERS.map(|p| p.name.to_owned());
                 self.segments(right, control_y, &labels, Some(values.provider), Action::Provider);
@@ -844,7 +785,6 @@ mod tests {
             zoom: 100.0,
             updates: true,
             see_through: true,
-            headers: Headers::Auto,
             remote: None,
             remote_url: String::new(),
             remote_phones: Vec::new(),
@@ -876,9 +816,6 @@ mod tests {
             Action::TabsTop(false),
             Action::TabsTop(true),
             Action::Extended(true),
-            Action::Headers(Headers::Off),
-            Action::Headers(Headers::Auto),
-            Action::Headers(Headers::On),
         ]);
         expected.extend((0..PROVIDERS.len()).map(Action::Provider));
         expected.extend(Field::ALL.map(Action::Edit));
