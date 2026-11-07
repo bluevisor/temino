@@ -2368,11 +2368,7 @@ impl App {
                     true
                 }
                 (_, Some(c @ '1'..='9')) => {
-                    let n = c as usize - '1' as usize;
-                    // Command+9 is the last shell tab: Settings, numberless,
-                    // isn't counted.
-                    let last = self.tabs.iter().rposition(|tab| tab.focus != SETTINGS).unwrap_or(0);
-                    self.switch_tab(if c == '9' { last } else { n });
+                    self.switch_tab(c as usize - '1' as usize);
                     true
                 }
                 (_, Some('=' | '+')) => {
