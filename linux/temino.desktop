@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Temino
+Comment=A modern GPU-accelerated block terminal
+Exec=temino
+Icon=temino
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=temino
