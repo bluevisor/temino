@@ -69,7 +69,7 @@ const GAP: f32 = 1.0;
 const GRAB: f32 = 4.0;
 const MIN_PANE: f32 = 120.0;
 /// A divider dragged this close to the middle of its split snaps to it.
-const MIDDLE_SNAP: f32 = 12.0;
+const MIDDLE_SNAP: f32 = 32.0;
 /// How far a press on a tab moves before it becomes a drag.
 const DRAG_SLOP: f32 = 4.0;
 /// How long a reordered tab takes to slide into its new place.
