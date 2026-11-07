@@ -81,8 +81,6 @@ const MENU_ROW: f32 = 26.0;
 
 /// How often a window's state is rebuilt for remotes watching it.
 const REMOTE_EVERY: Duration = Duration::from_millis(150);
-/// The colors a tab can be marked with, from its menu: a row of
-/// SWATCHES, then a row of alternates shown while Option is held.
 /// An unnamed tab's AI title: asked once what its panes do has held still
 /// this long, and at most this often.
 const TITLE_SETTLE: Duration = Duration::from_secs(3);
@@ -90,9 +88,13 @@ const TITLE_EVERY: Duration = Duration::from_secs(20);
 const TITLE_SYSTEM: &str = "Name a terminal tab from what its panes are doing, in 2 to 5 words, \
 the way a person would label it (for example: Temino tab colors, API deploy logs, Haiku VM build). \
 Plain text, no quotes, no final period.";
+/// The colors a tab can be marked with, from its menu: a row of
+/// SWATCHES, then a row of alternates shown while Option is held. Each
+/// alternate is its color's lighter sibling (hue turned 14°, a little
+/// lighter), so the two rows read as one palette.
 const TAB_COLORS: [u32; 12] = [
     0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5, // red … purple
-    0xf28fbf, 0x4fc1b0, 0x8f95f2, 0xb7d36a, 0xc9a27e, 0x9aa5b1, // pink, teal, indigo, lime, sand, slate
+    0xf5a18f, 0xf3cf7a, 0xeae885, 0x94d798, 0x82a5ec, 0xdd96da, // salmon, apricot, lemon, mint, periwinkle, orchid
 ];
 const SWATCHES: usize = 6;
 
