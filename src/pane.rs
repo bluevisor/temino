@@ -63,6 +63,9 @@ const RECAP_WAIT: Duration = Duration::from_secs(20);
 const RECAP_SYSTEM: &str = "Someone is coming back to a terminal tab after a break. From what ran there, \
 say in one short sentence (at most 20 words) what they were doing and where it stands. \
 Plain text, no preamble, no quotes.";
+const GIST_SYSTEM: &str = "A coding agent in a terminal was just given a new prompt. Say in a short phrase \
+(at most 10 words) what it is working on now. The prompt may only make sense next to what it was doing \
+before; keep that in view. Plain text, no preamble, no quotes, no final period.";
 /// How much of a pane's recent history the summary is written from.
 const RECAP_BLOCKS: usize = 5;
 const RECAP_LINES: usize = 30;
@@ -242,6 +245,8 @@ pub struct Pane {
     /// on coming back to it after a while.
     left_at: Option<Instant>,
     recap: Option<Recap>,
+    /// The model's line on what the agent is working on, for its header.
+    gist: Option<Gist>,
     /// AI mode: Enter sends the editor's text to the model instead of the
     /// shell. The request on its way: its block and the model's reply.
     ai: bool,
@@ -297,6 +302,37 @@ impl Recap {
     }
 }
 
+/// "What's this agent on?": a line the model writes from each new prompt,
+/// with the line before it for context (a prompt like "yes, merge it"
+/// says little alone). The old line stays up until the new one comes.
+struct Gist {
+    prompt: String,
+    before: Option<String>,
+    /// The line, once the model answered (None if it couldn't).
+    line: Arc<Mutex<Option<Option<String>>>>,
+    landed: bool,
+}
+
+impl Gist {
+    fn new(prompt: String, before: Option<String>) -> Gist {
+        let line = Arc::new(Mutex::new(None));
+        let theirs = line.clone();
+        let context = match &before {
+            Some(before) => format!("Before, it was: {before}\nNew prompt: {prompt}"),
+            None => format!("Prompt: {prompt}"),
+        };
+        let _ = std::thread::Builder::new().name("gist".into()).spawn(move || {
+            let answer = llm::complete(GIST_SYSTEM, &context, 60).ok().map(|answer| agent::one_line(&answer));
+            *theirs.lock().unwrap() = Some(answer.filter(|answer| !answer.is_empty()));
+        });
+        Gist { prompt, before, line, landed: false }
+    }
+
+    fn line(&self) -> Option<String> {
+        self.line.lock().unwrap().clone().flatten().or_else(|| self.before.clone())
+    }
+}
+
 /// What a tab's mark adds to a recap: a fact on its first line, and a
 /// line for the model writing the summary.
 pub struct MarkNote {
@@ -324,6 +360,9 @@ pub struct AgentInfo {
     /// The recap, while one is up: the header shows it in place of the
     /// prompt.
     pub recap: Option<String>,
+    /// The model's line on what it's working on; the header shows it in
+    /// place of the prompt.
+    pub gist: Option<String>,
     /// The folder it runs in, and its git branch.
     pub cwd: String,
     pub branch: Option<String>,
@@ -390,6 +429,7 @@ impl Pane {
             last_turn: None,
             left_at: None,
             recap: None,
+            gist: None,
             ai: false,
             asking: None,
             find: None,
@@ -492,6 +532,7 @@ impl Pane {
             self.typed_prompt = None;
             self.turn = None;
             self.last_turn = None;
+            self.gist = None;
             return None;
         }
         if self.agent_program.is_none() {
@@ -560,7 +601,23 @@ impl Pane {
             self.turn = Some(now);
         }
         self.agent_was = Some(state);
+        self.update_gist();
         Some(if state == AgentState::Idle && self.agent_unseen { AgentState::Done } else { state })
+    }
+
+    /// A new prompt to the agent: the model writes a new line on it.
+    fn update_gist(&mut self) {
+        if !llm::enabled() {
+            self.gist = None;
+            return;
+        }
+        let report = self.watcher.as_ref().and_then(agent::Watcher::report);
+        let Some(prompt) = report.and_then(|r| r.prompt).or_else(|| self.typed_prompt.clone()) else { return };
+        if prompt.trim().is_empty() || self.gist.as_ref().is_some_and(|gist| gist.prompt == prompt) {
+            return;
+        }
+        let before = self.gist.as_ref().and_then(Gist::line);
+        self.gist = Some(Gist::new(prompt, before));
     }
 
     /// What the header over the agent here shows, as of the last `agent()`.
@@ -580,6 +637,7 @@ impl Pane {
             turn: self.turn.map(|start| now.duration_since(start)).or(self.last_turn),
             uptime: now.duration_since(started),
             recap: self.recap.as_ref().map(Recap::line),
+            gist: self.gist.as_ref().and_then(Gist::line),
             cwd: self.session.cwd.clone(),
             branch: self.session.branch.clone(),
             open: self.header_open,
@@ -953,6 +1011,10 @@ impl Pane {
     /// Advances animations; true when the pane needs a new frame.
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut dirty = self.session.tick(now) | self.take_answer();
+        if let Some(gist) = self.gist.as_mut().filter(|gist| !gist.landed && gist.line.lock().unwrap().is_some()) {
+            gist.landed = true;
+            dirty = true;
+        }
         if let Some(recap) = &mut self.recap {
             if recap.summary_at.is_none() && recap.summary().is_some() {
                 recap.summary_at = Some(now);
@@ -1006,6 +1068,9 @@ impl Pane {
         times.push(self.bell.map(|at| at + Duration::from_millis(200)));
         if self.asking.is_some() {
             times.push(Some(Instant::now() + Duration::from_millis(100)));
+        }
+        if self.gist.as_ref().is_some_and(|gist| !gist.landed) {
+            times.push(Some(Instant::now() + Duration::from_millis(250)));
         }
         if let Some(recap) = &self.recap {
             // Going away, or waiting on its summary.

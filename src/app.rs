@@ -4546,11 +4546,14 @@ fn draw_agent_header(
         text.draw_text(scene, chip, right - w, baseline, UI, 11.0, theme.text_faint);
         right -= w + 14.0;
     }
-    // Coming back to the pane, its recap stands in for the prompt.
-    let line = match (&info.recap, &info.prompt) {
-        (Some(recap), _) => Some((recap.clone(), theme.text)),
-        (None, Some(prompt)) => Some((format!("› {prompt}"), theme.text_dim)),
-        (None, None) => None,
+    // The model's line on what it's working on stands in for the prompt,
+    // and coming back to the pane, its recap. Opened, the prompt shows
+    // whole underneath, so the bar doesn't repeat it.
+    let line = match (&info.recap, &info.gist, &info.prompt) {
+        (Some(recap), _, _) => Some((recap.clone(), theme.text)),
+        (None, Some(gist), _) => Some((format!("✦ {gist}"), theme.text)),
+        (None, None, Some(prompt)) if !info.open => Some((format!("› {prompt}"), theme.text_dim)),
+        _ => None,
     };
     if let Some((line, ink)) = line {
         let room = right - x - 14.0;
