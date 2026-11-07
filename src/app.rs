@@ -2941,14 +2941,22 @@ impl App {
             self.dirty = true;
             return;
         }
+        // Control+click is the secondary click on macOS.
+        let secondary =
+            pressed & buttons::SECONDARY != 0 || (cfg!(target_os = "macos") && mods & platform::mods::CONTROL != 0);
         if let Some(&(_, tab, id)) = self.pane_hits.iter().find(|(r, _, _)| r.contains(x, y)) {
             // A pane's line in the extended sidebar, or its agent header:
-            // go to that pane.
+            // go to that pane. A right click on the line is the tab's, as
+            // on the rest of its row: its menu.
             if tab != self.active {
                 self.switch_tab(tab);
             }
             if self.focused_id() != Some(id) {
                 self.set_focus(id);
+            }
+            if secondary && self.tab_area().contains(x, y) {
+                self.open_tab_menu(tab, x, y + 2.0);
+                return;
             }
             if self.tab_area().contains(x, y) {
                 self.pointer = Pointer::Tab { index: tab, x, y, dragging: false };
@@ -2966,9 +2974,6 @@ impl App {
                 self.dirty = true;
                 return;
             }
-            // Control+click is the secondary click on macOS.
-            let secondary =
-                pressed & buttons::SECONDARY != 0 || (cfg!(target_os = "macos") && mods & platform::mods::CONTROL != 0);
             if let Some(&(_, index)) = self.close_hits.iter().find(|(r, _)| r.contains(x, y)) {
                 self.close_tab(index);
             } else if let Some(&(_, index)) = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)) {
