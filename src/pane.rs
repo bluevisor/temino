@@ -103,9 +103,6 @@ pub struct Ctx {
     /// An input method is composing at the cursor: the prompt's hint stays
     /// out of its way.
     pub composing: bool,
-    /// Agents get a status header (Settings ▸ Tabs), and their recap
-    /// shows in it.
-    pub headers: bool,
 }
 
 impl Ctx {
@@ -223,6 +220,9 @@ pub struct Pane {
     /// Whether the agent's header is extended to show what it only has room
     /// to hint at: the whole prompt, the subagents' tasks, the queue.
     pub header_open: bool,
+    /// How far the opened header reaches below its bar, pushing the
+    /// terminal down by as much.
+    pub header_reach: f32,
     /// The agent's state this frame, read once by the window.
     pub agent_now: Option<AgentState>,
     /// Since when the agent has been waiting on you or done unseen, and which.
@@ -378,6 +378,7 @@ impl Pane {
             screen: None,
             agent_unseen: false,
             header_open: false,
+            header_reach: 0.0,
             program_now: None,
             agent_now: None,
             needs_since: None,
@@ -2682,7 +2683,7 @@ impl Pane {
         let hint = if self.completion.is_none() { self.suggestion(ctx) } else { None };
         // Coming back to the pane, its recap takes the hint's place (an
         // agent's goes in its header instead).
-        let recap = self.recap.as_ref().filter(|_| !(ctx.headers && self.agent_now.is_some())).map(Recap::line);
+        let recap = self.recap.as_ref().filter(|_| self.agent_now.is_none()).map(Recap::line);
         let Ctx { text, theme, commands, user_host, .. } = ctx;
         let Pane { session, editor, layout, completion, ai, .. } = self;
         let ai = *ai && phase == Phase::Ready;
