@@ -496,13 +496,19 @@ impl Pane {
         let text_x = PAD_X + 2.0 * cell.width;
         layout.editor_x = text_x;
         layout.editor_y = editor_y;
+        // Not ready for a command yet (starting, or one still running): a
+        // dim hourglass instead of the prompt, so it doesn't look ready.
+        let busy = matches!(phase, Phase::Boot | Phase::Running | Phase::Submitted | Phase::Prompt);
         let prompt_color = match phase {
+            _ if busy => theme.text_faint,
             Phase::Continuation => theme.warning,
             _ if !focused => theme.text_faint,
             _ if ai => theme.variable,
             _ => theme.accent,
         };
         let prompt = match (ai, text.has_glyph('❯', 0)) {
+            _ if busy && text.has_glyph('⧗', 0) => "⧗",
+            _ if busy => "…",
             (true, _) if text.has_glyph('✦', 0) => "✦",
             (true, _) => "?",
             (false, true) => "❯",
