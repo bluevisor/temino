@@ -461,4 +461,319 @@ mod tests {
         assert_eq!(editor.offset(0, 5), "ls 中".len());
         assert_eq!(editor.offset(0, 7), "ls 中文".len());
     }
+    fn typed(text: &str) -> Editor {
+        let mut editor = Editor::new();
+        editor.insert(text);
+        editor
+    }
+
+    fn past(entries: &[&str]) -> History {
+        History { entries: entries.iter().map(|e| e.to_string()).collect(), path: String::new() }
+    }
+
+    #[test]
+    fn word_motions_skip_punctuation_then_a_word() {
+        let mut editor = typed("git commit -m 'fix bug'");
+        editor.cursor = 0;
+        let mut stops = Vec::new();
+        while editor.cursor < editor.text.len() {
+            editor.right(true, false);
+            stops.push(editor.cursor);
+        }
+        assert_eq!(stops, [3, 10, 13, 18, 22, 23]);
+        let mut stops = Vec::new();
+        while editor.cursor > 0 {
+            editor.left(true, false);
+            stops.push(editor.cursor);
+        }
+        assert_eq!(stops, [19, 15, 12, 4, 0]);
+        // Underscores and digits are part of a word.
+        let mut editor = typed("my_var2 = 1");
+        editor.cursor = 0;
+        editor.right(true, false);
+        assert_eq!(editor.cursor, 7);
+    }
+
+    #[test]
+    fn word_motions_treat_non_ascii_letters_as_word_characters() {
+        let mut editor = typed("ls 中文 über");
+        editor.cursor = 0;
+        editor.right(true, false);
+        assert_eq!(editor.cursor, 2);
+        editor.right(true, false);
+        assert_eq!(editor.cursor, "ls 中文".len());
+        editor.right(true, false);
+        assert_eq!(editor.cursor, editor.text.len());
+        editor.left(true, false);
+        assert_eq!(editor.cursor, "ls 中文 ".len());
+    }
+
+    #[test]
+    fn arrows_and_deletes_step_over_whole_characters() {
+        let mut editor = typed("a😀中b");
+        editor.left(false, false);
+        assert_eq!(editor.cursor, "a😀中".len());
+        editor.left(false, false);
+        assert_eq!(editor.cursor, "a😀".len());
+        editor.left(false, false);
+        assert_eq!(editor.cursor, 1);
+        editor.right(false, false);
+        assert_eq!(editor.cursor, "a😀".len());
+        editor.backspace();
+        assert_eq!((editor.text.as_str(), editor.cursor), ("a中b", 1));
+        editor.delete();
+        assert_eq!((editor.text.as_str(), editor.cursor), ("ab", 1));
+        // At either end, nothing happens and nothing panics.
+        editor.cursor = 0;
+        editor.backspace();
+        editor.left(false, false);
+        editor.left(true, false);
+        assert_eq!((editor.text.as_str(), editor.cursor), ("ab", 0));
+        editor.cursor = 2;
+        editor.delete();
+        editor.right(false, false);
+        editor.right(true, false);
+        assert_eq!((editor.text.as_str(), editor.cursor), ("ab", 2));
+    }
+
+    #[test]
+    #[ignore = "bug: Backspace removes one code point, so 👍🏽 becomes 👍 and a ZWJ family emoji falls apart"]
+    fn backspace_removes_a_whole_emoji() {
+        let mut editor = typed("ok 👍🏽");
+        editor.backspace();
+        assert_eq!(editor.text, "ok ");
+        let mut editor = typed("👨‍👩‍👧");
+        editor.backspace();
+        assert_eq!(editor.text, "");
+    }
+
+    #[test]
+    fn deleting_a_word_back() {
+        let mut editor = typed("cd ~/projects/temino");
+        editor.delete_word_back();
+        assert_eq!(editor.text, "cd ~/projects/");
+        editor.delete_word_back();
+        assert_eq!(editor.text, "cd ~/");
+        editor.delete_word_back();
+        assert_eq!(editor.text, "");
+        let mut editor = typed("echo hi  ");
+        editor.delete_word_back();
+        assert_eq!(editor.text, "echo ");
+        // Mid-line: only what is before the caret goes.
+        let mut editor = typed("one two three");
+        editor.cursor = 7;
+        editor.delete_word_back();
+        assert_eq!((editor.text.as_str(), editor.cursor), ("one  three", 4));
+    }
+
+    #[test]
+    fn shift_arrows_select_and_typing_replaces_the_selection() {
+        let mut editor = typed("hello");
+        editor.left(false, true);
+        editor.left(false, true);
+        assert_eq!(editor.selected_text(), Some("lo"));
+        assert_eq!(editor.selection(), Some((3, 5)));
+        editor.insert("p");
+        assert_eq!((editor.text.as_str(), editor.cursor, editor.selection()), ("help", 4, None));
+        // Word selection, then Backspace deletes just the selection.
+        let mut editor = typed("rm -rf build");
+        editor.left(true, true);
+        assert_eq!(editor.selected_text(), Some("build"));
+        editor.backspace();
+        assert_eq!(editor.text, "rm -rf ");
+        // Forward selection, then Delete.
+        let mut editor = typed("abc");
+        editor.cursor = 0;
+        editor.right(false, true);
+        editor.delete();
+        assert_eq!(editor.text, "bc");
+        // Selecting back to where it started selects nothing.
+        let mut editor = typed("abc");
+        editor.left(false, true);
+        editor.right(false, true);
+        assert_eq!(editor.selection(), None);
+    }
+
+    #[test]
+    fn plain_arrows_collapse_a_selection_to_its_edge() {
+        let mut editor = typed("one two three");
+        editor.cursor = 4;
+        editor.right(true, true);
+        assert_eq!(editor.selected_text(), Some("two"));
+        editor.left(false, false);
+        assert_eq!((editor.cursor, editor.selection()), (4, None));
+        editor.right(true, true);
+        editor.right(false, false);
+        assert_eq!((editor.cursor, editor.selection()), (7, None));
+        // Home and End drop the selection unless Shift is held.
+        editor.home(true);
+        assert_eq!(editor.selected_text(), Some("one two"));
+        editor.end(false);
+        assert_eq!((editor.cursor, editor.selection()), (13, None));
+    }
+
+    #[test]
+    fn select_all_then_typing_replaces_everything() {
+        let mut editor = typed("old\ncommand");
+        editor.select_all();
+        assert_eq!(editor.selected_text(), Some("old\ncommand"));
+        editor.insert("new");
+        assert_eq!((editor.text.as_str(), editor.cursor), ("new", 3));
+        let mut empty = Editor::new();
+        empty.select_all();
+        assert_eq!(empty.selected_text(), None);
+    }
+
+    #[test]
+    fn undo_steps_back_through_edits_with_the_caret() {
+        let mut editor = Editor::new();
+        editor.insert("ls");
+        editor.insert(" -la");
+        editor.cursor = 2;
+        editor.delete_word_back();
+        assert_eq!(editor.text, " -la");
+        editor.undo();
+        assert_eq!((editor.text.as_str(), editor.cursor), ("ls -la", 2));
+        editor.undo();
+        assert_eq!((editor.text.as_str(), editor.cursor), ("ls", 2));
+        editor.undo();
+        assert_eq!((editor.text.as_str(), editor.cursor), ("", 0));
+        // Nothing left: undo does nothing.
+        editor.undo();
+        assert_eq!(editor.text, "");
+        // Undo drops a selection and brings back replaced text.
+        let mut editor = typed("abc");
+        editor.select_all();
+        editor.insert("x");
+        editor.undo();
+        assert_eq!((editor.text.as_str(), editor.selection()), ("abc", None));
+        // Clearing is undoable too.
+        editor.clear();
+        assert_eq!(editor.text, "");
+        editor.undo();
+        assert_eq!(editor.text, "abc");
+    }
+
+    #[test]
+    fn take_empties_the_editor_and_forgets_its_undo() {
+        let mut editor = typed("make test");
+        assert_eq!(editor.take(), "make test");
+        assert_eq!((editor.text.as_str(), editor.cursor, editor.anchor), ("", 0, None));
+        editor.undo();
+        assert_eq!(editor.text, "");
+    }
+
+    #[test]
+    fn kills_and_home_end_stay_on_the_caret_line() {
+        let mut editor = typed("first\nsecond line\nthird");
+        editor.cursor = "first\nsecond".len();
+        editor.home(false);
+        assert_eq!(editor.cursor, "first\n".len());
+        editor.end(false);
+        assert_eq!(editor.cursor, "first\nsecond line".len());
+        editor.cursor = "first\nsecond".len();
+        editor.kill_to_end();
+        assert_eq!(editor.text, "first\nsecond\nthird");
+        editor.kill_to_start();
+        assert_eq!((editor.text.as_str(), editor.cursor), ("first\n\nthird", "first\n".len()));
+        // At a line's start, killing back does not join the lines.
+        editor.kill_to_start();
+        assert_eq!(editor.text, "first\n\nthird");
+    }
+
+    #[test]
+    fn up_and_down_move_between_lines_keeping_the_column() {
+        let mut editor = typed("abcdef\nab\n中文xyz");
+        editor.cursor = 5;
+        assert!(editor.vertical(true, false));
+        assert_eq!(editor.cursor, "abcdef\nab".len());
+        assert!(editor.vertical(true, false));
+        // Column 2 is the start of 文.
+        assert_eq!(editor.cursor, "abcdef\nab\n中".len());
+        assert!(!editor.vertical(true, false));
+        assert!(editor.vertical(false, true));
+        assert!(editor.vertical(false, true));
+        assert_eq!(editor.selected_text(), Some("cdef\nab\n中"));
+        assert!(!editor.vertical(false, false));
+        assert_eq!(editor.line_count(), 3);
+        assert_eq!(editor.position(editor.text.len()), (2, 7));
+        assert_eq!(editor.offset(9, 0), editor.text.len());
+        assert_eq!(editor.offset(1, 99), "abcdef\nab".len());
+    }
+
+    #[test]
+    fn history_browsing_keeps_the_draft() {
+        let history = past(&["ls", "pwd"]);
+        let mut editor = typed("dra");
+        assert!(editor.browse(&history, true));
+        assert_eq!(editor.text, "pwd");
+        assert!(editor.browse(&history, true));
+        assert_eq!(editor.text, "ls");
+        // Past the oldest: stays there, but the key is still used.
+        assert!(editor.browse(&history, true));
+        assert_eq!(editor.text, "ls");
+        assert!(editor.browse(&history, false));
+        assert_eq!(editor.text, "pwd");
+        assert!(editor.browse(&history, false));
+        assert_eq!((editor.text.as_str(), editor.cursor), ("dra", 3));
+        // Not browsing: Down is not ours.
+        assert!(!editor.browse(&history, false));
+        assert!(!Editor::new().browse(&past(&[]), true));
+    }
+
+    #[test]
+    fn editing_a_recalled_entry_stops_browsing() {
+        let history = past(&["one", "two"]);
+        let mut editor = Editor::new();
+        editor.browse(&history, true);
+        editor.insert("!");
+        assert_eq!(editor.text, "two!");
+        // Up starts again from the newest entry, with the edit as the draft.
+        editor.browse(&history, true);
+        assert_eq!(editor.text, "two");
+        editor.browse(&history, false);
+        assert_eq!(editor.text, "two!");
+    }
+
+    #[test]
+    fn suggestions_complete_from_the_newest_matching_entry() {
+        let history = past(&["git status", "git stash pop", "git st\nmulti", "echo hi"]);
+        let at = |text: &str| typed(text).suggestion(&history).map(str::to_owned);
+        assert_eq!(at("git st").as_deref(), Some("ash pop"));
+        assert_eq!(at("git stat").as_deref(), Some("us"));
+        assert_eq!(at("git status"), None);
+        assert_eq!(at("nothing"), None);
+        assert_eq!(at("  "), None);
+        assert_eq!(at("a\nb"), None);
+        // Only with the caret at the end.
+        let mut editor = typed("git st");
+        editor.cursor = 2;
+        assert_eq!(editor.suggestion(&history), None);
+    }
+
+    #[test]
+    fn history_file_escapes_come_back_exactly() {
+        assert_eq!(unescape("plain"), "plain");
+        assert_eq!(unescape(r"for x in a\nb"), "for x in a\nb");
+        assert_eq!(unescape(r"echo \\n"), r"echo \n");
+        assert_eq!(unescape(r"trailing\"), r"trailing\");
+        assert_eq!(unescape(r"\t"), "t");
+        // What save writes, unescape reads back.
+        for entry in ["a\\b", "line\nnext", "\\n literal", "中文\\", ""] {
+            let saved = entry.replace('\\', "\\\\").replace('\n', "\\n");
+            assert_eq!(unescape(&saved), entry);
+        }
+    }
+
+    #[test]
+    fn character_widths() {
+        assert_eq!(width('a'), 1);
+        assert_eq!(width('中'), 2);
+        assert_eq!(width('😀'), 2);
+        assert_eq!(width('\t'), 1);
+        assert_eq!(width('\u{0301}'), 0);
+        assert_eq!(width('\x07'), 0);
+        assert_eq!(columns("ls 中文"), 7);
+        assert_eq!(columns(""), 0);
+    }
 }

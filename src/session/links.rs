@@ -200,3 +200,96 @@ pub(super) fn mac_lang() -> String {
         .filter(|lang| lang.len() > 6 && std::path::Path::new("/usr/share/locale").join(lang).is_dir());
     lang.unwrap_or_else(|| "en_US.UTF-8".to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn urls(text: &str) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        find_urls(&chars).into_iter().map(|(a, b)| chars[a..b].iter().collect()).collect()
+    }
+
+    fn path(text: &str, at: usize) -> Option<String> {
+        let chars: Vec<char> = text.chars().collect();
+        find_path(&chars, at).map(|(a, b)| chars[a..b].iter().collect())
+    }
+
+    #[test]
+    fn every_scheme_is_found_and_several_on_a_line() {
+        assert_eq!(
+            urls("a http://x.io b ftp://f.org/p c ssh://git@h:22/r d mailto:me@x.io e file:///etc/hosts"),
+            ["http://x.io", "ftp://f.org/p", "ssh://git@h:22/r", "mailto:me@x.io", "file:///etc/hosts"]
+        );
+        assert_eq!(urls("no links here"), Vec::<String>::new());
+        assert_eq!(urls(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn urls_stop_at_quotes_brackets_and_markdown() {
+        assert_eq!(urls("\"https://x.io/a\""), ["https://x.io/a"]);
+        assert_eq!(urls("<https://x.io/a>"), ["https://x.io/a"]);
+        assert_eq!(urls("'https://x.io/a'"), ["https://x.io/a"]);
+        assert_eq!(urls("**https://x.io/a**"), ["https://x.io/a"]);
+        assert_eq!(urls("[https://x.io/a]"), ["https://x.io/a"]);
+        assert_eq!(urls("`https://x.io/a`"), ["https://x.io/a"]);
+        assert_eq!(urls("https://x.io/a?q=1&r=2#frag!"), ["https://x.io/a?q=1&r=2#frag"]);
+        assert_eq!(urls("https://x.io/list[0]"), ["https://x.io/list[0]"]);
+    }
+
+    #[test]
+    fn urls_keep_non_ascii_letters_and_need_a_word_boundary() {
+        assert_eq!(urls("見て https://例え.jp/パス。"), ["https://例え.jp/パス"]);
+        assert_eq!(urls("(https://x.io)"), ["https://x.io"]);
+        assert_eq!(urls("xhttp://x.io 1http://y.io"), Vec::<String>::new());
+        assert_eq!(urls("-https://x.io"), ["https://x.io"]);
+        // A scheme and nothing else is not a link.
+        assert_eq!(urls("mailto: http://."), Vec::<String>::new());
+    }
+
+    #[test]
+    fn url_ranges_are_in_characters_not_bytes() {
+        let chars: Vec<char> = "中文 https://x.io".chars().collect();
+        assert_eq!(find_urls(&chars), [(3, 15)]);
+    }
+
+    #[test]
+    fn paths_lose_line_numbers_and_sentence_punctuation() {
+        assert_eq!(path("src/main.rs:12", 2).as_deref(), Some("src/main.rs"));
+        assert_eq!(path("src/main.rs:12:", 2).as_deref(), Some("src/main.rs"));
+        assert_eq!(path("see ./build.sh.", 6).as_deref(), Some("./build.sh"));
+        assert_eq!(path("is it /tmp/x?", 8).as_deref(), Some("/tmp/x"));
+        assert_eq!(path("done: ~/a!", 7).as_deref(), Some("~/a"));
+        assert_eq!(path("(src/lib.rs)", 3).as_deref(), Some("src/lib.rs"));
+        assert_eq!(path("{a,b/c.txt}", 4).as_deref(), Some("b/c.txt"));
+        assert_eq!(path("x|y/z", 3).as_deref(), Some("y/z"));
+        assert_eq!(path("файл/путь.txt", 0).as_deref(), Some("файл/путь.txt"));
+    }
+
+    #[test]
+    fn paths_need_a_word_under_the_click() {
+        assert_eq!(path("", 0), None);
+        assert_eq!(path("abc", 3), None);
+        assert_eq!(path("abc", 99), None);
+        assert_eq!(path("a (b)", 2), None);
+        assert_eq!(path(":12", 1), None);
+        assert_eq!(path("...", 1), None);
+        assert_eq!(path("│", 0), None);
+    }
+
+    #[test]
+    fn utf8_lang_is_left_alone_when_a_locale_is_set() {
+        let env = |entries: &[&str]| entries.iter().map(|e| e.to_string()).collect::<Vec<_>>();
+        assert_eq!(utf8_lang(&env(&["LANG=fr_FR.UTF-8"])), None);
+        assert_eq!(utf8_lang(&env(&["HOME=/x", "LC_ALL=C"])), None);
+        assert_eq!(utf8_lang(&env(&["LC_CTYPE=UTF-8"])), None);
+        if cfg!(target_os = "haiku") {
+            return;
+        }
+        // Empty, or only a look-alike name: still no locale.
+        for entries in [&[][..], &["LANG="], &["LANGUAGE=en"], &["MY_LANG=en_US.UTF-8"], &["LC_ALLX=C"]] {
+            let lang = utf8_lang(&env(entries)).unwrap_or_default();
+            assert!(lang.ends_with(".UTF-8"), "{entries:?} gave {lang:?}");
+        }
+    }
+}

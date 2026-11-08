@@ -128,3 +128,146 @@ pub fn encode(event: &KeyEvent, mode: TermMode) -> Vec<u8> {
     }
     bytes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::mods;
+
+    fn key(named: Option<Named>, held: u32, raw: char, bytes: &[u8]) -> KeyEvent {
+        KeyEvent { named, mods: held, raw_char: raw as u32, bytes: bytes.to_vec() }
+    }
+
+    fn special(named: Named, held: u32) -> Vec<u8> {
+        encode(&key(Some(named), held, '\0', b""), TermMode::empty())
+    }
+
+    fn typed(raw: char, held: u32, bytes: &[u8]) -> Vec<u8> {
+        encode(&key(None, held, raw, bytes), TermMode::empty())
+    }
+
+    #[test]
+    fn plain_characters_pass_through_unchanged() {
+        assert_eq!(typed('a', 0, b"a"), b"a");
+        assert_eq!(typed('a', mods::SHIFT, b"A"), b"A");
+        assert_eq!(typed('\0', 0, "中".as_bytes()), "中".as_bytes());
+        assert_eq!(typed('\0', 0, "👍🏽".as_bytes()), "👍🏽".as_bytes());
+        assert_eq!(typed('a', 0, b""), b"");
+    }
+
+    #[test]
+    fn arrows_follow_the_cursor_key_mode() {
+        assert_eq!(special(Named::Up, 0), b"\x1b[A");
+        assert_eq!(special(Named::Down, 0), b"\x1b[B");
+        assert_eq!(special(Named::Right, 0), b"\x1b[C");
+        assert_eq!(special(Named::Left, 0), b"\x1b[D");
+        assert_eq!(special(Named::Home, 0), b"\x1b[H");
+        assert_eq!(special(Named::End, 0), b"\x1b[F");
+        let app = |named| encode(&key(Some(named), 0, '\0', b""), TermMode::APP_CURSOR);
+        assert_eq!(app(Named::Up), b"\x1bOA");
+        assert_eq!(app(Named::Left), b"\x1bOD");
+        assert_eq!(app(Named::Home), b"\x1bOH");
+        assert_eq!(app(Named::End), b"\x1bOF");
+    }
+
+    #[test]
+    fn modified_arrows_carry_the_xterm_modifier_parameter() {
+        assert_eq!(special(Named::Up, mods::SHIFT), b"\x1b[1;2A");
+        assert_eq!(special(Named::Left, mods::OPTION), b"\x1b[1;3D");
+        assert_eq!(special(Named::Right, mods::CONTROL), b"\x1b[1;5C");
+        assert_eq!(special(Named::Down, mods::CONTROL | mods::SHIFT), b"\x1b[1;6B");
+        assert_eq!(special(Named::Up, mods::CONTROL | mods::OPTION | mods::SHIFT), b"\x1b[1;8A");
+        // The shortcut modifier counts as Alt, the same as Option.
+        assert_eq!(special(Named::Left, mods::COMMAND), b"\x1b[1;3D");
+        assert_eq!(special(Named::Left, mods::COMMAND | mods::OPTION), b"\x1b[1;3D");
+        // A modifier wins over application cursor mode.
+        let event = key(Some(Named::Up), mods::CONTROL, '\0', b"");
+        assert_eq!(encode(&event, TermMode::APP_CURSOR), b"\x1b[1;5A");
+    }
+
+    #[test]
+    fn editing_keys_send_tilde_sequences() {
+        assert_eq!(special(Named::Insert, 0), b"\x1b[2~");
+        assert_eq!(special(Named::Delete, 0), b"\x1b[3~");
+        assert_eq!(special(Named::PageUp, 0), b"\x1b[5~");
+        assert_eq!(special(Named::PageDown, 0), b"\x1b[6~");
+        assert_eq!(special(Named::Delete, mods::CONTROL), b"\x1b[3;5~");
+        assert_eq!(special(Named::PageUp, mods::SHIFT), b"\x1b[5;2~");
+        // Application cursor mode only changes arrows, Home and End.
+        let event = key(Some(Named::Delete), 0, '\0', b"");
+        assert_eq!(encode(&event, TermMode::APP_CURSOR), b"\x1b[3~");
+    }
+
+    #[test]
+    fn function_keys_match_xterm() {
+        assert_eq!(special(Named::F(1), 0), b"\x1bOP");
+        assert_eq!(special(Named::F(2), 0), b"\x1bOQ");
+        assert_eq!(special(Named::F(3), 0), b"\x1bOR");
+        assert_eq!(special(Named::F(4), 0), b"\x1bOS");
+        assert_eq!(special(Named::F(1), mods::SHIFT), b"\x1b[1;2P");
+        assert_eq!(special(Named::F(4), mods::CONTROL), b"\x1b[1;5S");
+        let codes = [15, 17, 18, 19, 20, 21, 23, 24];
+        for (n, code) in (5..=12).zip(codes) {
+            assert_eq!(special(Named::F(n), 0), format!("\x1b[{code}~").as_bytes(), "F{n}");
+        }
+        assert_eq!(special(Named::F(5), mods::SHIFT), b"\x1b[15;2~");
+        assert_eq!(special(Named::F(12), mods::CONTROL), b"\x1b[24;5~");
+        let event = key(Some(Named::F(1)), 0, '\0', b"");
+        assert_eq!(encode(&event, TermMode::APP_CURSOR), b"\x1bOP");
+    }
+
+    #[test]
+    fn backspace_enter_tab_and_escape() {
+        assert_eq!(special(Named::Backspace, 0), b"\x7f");
+        assert_eq!(special(Named::Backspace, mods::CONTROL), b"\x08");
+        assert_eq!(special(Named::Backspace, mods::OPTION), b"\x1b\x7f");
+        assert_eq!(special(Named::Enter, 0), b"\r");
+        assert_eq!(special(Named::Enter, mods::SHIFT), b"\r");
+        assert_eq!(special(Named::Enter, mods::OPTION), b"\x1b\r");
+        assert_eq!(special(Named::Tab, 0), b"\t");
+        assert_eq!(special(Named::Tab, mods::SHIFT), b"\x1b[Z");
+        assert_eq!(special(Named::Escape, 0), b"\x1b");
+        assert_eq!(special(Named::Escape, mods::SHIFT), b"\x1b");
+    }
+
+    #[test]
+    fn ctrl_turns_keys_into_control_characters_when_the_keymap_did_not() {
+        assert_eq!(typed('c', mods::CONTROL, b"c"), [0x03]);
+        assert_eq!(typed('c', mods::CONTROL | mods::SHIFT, b"C"), [0x03]);
+        assert_eq!(typed('a', mods::CONTROL, b"a"), [0x01]);
+        assert_eq!(typed('z', mods::CONTROL, b"z"), [0x1a]);
+        assert_eq!(typed(' ', mods::CONTROL, b" "), [0x00]);
+        assert_eq!(typed('2', mods::CONTROL, b"2"), [0x00]);
+        assert_eq!(typed('[', mods::CONTROL, b"["), [0x1b]);
+        assert_eq!(typed('\\', mods::CONTROL, b"\\"), [0x1c]);
+        assert_eq!(typed(']', mods::CONTROL, b"]"), [0x1d]);
+        assert_eq!(typed('6', mods::CONTROL, b"^"), [0x1e]);
+        assert_eq!(typed('-', mods::CONTROL, b"_"), [0x1f]);
+        assert_eq!(typed('8', mods::CONTROL, b"?"), [0x7f]);
+        // Already a control character: left alone.
+        assert_eq!(typed('c', mods::CONTROL, &[0x03]), [0x03]);
+        // Nothing a control character could be: sent as typed.
+        assert_eq!(typed('.', mods::CONTROL, b"."), b".");
+        // Ctrl doesn't touch multi-byte text.
+        assert_eq!(typed('\0', mods::CONTROL, "é".as_bytes()), "é".as_bytes());
+    }
+
+    #[test]
+    fn alt_prefixes_escape_as_meta() {
+        assert_eq!(typed('b', mods::OPTION, b"b"), b"\x1bb");
+        assert_eq!(typed('b', mods::OPTION | mods::SHIFT, b"B"), b"\x1bB");
+        assert_eq!(typed('.', mods::OPTION, b"."), b"\x1b.");
+        assert_eq!(typed('b', mods::COMMAND, b"b"), b"\x1bb");
+        // A keymap that turned Alt+x into a control byte: the plain key is sent.
+        assert_eq!(typed('x', mods::OPTION, &[0x00]), b"\x1bx");
+        // No text, no lone Escape.
+        assert_eq!(typed('b', mods::OPTION, b""), b"");
+    }
+
+    #[test]
+    #[ignore = "bug: Ctrl+Alt+letter sends ESC + the letter, dropping Ctrl (xterm sends ESC + the control byte)"]
+    fn ctrl_alt_letter_keeps_the_control_character() {
+        assert_eq!(typed('a', mods::CONTROL | mods::OPTION, b"a"), b"\x1b\x01");
+        assert_eq!(typed('a', mods::CONTROL | mods::OPTION, &[0x01]), b"\x1b\x01");
+    }
+}

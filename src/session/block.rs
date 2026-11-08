@@ -308,3 +308,153 @@ impl Block {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(kind: BlockKind, command: &str, columns: usize, lines: usize) -> Block {
+        let listener = Listener(Rc::new(RefCell::new(Vec::new())));
+        Block::new(1, kind, command.into(), "/".into(), None, GridSize { columns, lines }, listener)
+    }
+
+    fn finished(output: &[u8]) -> Block {
+        let mut block = block(BlockKind::Command, "cmd", 20, 5);
+        block.feed(output);
+        block.finished = Some(Instant::now());
+        block.exit = Some(0);
+        block
+    }
+
+    #[test]
+    fn clear_commands_are_recognised_and_nothing_else() {
+        for command in ["clear", "  reset ", "cls"] {
+            assert!(block(BlockKind::Command, command, 20, 5).clears, "{command}");
+        }
+        for command in ["clear-cache", "echo clear", "clear; ls", ""] {
+            assert!(!block(BlockKind::Command, command, 20, 5).clears, "{command}");
+        }
+        assert!(!block(BlockKind::Ai, "clear", 20, 5).clears);
+        assert!(!block(BlockKind::Background, "clear", 20, 5).clears);
+    }
+
+    #[test]
+    fn only_a_nonzero_exit_is_a_failure() {
+        let mut block = block(BlockKind::Command, "false", 20, 5);
+        assert!(block.running() && !block.failed());
+        block.exit = Some(0);
+        assert!(!block.failed());
+        block.exit = Some(1);
+        assert!(block.failed());
+        block.exit = Some(-1);
+        assert!(block.failed());
+        let at = block.started + Duration::from_millis(1500);
+        block.finished = Some(at);
+        assert!(!block.running());
+        assert_eq!(block.duration(), Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn output_ends_at_the_last_non_blank_line() {
+        let mut block = finished(b"one\r\ntwo\r\n\r\n   \r\n");
+        assert_eq!(block.output_lines(), 2);
+        assert_eq!(block.output_text(), "one\ntwo");
+        let mut empty = finished(b"");
+        assert_eq!(empty.output_lines(), 0);
+        assert_eq!(empty.output_text(), "");
+    }
+
+    #[test]
+    fn a_running_block_shows_down_to_the_cursor() {
+        let mut block = block(BlockKind::Command, "cmd", 20, 5);
+        assert_eq!(block.output_lines(), 0);
+        block.feed(b"one\r\n\r\n");
+        // The cursor sits two lines down, where the next output goes.
+        assert_eq!(block.output_lines(), 3);
+        block.feed(b"x");
+        assert_eq!(block.output_lines(), 3);
+    }
+
+    #[test]
+    fn scrolled_off_lines_still_count_as_output() {
+        let mut block = finished(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        assert_eq!(block.output_lines(), 8);
+        assert_eq!(block.output_text(), "1\n2\n3\n4\n5\n6\n7\n8");
+        assert_eq!(block.text_between((0, 0), (1, 20)), "1\n2");
+        assert_eq!(block.text_between((7, 0), (7, 0)), "8");
+    }
+
+    #[test]
+    fn text_keeps_wide_characters_and_emoji_whole() {
+        let mut block = finished("中文 ok\r\n👍🏽 done".as_bytes());
+        assert_eq!(block.output_text(), "中文 ok\n👍🏽 done");
+    }
+
+    #[test]
+    fn output_ansi_brings_back_colors_and_styles() {
+        use alacritty_terminal::vte::ansi::{Color as C, NamedColor, Rgb};
+        let mut original =
+            finished(b"\x1b[1;31mbold red\x1b[0m \x1b[38;5;208mo\x1b[48;2;1;2;3mx\x1b[0m\r\n\x1b[4mu\x1b[0m");
+        let ansi = original.output_ansi(100);
+        let mut copy = finished(&ansi);
+        assert_eq!(copy.output_text(), original.output_text());
+        let grid = copy.term.grid();
+        let line0 = &grid[copy.grid_line(0)];
+        assert_eq!(line0[Column(0)].fg, C::Named(NamedColor::Red));
+        assert!(line0[Column(0)].flags.contains(Flags::BOLD));
+        assert_eq!(line0[Column(9)].fg, C::Indexed(208));
+        assert_eq!(line0[Column(10)].bg, C::Spec(Rgb { r: 1, g: 2, b: 3 }));
+        assert!(grid[copy.grid_line(1)][Column(0)].flags.contains(Flags::UNDERLINE));
+        // Only the last `limit` lines.
+        let mut tail = finished(&original.output_ansi(1));
+        assert_eq!(tail.output_text(), "u");
+    }
+
+    #[test]
+    fn resizing_to_the_same_size_changes_nothing() {
+        let mut block = finished(b"hello");
+        let generation = block.generation;
+        block.resize(GridSize { columns: 20, lines: 5 });
+        assert_eq!(block.generation, generation);
+        block.resize(GridSize { columns: 10, lines: 5 });
+        assert_eq!(block.generation, generation + 1);
+        assert_eq!(block.output_text(), "hello");
+    }
+
+    #[test]
+    fn every_feed_counts_as_a_change() {
+        let mut block = block(BlockKind::Command, "cmd", 20, 5);
+        let start = block.generation;
+        block.feed(b"a");
+        block.feed(b"");
+        assert_eq!(block.generation, start + 2);
+    }
+
+    #[test]
+    fn the_alternate_screen_is_noticed() {
+        let mut block = block(BlockKind::Command, "vim", 20, 5);
+        assert!(!block.alt_screen());
+        block.feed(b"\x1b[?1049h");
+        assert!(block.alt_screen());
+        block.feed(b"\x1b[?1049l");
+        assert!(!block.alt_screen());
+    }
+
+    #[test]
+    fn links_outside_the_output_are_none() {
+        let block = finished(b"https://x.io");
+        assert_eq!(block.link_at(0, 3).map(|l| l.url).as_deref(), Some("https://x.io"));
+        assert_eq!(block.link_at(0, 12), None);
+        assert_eq!(block.link_at(0, 20), None);
+        assert_eq!(block.link_at(99, 0), None);
+    }
+
+    #[test]
+    fn links_skip_the_spacers_of_wide_characters() {
+        let block = finished("中文 https://x.io".as_bytes());
+        // 中文 take columns 0-3; the URL starts at column 5.
+        let link = block.link_at(0, 7).expect("a link after wide characters");
+        assert_eq!(link.url, "https://x.io");
+        assert_eq!(link.cells, [(0, 5, 16)]);
+    }
+}
