@@ -13,7 +13,7 @@
 use crate::Locked;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -189,6 +189,19 @@ pub fn sign_out() {
     crate::save_setting("relay_token", "");
     crate::save_setting("account_name", "");
     crate::save_setting("account_picture", "");
+    crate::save_setting("account_login", "");
+}
+
+/// Who an account is, as Settings says it: "you@example.com (Google)".
+/// None for a machine signed in before the relay passed this on.
+fn account_label(email: Option<&str>, provider: Option<&str>) -> Option<String> {
+    let email = email.filter(|e| !e.is_empty())?;
+    let provider = match provider {
+        Some("apple") => " (Apple)",
+        Some("google") => " (Google)",
+        _ => "",
+    };
+    Some(format!("{email}{provider}"))
 }
 
 struct Device {
@@ -199,6 +212,9 @@ struct Device {
     /// gave them (Google does; Apple doesn't).
     person: Option<String>,
     picture: Option<String>,
+    /// The account it signed in with: its email, and "apple" or "google".
+    email: Option<String>,
+    provider: Option<String>,
 }
 
 impl Device {
@@ -220,6 +236,31 @@ struct Peer {
     asked: bool,
 }
 
+/// The first of `addresses` to answer, each tried 250 ms after the one
+/// before, all at once from then on (Happy Eyeballs, RFC 8305). Trying them
+/// one by one, a network whose IPv6 is broken stalled every connect on the
+/// relay's IPv6 addresses for over a minute each before IPv4 got a turn.
+fn connect_first(addresses: &[SocketAddr]) -> std::io::Result<TcpStream> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    for (index, &address) in addresses.iter().enumerate() {
+        let sender = sender.clone();
+        std::thread::Builder::new().name("relay connect".into()).spawn(move || {
+            std::thread::sleep(Duration::from_millis(250) * index as u32);
+            let _ = sender.send(TcpStream::connect_timeout(&address, Duration::from_secs(10)));
+        })?;
+    }
+    drop(sender);
+    let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "the relay's name didn't resolve");
+    // Ends when every attempt has failed; the first success returns at once.
+    for result in receiver {
+        match result {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
+}
+
 /// One connection to the relay, until it drops.
 fn serve() -> Result<(), String> {
     let result = serve_relay();
@@ -232,8 +273,20 @@ fn serve_relay() -> Result<(), String> {
     let token = crate::setting("relay_token").unwrap_or_default();
     let base = relay_url();
     let ws = base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
-    let (mut socket, _) =
-        tungstenite::connect(format!("{ws}/connect?token={}", encode(&token))).map_err(|e| e.to_string())?;
+    let url = format!("{ws}/connect?token={}", encode(&token));
+    let tls = ws.starts_with("wss://");
+    let host = ws.split_once("://").map_or(ws.as_str(), |(_, rest)| rest).split(['/', '?']).next().unwrap_or("");
+    let (name, port) = match host.rsplit_once(':').and_then(|(name, port)| Some((name, port.parse().ok()?))) {
+        Some((name, port)) => (name.trim_matches(['[', ']']), port),
+        None => (host, if tls { 443 } else { 80 }),
+    };
+    let addresses: Vec<SocketAddr> = (name, port).to_socket_addrs().map_err(|e| e.to_string())?.collect();
+    let stream = connect_first(&addresses).map_err(|e| e.to_string())?;
+    let (mut socket, _) = if tls {
+        tungstenite::client_tls(url, stream).map_err(|e| e.to_string())?
+    } else {
+        tungstenite::client(url, tungstenite::stream::MaybeTlsStream::Plain(stream)).map_err(|e| e.to_string())?
+    };
     match socket.get_mut() {
         tungstenite::stream::MaybeTlsStream::Plain(stream) => stream.set_read_timeout(Some(POLL)),
         tungstenite::stream::MaybeTlsStream::Rustls(stream) => stream.get_mut().set_read_timeout(Some(POLL)),
@@ -335,6 +388,8 @@ fn relay_message(
                         person: d.str_at("person").filter(|p| !p.is_empty()).map(str::to_owned),
                         // Only an https address is fetched.
                         picture: d.str_at("picture").filter(|p| p.starts_with("https://")).map(str::to_owned),
+                        email: d.str_at("email").filter(|e| !e.is_empty()).map(str::to_owned),
+                        provider: d.str_at("provider").filter(|p| !p.is_empty()).map(str::to_owned),
                     },
                 );
             }
@@ -344,11 +399,14 @@ fn relay_message(
             if let Some(me) = me {
                 let picture = me.picture.clone().unwrap_or_default();
                 let person = me.person.clone().unwrap_or_default();
+                let login = account_label(me.email.as_deref(), me.provider.as_deref()).unwrap_or_default();
                 if crate::setting("account_name").unwrap_or_default() != person
                     || crate::setting("account_picture").unwrap_or_default() != picture
+                    || crate::setting("account_login").unwrap_or_default() != login
                 {
                     crate::save_setting("account_name", &person);
                     crate::save_setting("account_picture", &picture);
+                    crate::save_setting("account_login", &login);
                     remote::ask(Command::Refresh);
                 }
             }
@@ -520,6 +578,27 @@ fn from_base64(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dead_address_doesnt_hold_up_a_live_one() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live = listener.local_addr().unwrap();
+        // TEST-NET-1 (RFC 5737): nothing answers there.
+        let dead: SocketAddr = format!("192.0.2.1:{}", live.port()).parse().unwrap();
+        let started = Instant::now();
+        let stream = connect_first(&[dead, live]).unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), live);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(connect_first(&[]).is_err());
+    }
+
+    #[test]
+    fn the_account_reads_as_its_email_and_provider() {
+        assert_eq!(account_label(Some("me@example.com"), Some("google")).as_deref(), Some("me@example.com (Google)"));
+        assert_eq!(account_label(Some("me@example.com"), Some("apple")).as_deref(), Some("me@example.com (Apple)"));
+        assert_eq!(account_label(Some(""), Some("apple")), None);
+        assert_eq!(account_label(None, None), None);
+    }
 
     #[test]
     fn base64_round_trips() {
