@@ -63,6 +63,9 @@ pub struct Values {
     pub headers: Headers,
     /// Signed in for remote control; None where there's no relay (Haiku).
     pub remote: Option<bool>,
+    /// Who it's signed in as ("you@example.com (Google)", or a first name),
+    /// once the relay has said.
+    pub remote_account: String,
     /// The phone's web app, which the QR code under it opens.
     pub remote_url: String,
     /// The phones controlling this machine now, by name.
@@ -445,7 +448,12 @@ impl Ui<'_> {
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
             Row::Remote => (
                 "Control from iPhone or iPad",
-                if values.remote == Some(true) {
+                if values.remote == Some(true) && !values.remote_account.is_empty() {
+                    format!(
+                        "Signed in as {} · end-to-end encrypted; new devices need your OK here",
+                        values.remote_account
+                    )
+                } else if values.remote == Some(true) {
                     "Signed in · end-to-end encrypted; new devices need your OK here".to_owned()
                 } else {
                     "Sign in with Apple or Google, then on your phone too".to_owned()
@@ -844,6 +852,7 @@ mod tests {
             see_through: true,
             headers: Headers::Auto,
             remote: None,
+            remote_account: String::new(),
             remote_url: String::new(),
             remote_phones: Vec::new(),
             // Custom shows every AI field.
