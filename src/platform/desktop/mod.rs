@@ -419,7 +419,11 @@ pub fn present(pixels: &[u8], width: u32, height: u32) {
         frame.pixels.clear();
         // Little-endian BGRA is 0xAARRGGBB; softbuffer wants the top byte clear.
         frame.pixels.extend(
-            pixels[..(width * height * 4) as usize].chunks_exact(4).map(|p| u32::from_le_bytes([p[0], p[1], p[2], 0])),
+            pixels[..(width * height * 4) as usize]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| u32::from_le_bytes([p[0], p[1], p[2], 0])),
         );
         frame.width = width;
         frame.height = height;

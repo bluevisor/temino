@@ -23,7 +23,7 @@ impl Picture {
             return None;
         }
         rgba.truncate(width * height * 4);
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0 {
             let a = px[3] as u32;
             for c in &mut px[..3] {
                 *c = (*c as u32 * a / 255) as u8;
@@ -205,7 +205,7 @@ fn decode_kitty(keys: &HashMap<char, String>, data: &[u8]) -> Option<Arc<Picture
         100 => Picture::decode(&bytes),
         24 => {
             let (w, h) = (num('s')?, num('v')?);
-            let rgba = bytes.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+            let rgba = bytes.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect();
             Picture::new(w, h, rgba)
         }
         32 => Picture::new(num('s')?, num('v')?, bytes),

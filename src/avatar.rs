@@ -71,7 +71,7 @@ fn circle(bytes: &[u8]) -> Option<Arc<Picture>> {
     let square = image.crop_imm((image.width() - side) / 2, (image.height() - side) / 2, side, side);
     let mut rgba = square.resize_exact(SIZE, SIZE, image::imageops::FilterType::Triangle).into_rgba8().into_raw();
     let r = SIZE as f32 / 2.0;
-    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (x, y) = ((i as u32 % SIZE) as f32 + 0.5 - r, (i as u32 / SIZE) as f32 + 0.5 - r);
         // A pixel's worth of soft edge.
         let inside = (r - (x * x + y * y).sqrt()).clamp(0.0, 1.0);

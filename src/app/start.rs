@@ -163,7 +163,7 @@ pub(super) fn load_opacity() -> usize {
 pub(super) fn write_ppm(path: &std::ffi::OsStr, bgra: &[u8], width: u32, height: u32) {
     let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
     ppm.reserve(bgra.len() / 4 * 3);
-    for pixel in bgra.chunks_exact(4) {
+    for pixel in bgra.as_chunks::<4>().0 {
         ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
     }
     let _ = std::fs::write(path, ppm);
