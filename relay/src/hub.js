@@ -49,6 +49,7 @@ export class Hub extends DurableObject {
         name: device.name, kind: device.kind, pub: device.pub, added: Date.now(),
         // Who signed it in, for the desktop to show on the pane they're in.
         person: device.person || "", picture: device.picture || "",
+        email: device.email || "", provider: device.provider || "",
       };
       await this.ctx.storage.put("devices", devices);
       await this.announce();
@@ -144,6 +145,7 @@ export class Hub extends DurableObject {
     const online = new Set(sockets.filter((s) => s.readyState === 1).map((s) => this.ctx.getTags(s)[0]));
     const list = Object.entries(devices).map(([id, d]) => ({
       id, name: d.name, kind: d.kind, pub: d.pub, online: online.has(id), person: d.person || "", picture: d.picture || "",
+      email: d.email || "", provider: d.provider || "",
     }));
     for (const socket of sockets) {
       try {

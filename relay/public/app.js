@@ -351,6 +351,15 @@ function render() {
   }
 }
 
+// Who this phone is signed in as: "Signed in as you@example.com (Google)".
+// A Mac shows the same in Settings, so the two can be told apart.
+function signedInAs() {
+  const self = devices.find((d) => d.id === me);
+  const provider = { apple: " (Apple)", google: " (Google)" }[self && self.provider] || "";
+  const who = self && (self.email ? self.email + provider : self.person);
+  return who ? `Signed in as ${who}` : "Signed in";
+}
+
 // Every machine on your account.
 function renderUser() {
   $("tabs").hidden = true;
@@ -362,6 +371,7 @@ function renderUser() {
     <div class="card ${d.id === machine ? "current" : ""}" data-machine="${esc(d.id)}">${dot(d.online ? "idle" : null)}
       <div class="t"><div>${esc(d.name)}</div><div>${d.online ? "Online" : "Offline"}</div></div>
     </div>`).join("") + `</div>` : `<div class="center"><p>No Mac on this account yet. In Temino, open Settings and sign in to Remote Control.</p></div>`)
+    + `<p class="note">${esc(signedInAs())}</p>`
     + `<div class="signout"><button id="notify">${notifyLabel()}</button><button id="signout">Sign Out</button></div>`
     + `<p class="note" id="notifynote">${notifyNote()}</p>`;
   $("notify").onclick = toggleNotify;

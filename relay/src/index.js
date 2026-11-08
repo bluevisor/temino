@@ -226,6 +226,8 @@ async function finish(env, url, req, who) {
     body: JSON.stringify({
       id: device, name: req.name, kind: req.kind, pub: req.pub,
       person: String(who.person || "").slice(0, 40), picture: String(who.picture || "").slice(0, 500),
+      // Which account it signed in with, for "Signed in as …".
+      email: String(who.email || "").slice(0, 120), provider: who.provider,
     }),
   });
   const token = await sign(env, { a: accountId, d: device });

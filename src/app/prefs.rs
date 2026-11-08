@@ -251,6 +251,10 @@ impl App {
             headers: self.headers,
             #[cfg(not(target_os = "haiku"))]
             remote: Some(crate::relay::signed_in()),
+            remote_account: ["account_login", "account_name"]
+                .into_iter()
+                .find_map(|key| crate::setting(key).filter(|v| !v.is_empty()))
+                .unwrap_or_default(),
             #[cfg(target_os = "haiku")]
             remote: None,
             #[cfg(not(target_os = "haiku"))]
