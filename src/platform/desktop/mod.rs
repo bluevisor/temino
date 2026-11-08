@@ -10,6 +10,7 @@
 //! Each window has a core thread of its own (an `App`), numbered from 1:
 //! what a core thread asks for goes to its window, by `window_no`.
 
+use crate::Locked;
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::num::NonZeroU32;
@@ -104,9 +105,14 @@ enum Request {
     Blur(bool),
     /// Where the text caret is, in logical pixels: x, y, height.
     Caret(i32, i32, i32),
+    // The viewers are native views, on macOS only for now.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ViewerOpen(u64, ViewerKind, String, ViewerStyle),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ViewerPlace(Vec<(u64, [f32; 4], bool)>),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ViewerClose(u64),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ViewerFocus(Option<u64>),
     /// A new window, its first tab in this directory.
     NewWindow(Option<String>),
@@ -155,7 +161,7 @@ thread_local! {
 
 fn request(request: Request) {
     if let Some(proxy) = PROXY.get() {
-        let _ = proxy.lock().unwrap().send_event((window_no(), request));
+        let _ = proxy.locked().send_event((window_no(), request));
     }
 }
 
@@ -215,7 +221,7 @@ pub fn window_new(title: &str, width: u32, height: u32, sender: Sender<Msg>) {
 pub fn app_run() {
     let event_loop = EVENT_LOOP.with(|slot| slot.borrow_mut().take()).expect("app_new first");
     let (title, width, height, sender) = SETUP.with(|slot| slot.borrow_mut().take()).expect("window_new first");
-    *MENU_SENDER.lock().unwrap() = Some(sender.clone());
+    *MENU_SENDER.locked() = Some(sender.clone());
     let mut handler =
         Handler { title, size: (width, height), first: Some(sender), windows: Vec::new(), next: 1, primary: 1 };
     let _ = event_loop.run_app(&mut handler);
@@ -303,6 +309,7 @@ mod menu {
     use super::{KeyEvent, UiEvent, MENU_SENDER};
     use crate::keys::Named;
     use crate::platform::mods;
+    use crate::Locked;
     use crate::Msg;
 
     #[repr(C)]
@@ -370,7 +377,7 @@ mod menu {
         let shift = if extra & SHIFT != 0 { mods::SHIFT } else { 0 };
         let bytes = if named.is_some() { Vec::new() } else { c.to_string().into_bytes() };
         let event = UiEvent::Key(KeyEvent { named, mods: mods::COMMAND | shift, raw_char: c as u32, bytes });
-        if let Some(sender) = MENU_SENDER.lock().unwrap().as_ref() {
+        if let Some(sender) = MENU_SENDER.locked().as_ref() {
             let _ = sender.send(Msg::Ui(event));
         }
     }
@@ -403,7 +410,7 @@ pub fn present(pixels: &[u8], width: u32, height: u32) {
     debug_assert!(pixels.len() >= (width * height * 4) as usize);
     let no = window_no();
     let queued = {
-        let mut frames = FRAMES.lock().unwrap();
+        let mut frames = FRAMES.locked();
         let index = frames.iter().position(|(n, ..)| *n == no).unwrap_or_else(|| {
             frames.push((no, Frame { pixels: Vec::new(), width: 0, height: 0 }, false));
             frames.len() - 1
@@ -488,7 +495,7 @@ extern "C" fn viewer_event(id: u64, kind: i32, text: *const std::ffi::c_char) {
     };
     // To the core of the viewer's window, by the pane id it knows.
     let window = (id >> 32) as u32;
-    if let Some((_, sender)) = SENDERS.lock().unwrap().iter().find(|(no, _)| *no == window) {
+    if let Some((_, sender)) = SENDERS.locked().iter().find(|(no, _)| *no == window) {
         let _ = sender.send(Msg::Viewer(id & 0xffff_ffff, event));
     }
 }
@@ -505,7 +512,7 @@ pub fn open_url(url: &str) {
 }
 
 fn with_clipboard<T>(f: impl FnOnce(&mut arboard::Clipboard) -> Option<T>) -> Option<T> {
-    let mut slot = CLIPBOARD.lock().unwrap();
+    let mut slot = CLIPBOARD.locked();
     if slot.is_none() {
         // Kept for the life of the process: on X11 the owner serves pastes.
         *slot = arboard::Clipboard::new().ok();

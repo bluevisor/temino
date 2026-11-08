@@ -16,6 +16,7 @@
 //! The wire format is JSON text frames; docs/remote-control.md has it all,
 //! and the plan for the relay, accounts and the iPhone app.
 
+use crate::Locked;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -86,7 +87,7 @@ impl Client {
     pub fn join(who: Who) -> Client {
         CLIENTS.fetch_add(1, Ordering::Relaxed);
         let id = {
-            let mut hub = HUB.lock().unwrap();
+            let mut hub = HUB.locked();
             hub.next_client += 1;
             let id = hub.next_client;
             hub.watching.push((id, Vec::new()));
@@ -124,7 +125,7 @@ impl Client {
 
     /// Every window's state, if it changed since the client last got it.
     pub fn state(&mut self) -> Option<String> {
-        let hub = HUB.lock().unwrap();
+        let hub = HUB.locked();
         if hub.version == self.sent {
             return None;
         }
@@ -164,7 +165,7 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         CLIENTS.fetch_sub(1, Ordering::Relaxed);
-        let mut hub = HUB.lock().unwrap();
+        let mut hub = HUB.locked();
         hub.watching.retain(|(id, _)| *id != self.id);
         hub.in_control.retain(|(id, _, _)| *id != self.id);
         drop(hub);
@@ -174,7 +175,7 @@ impl Drop for Client {
 
 /// Shows `text` briefly in the first window.
 pub fn notice(text: &str) {
-    let hub = HUB.lock().unwrap();
+    let hub = HUB.locked();
     if let Some((_, sender, _, _)) = hub.windows.iter().min_by_key(|w| w.0) {
         let _ = sender.send(Msg::Notice(text.to_owned()));
     }
@@ -182,7 +183,7 @@ pub fn notice(text: &str) {
 
 /// Asks the first window to show `command` (an approval) to you.
 pub fn ask(command: Command) {
-    let hub = HUB.lock().unwrap();
+    let hub = HUB.locked();
     if let Some((_, sender, _, _)) = hub.windows.iter().min_by_key(|w| w.0) {
         let _ = sender.send(Msg::Remote(command));
     }
@@ -192,16 +193,22 @@ pub fn ask(command: Command) {
 /// where control characters are escaped.
 pub const LINE: char = '\u{1}';
 
+/// A window: its number, its core, its last state as JSON, and the screen
+/// lines that state refers to by key.
+type WindowSlot = (u32, Sender<Msg>, String, HashMap<String, String>);
+/// A client, who's behind it, and the (window, pane) it's in, if any.
+type Control = (u64, Who, Option<(u32, u64)>);
+
 struct Hub {
     /// Each window: its number, its core, its last state as JSON, and the
     /// screen lines that state refers to by key.
-    windows: Vec<(u32, Sender<Msg>, String, HashMap<String, String>)>,
+    windows: Vec<WindowSlot>,
     /// Bumped whenever any window's state changes.
     version: u64,
     /// Each client's watched panes, by (window, pane), keyed by client.
     watching: Vec<(u64, Vec<(u32, u64)>)>,
     /// Each client, who's behind it, and the pane it's in, if any.
-    in_control: Vec<(u64, Who, Option<(u32, u64)>)>,
+    in_control: Vec<Control>,
     next_client: u64,
 }
 
@@ -214,14 +221,14 @@ static STARTED: OnceLock<Option<String>> = OnceLock::new();
 
 /// A window's core joins: commands for window `no` go to `sender`.
 pub fn register(no: u32, sender: Sender<Msg>) {
-    let mut hub = HUB.lock().unwrap();
+    let mut hub = HUB.locked();
     hub.windows.retain(|w| w.0 != no);
     hub.windows.push((no, sender, String::new(), HashMap::new()));
     hub.version += 1;
 }
 
 pub fn unregister(no: u32) {
-    let mut hub = HUB.lock().unwrap();
+    let mut hub = HUB.locked();
     hub.windows.retain(|w| w.0 != no);
     hub.version += 1;
 }
@@ -233,13 +240,13 @@ pub fn watched() -> bool {
 
 /// Who is in pane `pane` of window `no` from another device.
 pub fn in_control(no: u32, pane: u64) -> Vec<Who> {
-    let hub = HUB.lock().unwrap();
+    let hub = HUB.locked();
     hub.in_control.iter().filter(|(_, _, at)| *at == Some((no, pane))).map(|(_, who, _)| who.clone()).collect()
 }
 
 /// Client `client` is in this pane now, or in none; windows redraw.
 fn set_pane(client: u64, at: Option<(u32, u64)>) {
-    let mut hub = HUB.lock().unwrap();
+    let mut hub = HUB.locked();
     let Some(slot) = hub.in_control.iter_mut().find(|(id, _, _)| *id == client) else { return };
     if slot.2 == at {
         return;
@@ -252,12 +259,12 @@ fn set_pane(client: u64, at: Option<(u32, u64)>) {
 /// Whether some client watches pane `pane` of window `no`: only those
 /// panes' screens go out.
 pub fn watching(no: u32, pane: u64) -> bool {
-    HUB.lock().unwrap().watching.iter().any(|(_, panes)| panes.contains(&(no, pane)))
+    HUB.locked().watching.iter().any(|(_, panes)| panes.contains(&(no, pane)))
 }
 
 /// Window `no`'s state, as a JSON object; clients hear of it if it changed.
 pub fn publish(no: u32, state: String, lines: HashMap<String, String>) {
-    let mut hub = HUB.lock().unwrap();
+    let mut hub = HUB.locked();
     let Some(slot) = hub.windows.iter_mut().find(|w| w.0 == no) else { return };
     if slot.2 != state || slot.3 != lines {
         slot.2 = state;
@@ -394,7 +401,7 @@ fn watch(client: u64, message: &Value) {
             _ => None,
         })
         .collect();
-    let mut hub = HUB.lock().unwrap();
+    let mut hub = HUB.locked();
     // Gone from the pane it was in (back up to the tab or the window).
     let left = hub
         .in_control
@@ -415,7 +422,7 @@ fn watch(client: u64, message: &Value) {
 /// Wakes every window to build its state: a window at rest sleeps until
 /// something happens.
 pub fn refresh() {
-    for (_, sender, _, _) in &HUB.lock().unwrap().windows {
+    for (_, sender, _, _) in &HUB.locked().windows {
         let _ = sender.send(Msg::Remote(Command::Refresh));
     }
 }
@@ -447,7 +454,7 @@ fn command(message: &Value) {
         _ => None,
     };
     let Some(command) = command else { return };
-    let hub = HUB.lock().unwrap();
+    let hub = HUB.locked();
     // A new window comes from any window; everything else from its own.
     let target = hub.windows.iter().find(|w| w.0 == window).or(hub.windows.first());
     if let Some((_, sender, _, _)) = target {
@@ -549,7 +556,7 @@ mod tests {
         register(91, sender);
         let version = |no| {
             publish(no, r#"{"no":91}"#.to_owned(), HashMap::new());
-            HUB.lock().unwrap().version
+            HUB.locked().version
         };
         let first = version(91);
         assert_eq!(version(91), first);

@@ -4,6 +4,7 @@
 //! never interleaves with prompts and each block can be styled, selected
 //! and copied on its own.
 
+use crate::Locked;
 use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -177,15 +178,15 @@ impl Credits {
     }
 
     fn acquire(&self) {
-        let mut outstanding = self.outstanding.lock().unwrap();
+        let mut outstanding = self.outstanding.locked();
         while *outstanding >= Self::LIMIT {
-            outstanding = self.ready.wait(outstanding).unwrap();
+            outstanding = self.ready.wait(outstanding).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         *outstanding += 1;
     }
 
     pub fn release(&self) {
-        let mut outstanding = self.outstanding.lock().unwrap();
+        let mut outstanding = self.outstanding.locked();
         *outstanding = outstanding.saturating_sub(1);
         self.ready.notify_one();
     }

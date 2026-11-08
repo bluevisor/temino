@@ -1,4 +1,5 @@
 use super::*;
+use crate::Locked;
 
 /// What a tab is waiting on you for, set by hand so a glance at the list
 /// says what to do with it.
@@ -338,7 +339,7 @@ impl App {
             let context = self.title_context(index, now);
             let title = &mut self.tabs[index].ai_title;
             if let Some(answer) = &title.answer {
-                let Some(answer) = answer.lock().unwrap().clone() else {
+                let Some(answer) = answer.locked().clone() else {
                     wake = Some(now + Duration::from_millis(250));
                     continue;
                 };
@@ -372,7 +373,7 @@ impl App {
             let prompt = self.summary_context(index, now);
             let _ = std::thread::Builder::new().name("tab title".into()).spawn(move || {
                 let reply = crate::llm::complete(TITLE_SYSTEM, &prompt, 90).ok();
-                *answer.lock().unwrap() = Some(reply.as_deref().and_then(title_and_summary));
+                *answer.locked() = Some(reply.as_deref().and_then(title_and_summary));
             });
             wake = Some(wake.map_or(now + Duration::from_millis(250), |w| w.min(now + Duration::from_millis(250))));
         }

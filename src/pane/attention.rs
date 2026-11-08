@@ -1,8 +1,9 @@
 use super::*;
+use crate::Locked;
 
 impl Recap {
     pub(super) fn summary(&self) -> Option<Option<String>> {
-        self.summary.lock().unwrap().clone()
+        self.summary.locked().clone()
     }
 
     /// The recap in one line: the summary once the model wrote it, else
@@ -206,10 +207,10 @@ impl Pane {
             let theirs = summary.clone();
             let _ = std::thread::Builder::new().name("recap".into()).spawn(move || {
                 let answer = llm::complete(RECAP_SYSTEM, &context, 120).ok().filter(|answer| !answer.is_empty());
-                *theirs.lock().unwrap() = Some(answer.map(|answer| agent::one_line(&answer)));
+                *theirs.locked() = Some(answer.map(|answer| agent::one_line(&answer)));
             });
         } else {
-            *summary.lock().unwrap() = Some(None);
+            *summary.locked() = Some(None);
         }
         self.recap = Some(Recap { shown: now, facts: facts.join(" · "), summary, summary_at: None });
     }

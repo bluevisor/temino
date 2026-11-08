@@ -2,6 +2,7 @@
 //! summary), over any OpenAI-compatible server. Calls block: run them off
 //! the UI thread. curl does the HTTP, as for updates.
 
+use crate::Locked;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
@@ -118,7 +119,7 @@ fn configured() -> Option<Vec<String>> {
 /// Asks for the server and its model again: after its address or key
 /// changed, or a call to it failed.
 pub fn forget_model() {
-    *SERVER.lock().unwrap() = None;
+    *SERVER.locked() = None;
 }
 
 pub fn enabled() -> bool {
@@ -129,7 +130,7 @@ pub fn enabled() -> bool {
 /// server that answers.
 fn server() -> Result<(String, String), String> {
     let urls = configured().ok_or("no model server")?;
-    let mut cached = SERVER.lock().unwrap();
+    let mut cached = SERVER.locked();
     if let Some((base, model)) = cached.as_ref().filter(|(base, _)| urls.contains(base)) {
         return Ok((base.clone(), model.clone()));
     }

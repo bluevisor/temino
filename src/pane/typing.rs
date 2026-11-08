@@ -1,4 +1,5 @@
 use super::*;
+use crate::Locked;
 
 impl Pane {
     pub fn key(&mut self, ctx: &mut Ctx, key: KeyEvent) {
@@ -462,7 +463,7 @@ impl Pane {
         let reply = Arc::new(Mutex::new(None));
         let theirs = reply.clone();
         let _ = std::thread::Builder::new().name("ask".into()).spawn(move || {
-            *theirs.lock().unwrap() = Some(ask::run(&request, &prompt));
+            *theirs.locked() = Some(ask::run(&request, &prompt));
         });
         self.asking = Some((id, reply));
     }
@@ -470,7 +471,7 @@ impl Pane {
     /// to look over (Enter runs it, back in shell mode), an answer into its block.
     pub(super) fn take_answer(&mut self) -> bool {
         let Some((id, reply)) = &self.asking else { return false };
-        let Some(reply) = reply.lock().unwrap().take() else { return false };
+        let Some(reply) = reply.locked().take() else { return false };
         let id = *id;
         self.asking = None;
         match reply {

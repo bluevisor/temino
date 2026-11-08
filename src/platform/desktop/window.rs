@@ -1,4 +1,5 @@
 use super::*;
+use crate::Locked;
 
 pub(super) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -93,7 +94,7 @@ impl Win {
     }
 
     pub(super) fn draw(&mut self) {
-        let mut frames = FRAMES.lock().unwrap();
+        let mut frames = FRAMES.locked();
         let Some((_, frame, pending)) = frames.iter_mut().find(|(no, ..)| *no == self.no) else { return };
         *pending = false;
         #[cfg(target_os = "macos")]
@@ -304,7 +305,7 @@ impl Handler {
             }
         }
         crate::trace(&format!("window {no}: opened"));
-        SENDERS.lock().unwrap().push((no, sender.clone()));
+        SENDERS.locked().push((no, sender.clone()));
         win.send_size();
         self.windows.push(win);
         WINDOWS.store(self.windows.len(), Ordering::Release);
@@ -329,8 +330,8 @@ impl Handler {
             temino_viewer_detach(no);
             temino_metal_detach(no);
         }
-        FRAMES.lock().unwrap().retain(|(n, ..)| *n != no);
-        SENDERS.lock().unwrap().retain(|(n, _)| *n != no);
+        FRAMES.locked().retain(|(n, ..)| *n != no);
+        SENDERS.locked().retain(|(n, _)| *n != no);
         drop(win);
         WINDOWS.store(self.windows.len(), Ordering::Release);
         crate::trace(&format!("window {no}: closed, {} left", self.windows.len()));
@@ -476,7 +477,7 @@ impl ApplicationHandler<(u32, Request)> for Handler {
             WindowEvent::Focused(focused) => {
                 if focused {
                     // Menu picks go to the window in front.
-                    *MENU_SENDER.lock().unwrap() = Some(win.sender.clone());
+                    *MENU_SENDER.locked() = Some(win.sender.clone());
                 }
                 win.send(UiEvent::Focus(focused));
             }

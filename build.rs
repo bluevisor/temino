@@ -4,11 +4,7 @@ fn main() {
         println!("cargo:rerun-if-changed={file}");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        cc::Build::new()
-            .file("src/macos/shim.m")
-            .file("src/macos/viewer.m")
-            .flag("-fobjc-arc")
-            .compile("temino_macos");
+        cc::Build::new().file("src/macos/shim.m").file("src/macos/viewer.m").flag("-fobjc-arc").compile("temino_macos");
         for framework in ["AppKit", "Carbon", "Metal", "CoreText", "WebKit"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }

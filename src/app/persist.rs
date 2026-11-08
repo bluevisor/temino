@@ -126,7 +126,7 @@ impl App {
             })
             .collect();
         crate::create_private_dir(&crate::settings_dir());
-        let _ = std::fs::write(tabs_path(), lines);
+        crate::write_private(&tabs_path(), lines);
     }
     /// A node in prefix order: `R`/`C` and the ratio for a split, then its
     /// two sides; `F` (focused) or `P` and the directory for a pane.

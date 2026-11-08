@@ -149,6 +149,10 @@ struct Divider {
     path: Vec<bool>,
 }
 
+/// A tab title request's reply: none yet, then the title and summary (or
+/// nothing usable).
+type TitleAnswer = Arc<std::sync::Mutex<Option<Option<(String, Option<String>)>>>>;
+
 /// A tab's title (used while it has no name) and one-line summary,
 /// written by the model from what its panes are doing. Asked again once
 /// what they're doing has changed and settled, and not more often than
@@ -160,7 +164,7 @@ struct AiTitle {
     /// What the last ask was written from, and its answer on the way.
     asked_for: String,
     asked_at: Option<Instant>,
-    answer: Option<Arc<std::sync::Mutex<Option<Option<(String, Option<String>)>>>>>,
+    answer: Option<TitleAnswer>,
     /// What the panes are doing now, and since when.
     seen: String,
     seen_at: Option<Instant>,
