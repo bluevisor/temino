@@ -202,4 +202,132 @@ mod tests {
         assert!(parse("{\"a\":").is_none());
         assert!(parse("[1] x").is_none());
     }
+
+    fn string(json: &str) -> Option<String> {
+        parse(json)?.str().map(str::to_owned)
+    }
+
+    #[test]
+    fn every_escape_reads_as_its_character() {
+        assert_eq!(string(r#""a\nb\tc\rd\be\ff\/g\\h\"i""#).as_deref(), Some("a\nb\tc\rd\u{8}e\u{c}f/g\\h\"i"));
+        assert_eq!(string(r#""\u0041\u00e9\u4e2d""#).as_deref(), Some("Aé中"));
+        // Upper or lower case hex, and an emoji as its surrogate pair.
+        assert_eq!(string(r#""\u00C9\ud83d\ude00""#).as_deref(), Some("É😀"));
+        // Half a pair alone can't be a character.
+        assert_eq!(string(r#""\ud83d""#).as_deref(), Some("\u{fffd}"));
+        assert_eq!(string(r#""x\ude00y""#).as_deref(), Some("x\u{fffd}y"));
+    }
+
+    #[test]
+    #[ignore = "bug: a high surrogate followed by a \\u escape that isn't a low surrogate swallows it: \"\\ud83d\\u0041\" reads as U+1F441, not U+FFFD then A"]
+    fn half_a_surrogate_pair_doesnt_eat_the_next_escape() {
+        assert_eq!(string(r#""\ud83d\u0041""#).as_deref(), Some("\u{fffd}A"));
+    }
+
+    #[test]
+    fn text_in_any_script_comes_through_unescaped() {
+        let value = parse(r#"{"名前": "テミノ", "emoji": "👩‍💻 ok", "mixed": "naïve café"}"#).unwrap();
+        assert_eq!(value.str_at("名前"), Some("テミノ"));
+        assert_eq!(value.str_at("emoji"), Some("👩‍💻 ok"));
+        assert_eq!(value.str_at("mixed"), Some("naïve café"));
+    }
+
+    #[test]
+    fn nested_objects_and_arrays_keep_their_order() {
+        let text = " {\n \"type\" : \"assistant\" ,\"message\":{\"content\":[ {\"type\":\"text\",\"text\":\"hi\"}, [], {} ],\"usage\":{\"input_tokens\":12}},\"ok\":true,\"no\":false,\"none\":null } \n";
+        let value = parse(text).unwrap();
+        assert_eq!(value.str_at("type"), Some("assistant"));
+        let message = value.get("message").unwrap();
+        let content = message.get("content").unwrap().array();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0].str_at("text"), Some("hi"));
+        assert_eq!(content[1], Value::Array(Vec::new()));
+        assert_eq!(content[2], Value::Object(Vec::new()));
+        assert_eq!(message.get("usage").unwrap().num_at("input_tokens"), Some(12.0));
+        assert!(value.get("ok").unwrap().is_true());
+        assert!(!value.get("no").unwrap().is_true());
+        assert_eq!(value.get("none"), Some(&Value::Null));
+        let Value::Object(fields) = &value else { panic!("not an object") };
+        let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["type", "message", "ok", "no", "none"]);
+        // Asking the wrong kind of value for something gives nothing, not a panic.
+        assert_eq!(value.str_at("ok"), None);
+        assert_eq!(value.num_at("type"), None);
+        assert!(value.str_at("type").is_some() && value.array().is_empty());
+        assert_eq!(Value::Null.get("x"), None);
+        // The first of two same keys wins.
+        assert_eq!(parse(r#"{"a":1,"a":2}"#).unwrap().num_at("a"), Some(1.0));
+        // Deep, but not absurdly so, is fine.
+        let deep = format!("{}1{}", "[".repeat(500), "]".repeat(500));
+        assert!(parse(&deep).is_some());
+    }
+
+    #[test]
+    fn numbers_read_in_every_json_form() {
+        let num = |text: &str| parse(text).and_then(|v| v.num());
+        assert_eq!(num("0"), Some(0.0));
+        assert_eq!(num("-12"), Some(-12.0));
+        assert_eq!(num("3.25"), Some(3.25));
+        assert_eq!(num("1.5e3"), Some(1500.0));
+        assert_eq!(num("2E-2"), Some(0.02));
+        assert_eq!(num("1e+2"), Some(100.0));
+        assert_eq!(num(" 7 "), Some(7.0));
+        assert_eq!(num("12345678901234567890"), Some(1.2345678901234567e19));
+        for bad in ["-", "1e", "1.2.3", "--1", "1-", "e5", ".", "0x10", "NaN", "Infinity", "1 2"] {
+            assert_eq!(parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn malformed_json_is_refused_without_panicking() {
+        let bad = [
+            "",
+            " ",
+            "{",
+            "}",
+            "[",
+            "]",
+            ",",
+            ":",
+            "\"",
+            "\"abc",
+            "\"\\",
+            "\"\\u12",
+            "\"\\u12zz\"",
+            "\"\\ud83d\\u",
+            "{\"a\" 1}",
+            "{\"a\":}",
+            "{\"a\":1,}",
+            "{\"a\":1 \"b\":2}",
+            "{1:2}",
+            "{a:1}",
+            "[1,]",
+            "[1 2]",
+            "[,1]",
+            "tru",
+            "nul",
+            "falsey",
+            "True",
+            "{\"a\":1}}",
+            "[]]",
+            "\"\\é\"",
+            "\u{0}",
+        ];
+        for text in bad {
+            assert_eq!(parse(text), None, "{text:?}");
+        }
+        // Nor does any cut-short piece of a good record.
+        let good = r#"{"a":[1,-2.5e1,{"b":"x\"y\u00e9😀"}],"c":null,"d":true}"#;
+        assert!(parse(good).is_some());
+        for end in (0..good.len()).filter(|&end| good.is_char_boundary(end)) {
+            assert_eq!(parse(&good[..end]), None, "{:?}", &good[..end]);
+        }
+    }
+
+    #[test]
+    #[ignore = "bug: nesting recurses once per level, so a deeply nested line overflows the stack and aborts (this aborts the test run too)"]
+    fn very_deep_nesting_is_refused_instead_of_crashing() {
+        let deep = "[".repeat(1_000_000);
+        assert_eq!(parse(&deep), None);
+    }
 }

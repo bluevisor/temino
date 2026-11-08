@@ -124,3 +124,28 @@ pub fn menu(current: &str) -> (Vec<String>, usize) {
     let selected = Kind::of_path(current).and_then(|kind| KINDS.iter().position(|k| *k == kind));
     (names, selected.unwrap_or(usize::MAX))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shell_is_known_by_its_file_name_wherever_it_lives() {
+        assert_eq!(Kind::of_path("/opt/homebrew/bin/fish"), Some(Kind::Fish));
+        assert_eq!(Kind::of_path("/bin/zsh"), Some(Kind::Zsh));
+        assert_eq!(Kind::of_path("/boot/system/bin/bash"), Some(Kind::Bash));
+        assert_eq!(Kind::of_path("bash"), Some(Kind::Bash));
+        for other in ["", "/bin/", "/bin/sh", "/usr/local/bin/bash5", "/bin/Zsh", "/usr/bin/fish/"] {
+            assert_eq!(Kind::of_path(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_saved_shell_name_comes_back_as_the_same_shell() {
+        for kind in KINDS {
+            assert_eq!(Kind::from_name(kind.name()), Some(kind));
+        }
+        assert_eq!(KINDS.map(Kind::name), ["bash", "zsh", "fish"]);
+        assert_eq!(Kind::from_name("tcsh"), None);
+    }
+}

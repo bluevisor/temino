@@ -499,3 +499,81 @@ pub(super) fn title_and_summary(reply: &str) -> Option<(String, Option<String>)>
     let summary = lines.next().filter(|s| !s.is_empty() && s.chars().count() <= 200).map(str::to_owned);
     Some((title, summary))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marks_come_back_from_the_tabs_file_as_they_were_saved() {
+        for mark in Mark::ALL {
+            assert_eq!(Mark::from_code(mark.code()), Some(mark));
+        }
+        // The saved words are the file format: renaming one loses saved marks.
+        assert_eq!(Mark::ALL.map(Mark::code), ["important", "waiting", "later"]);
+        for code in ["", "Important", "LATER", " waiting", "done"] {
+            assert_eq!(Mark::from_code(code), None, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn only_important_tabs_are_not_set_aside() {
+        assert!(!Mark::Important.aside());
+        assert!(Mark::Waiting.aside());
+        assert!(Mark::Later.aside());
+    }
+
+    #[test]
+    fn the_models_title_loses_its_trimmings() {
+        let title = |reply: &str| title_and_summary(reply).map(|(title, _)| title);
+        assert_eq!(title("**Deploy logs.**").as_deref(), Some("Deploy logs"));
+        assert_eq!(title("- \"Release notes\"").as_deref(), Some("Release notes"));
+        assert_eq!(title("Line 1: Fixing CI\nLine 2: Retrying the flaky test").as_deref(), Some("Fixing CI"));
+        assert_eq!(title("1) Haiku build").as_deref(), Some("Haiku build"));
+        // A title of 60 characters is fine; 61 isn't a title.
+        assert_eq!(title(&"x".repeat(60)).map(|t| t.len()), Some(60));
+        assert_eq!(title(&"x".repeat(61)), None);
+        // Characters, not bytes: 60 CJK characters still count as 60.
+        assert_eq!(title(&"终".repeat(60)).map(|t| t.chars().count()), Some(60));
+        // A title that's only trimmings isn't one.
+        assert_eq!(title("Title:"), None);
+        assert_eq!(title("\"\"\n"), None);
+    }
+
+    #[test]
+    fn a_summary_too_long_is_dropped_but_the_title_kept() {
+        let long = "y".repeat(201);
+        assert_eq!(title_and_summary(&format!("Logs\n{long}")), Some(("Logs".to_owned(), None)));
+        let fits = "y".repeat(200);
+        assert_eq!(title_and_summary(&format!("Logs\n{fits}")), Some(("Logs".to_owned(), Some(fits))));
+        // Blank lines between them don't matter; a third line is ignored.
+        let reply = "\n\nLogs\n\n\nTailing prod\nextra words";
+        assert_eq!(title_and_summary(reply), Some(("Logs".to_owned(), Some("Tailing prod".to_owned()))));
+    }
+
+    #[test]
+    #[ignore = "bug: title_and_summary strips leading digits as list numbering, so \"404 errors\" becomes \"errors\""]
+    fn titles_that_start_with_a_number_keep_it() {
+        let (title, summary) = title_and_summary("404 errors in the API\n3 tests still failing").unwrap();
+        assert_eq!(title, "404 errors in the API");
+        assert_eq!(summary.as_deref(), Some("3 tests still failing"));
+    }
+
+    #[test]
+    fn the_recap_waits_as_long_as_the_environment_says() {
+        // Only this test sets TEMINO_RECAP_MINUTES, and while it's set the
+        // settings file is never read.
+        let idle = |value: &str| {
+            std::env::set_var("TEMINO_RECAP_MINUTES", value);
+            recap_idle()
+        };
+        assert_eq!(idle("5"), Duration::from_secs(300));
+        assert_eq!(idle("0.5"), Duration::from_secs(30));
+        assert_eq!(idle("0"), Duration::ZERO);
+        // Less than nothing is nothing; nonsense is the default ten minutes.
+        assert_eq!(idle("-3"), Duration::ZERO);
+        assert_eq!(idle("soon"), Duration::from_secs(600));
+        assert_eq!(idle(""), Duration::from_secs(600));
+        std::env::remove_var("TEMINO_RECAP_MINUTES");
+    }
+}

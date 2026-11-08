@@ -349,4 +349,140 @@ mod tests {
         assert_eq!(release.size_label(), "77.9 MB");
         assert_eq!(release.date_label(), "Oct 27, 2026");
     }
+
+    /// The release assets, named as the release builds name them: the
+    /// six installed apps look for (an OTA contract), and others beside.
+    const ASSETS: [&str; 8] = [
+        "Temino-0.3.0-macos-arm64.dmg",
+        "Temino-0.3.0-macos-x86_64.dmg",
+        "temino-0.3.0-linux-aarch64.tar.gz",
+        "temino-0.3.0-linux-x86_64.tar.gz",
+        "temino-0.3.0-arm64.hpkg",
+        "temino-0.3.0-x86_64.hpkg",
+        "temino-0.3.0-x86_gcc2.hpkg",
+        "SHA256SUMS",
+    ];
+
+    fn github_release() -> String {
+        let assets: Vec<String> = ASSETS
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                format!(
+                    r#"{{"name": "{name}", "uploader": {{"login": "bluevisor"}}, "size": {}, "download_count": 3, "browser_download_url": "https://github.com/bluevisor/temino/releases/download/v0.3.0/{name}"}}"#,
+                    1000 + i
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"tag_name": "v0.3.0", "published_at": "2026-11-02T18:04:11Z", "assets": [{}], "body": "Fixes."}}"#,
+            assets.join(", ")
+        )
+    }
+
+    #[test]
+    fn newer_means_a_later_number_not_a_longer_string() {
+        assert!(newer("0.2.10", "0.2.9"));
+        assert!(!newer("0.2.9", "0.2.10"));
+        assert!(newer("1.0.0", "0.99.99"));
+        assert!(newer("0.3.0", "0.2.99"));
+        // A part that isn't a number counts as 0, so a pre-release isn't
+        // past its release, nor junk past anything.
+        assert!(!newer("0.3.0-rc1", "0.3.0"));
+        assert!(!newer("x.y.z", "0.0.1"));
+        assert!(!newer("", "0.2.10"));
+    }
+
+    #[test]
+    fn this_system_downloads_its_own_build() {
+        let suffix = asset_suffix().expect("a system with releases");
+        let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "-macos-arm64.dmg"
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            "-macos-x86_64.dmg"
+        } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            "-linux-aarch64.tar.gz"
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            "-linux-x86_64.tar.gz"
+        } else if cfg!(all(target_os = "haiku", target_arch = "aarch64")) {
+            "-arm64.hpkg"
+        } else if cfg!(all(target_os = "haiku", target_arch = "x86_64")) {
+            "-x86_64.hpkg"
+        } else {
+            suffix
+        };
+        assert_eq!(suffix, expected);
+        // Picked from a real-shaped release, as `latest` does: exactly one fits.
+        let json = github_release();
+        let urls = json_strings(&json, "browser_download_url");
+        assert_eq!(urls.len(), ASSETS.len());
+        let fits: Vec<&String> = urls.iter().filter(|url| url.ends_with(suffix)).collect();
+        assert_eq!(fits.len(), 1, "{suffix}: {fits:?}");
+        let index = urls.iter().position(|url| url == fits[0]).unwrap();
+        assert_eq!(asset_size(&json, fits[0]), Some(1000 + index as u64));
+    }
+
+    #[test]
+    fn every_systems_asset_name_picks_one_build_and_only_it() {
+        let suffixes = [
+            "-macos-arm64.dmg",
+            "-macos-x86_64.dmg",
+            "-linux-aarch64.tar.gz",
+            "-linux-x86_64.tar.gz",
+            "-arm64.hpkg",
+            "-x86_64.hpkg",
+            "-x86_gcc2.hpkg",
+        ];
+        for (i, suffix) in suffixes.iter().enumerate() {
+            let fits: Vec<_> = ASSETS.iter().filter(|name| name.ends_with(suffix)).collect();
+            assert_eq!(fits, [&ASSETS[i]], "{suffix}");
+        }
+    }
+
+    #[test]
+    fn the_release_card_reads_its_tag_date_and_size() {
+        let json = github_release();
+        assert_eq!(json_strings(&json, "tag_name"), ["v0.3.0"]);
+        assert_eq!(json_strings(&json, "published_at"), ["2026-11-02T18:04:11Z"]);
+        // Keys that aren't there, or whose values aren't strings, give nothing.
+        assert!(json_strings(&json, "draft").is_empty());
+        assert!(json_strings(&json, "size").is_empty());
+        assert_eq!(asset_size(&json, "https://example.com/missing.dmg"), None);
+        assert_eq!(asset_size(r#"{"browser_download_url": "u"}"#, "u"), None);
+        let release = Release {
+            version: "0.3.0".into(),
+            tag: "v0.3.0".into(),
+            url: String::new(),
+            size: 0,
+            date: "2026-11-02".into(),
+        };
+        assert_eq!(release.notes_url(), "https://github.com/bluevisor/temino/releases/tag/v0.3.0");
+        assert_eq!(release.date_label(), "Nov 2, 2026");
+    }
+
+    #[test]
+    fn sizes_under_a_megabyte_round_up_in_kilobytes() {
+        let label = |size: u64| {
+            Release { version: String::new(), tag: String::new(), url: String::new(), size, date: String::new() }
+                .size_label()
+        };
+        assert_eq!(label(0), "0 KB");
+        assert_eq!(label(1), "1 KB");
+        assert_eq!(label(999_999), "1000 KB");
+        assert_eq!(label(1_000_000), "1.0 MB");
+        assert_eq!(label(12_345_678_901), "12345.7 MB");
+    }
+
+    #[test]
+    fn a_date_that_isnt_one_is_shown_as_it_came() {
+        let label = |date: &str| {
+            Release { version: String::new(), tag: String::new(), url: String::new(), size: 0, date: date.into() }
+                .date_label()
+        };
+        assert_eq!(label("2026-01-31"), "Jan 31, 2026");
+        assert_eq!(label("2026-12-01"), "Dec 1, 2026");
+        for odd in ["", "2026", "2026-13-01", "2026-00-10", "soon"] {
+            assert_eq!(label(odd), odd);
+        }
+    }
 }

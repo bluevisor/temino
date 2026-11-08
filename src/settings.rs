@@ -897,4 +897,66 @@ mod tests {
         page.wheel(-100.0, 0.0, 0.0);
         assert_eq!(page.scroll, 0.0);
     }
+
+    #[test]
+    fn the_status_header_choice_survives_the_settings_file() {
+        for headers in Headers::ALL {
+            assert_eq!(Headers::parse(Some(headers.key())), headers);
+        }
+        // "on" from before Auto existed, no line at all, or nonsense: every terminal.
+        for old in [Some("on"), None, Some(""), Some("Auto"), Some("yes")] {
+            assert_eq!(Headers::parse(old), Headers::On, "{old:?}");
+        }
+        let labels: Vec<_> = Headers::ALL.iter().map(|h| h.label()).collect();
+        assert_eq!(labels, ["Off", "Auto", "On"]);
+    }
+
+    #[test]
+    fn keys_show_as_dots_and_nothing_else_does() {
+        let secret: Vec<_> = Field::ALL.iter().filter(|f| f.secret()).copied().collect();
+        assert_eq!(secret, [Field::LlmKey, Field::TypesafeKey]);
+        // Each field reads its own slot in `Values::fields`.
+        for (i, field) in Field::ALL.into_iter().enumerate() {
+            assert_eq!(field.index(), i);
+        }
+    }
+
+    #[test]
+    fn a_page_that_fits_never_scrolls() {
+        let mut page = Page { content_height: 400.0, view_height: 600.0, ..Page::default() };
+        page.wheel(5.0, 0.0, 0.0);
+        assert_eq!(page.scroll, 0.0);
+        page.wheel(-5.0, 0.0, 0.0);
+        assert_eq!(page.scroll, 0.0);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_theme_list_only_while_over_it() {
+        let list = Rect::new(100.0, 100.0, 200.0, 300.0);
+        let mut page = Page { content_height: 2000.0, view_height: 600.0, list, ..Page::default() };
+        page.toggle_themes();
+        assert!(page.themes_open);
+        page.list_scroll = 0.0;
+        page.wheel(2.0, 150.0, 200.0);
+        assert_eq!((page.list_scroll, page.scroll), (2.0 * LIST_ROW, 0.0));
+        page.wheel(1.0, 50.0, 200.0);
+        assert_eq!((page.list_scroll, page.scroll), (2.0 * LIST_ROW, WHEEL_STEP));
+        // Closed, the list's old place scrolls the page.
+        page.toggle_themes();
+        assert!(!page.themes_open);
+        page.wheel(1.0, 150.0, 200.0);
+        assert_eq!(page.scroll, 2.0 * WHEEL_STEP);
+    }
+
+    #[test]
+    fn a_click_goes_to_what_was_drawn_last_under_it() {
+        let row = Rect::new(0.0, 0.0, 400.0, 60.0);
+        let list = Rect::new(100.0, 30.0, 200.0, 200.0);
+        let page = Page { hits: vec![(row, Action::Ligatures(true)), (list, Action::PickTheme(3))], ..Page::default() };
+        assert_eq!(page.action_at(10.0, 10.0), Some(Action::Ligatures(true)));
+        assert_eq!(page.action_at(150.0, 40.0), Some(Action::PickTheme(3)));
+        assert_eq!(page.action_at(150.0, 250.0), None);
+        // Rectangles take their top-left edge, not their bottom-right one.
+        assert_eq!(page.action_at(400.0, 10.0), None);
+    }
 }

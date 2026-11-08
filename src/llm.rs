@@ -272,4 +272,40 @@ mod tests {
         let text = "say \"hi\"\n\tC:\\ \u{1b}[31m é";
         assert_eq!(json::parse(&quote(text)), Some(Value::String(text.to_owned())));
     }
+
+    #[test]
+    fn every_control_character_is_escaped_so_requests_stay_json() {
+        let text: String = (0u32..0x20).chain([0x7f, 0x2028, 0xfeff]).filter_map(char::from_u32).collect();
+        let quoted = quote(&text);
+        assert!(!quoted[1..quoted.len() - 1].chars().any(|c| (c as u32) < 0x20), "{quoted:?}");
+        assert_eq!(json::parse(&quoted), Some(Value::String(text)));
+        assert_eq!(quote(""), "\"\"");
+        assert_eq!(quote("\u{1}"), "\"\\u0001\"");
+        // A request body built from quoted parts reads back part for part.
+        let (system, prompt) = ("Answer in \"two\" lines.", "pane 1: cargo test\n\tFAILED\\ 終");
+        let body = format!(
+            r#"{{"messages":[{{"role":"system","content":{}}},{{"role":"user","content":{}}}]}}"#,
+            quote(system),
+            quote(prompt)
+        );
+        let body = json::parse(&body).unwrap();
+        let messages = body.get("messages").unwrap().array();
+        assert_eq!(messages[0].str_at("content"), Some(system));
+        assert_eq!(messages[1].str_at("content"), Some(prompt));
+    }
+
+    #[test]
+    fn each_provider_keeps_its_model_under_its_own_setting() {
+        let models: Vec<String> = PROVIDERS.iter().map(|p| p.model_setting()).collect();
+        assert_eq!(models, ["llm_model", "llm_model_vercel", "llm_model_openai", "llm_model_openrouter", "llm_model"]);
+        // Off asks for no key, but has a place to look for one.
+        let off = PROVIDERS[0];
+        assert!(off.is("off") && !off.takes_key());
+        assert_eq!(off.key_setting(), "llm_key");
+        // Ids are what the settings file stores: each names one provider.
+        for p in PROVIDERS {
+            assert_eq!(PROVIDERS.iter().filter(|q| q.is(p.id)).count(), 1, "{}", p.id);
+        }
+        assert_eq!(PROVIDERS.map(|p| p.id), ["off", "vercel", "openai", "openrouter", "custom"]);
+    }
 }

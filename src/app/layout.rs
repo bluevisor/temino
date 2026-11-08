@@ -425,3 +425,200 @@ impl App {
         self.visible_panes().into_iter().find(|(_, rect)| rect.contains(x, y))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tree as text: `3` for a pane, `R(a,b)` / `C(a,b)` for a split,
+    /// with its ratio when it isn't the even 0.5.
+    fn shape(node: &Node) -> String {
+        match node {
+            Node::Leaf(id) => id.to_string(),
+            Node::Split { axis, ratio, first, second } => {
+                let axis = if *axis == Axis::Row { 'R' } else { 'C' };
+                let ratio = if *ratio == 0.5 { String::new() } else { ratio.to_string() };
+                format!("{axis}{ratio}({},{})", shape(first), shape(second))
+            }
+        }
+    }
+
+    fn split(axis: Axis, ratio: f32, first: Node, second: Node) -> Node {
+        Node::Split { axis, ratio, first: Box::new(first), second: Box::new(second) }
+    }
+
+    fn leaves(node: &Node) -> Vec<u64> {
+        let mut out = Vec::new();
+        node.leaves(&mut out);
+        out
+    }
+
+    fn lay_out(node: &Node, rect: Rect) -> (Vec<(u64, Rect)>, Vec<Divider>) {
+        let (mut panes, mut dividers) = (Vec::new(), Vec::new());
+        node.layout(rect, &mut Vec::new(), &mut panes, &mut dividers);
+        (panes, dividers)
+    }
+
+    #[test]
+    fn a_new_pane_opens_after_the_focused_one_or_before_it() {
+        let mut root = Node::Leaf(1);
+        assert!(root.split(1, 2, Axis::Row, false));
+        assert_eq!(shape(&root), "R(1,2)");
+        // Splitting a pane inside a split nests there, in its place.
+        assert!(root.split(1, 3, Axis::Column, true));
+        assert_eq!(shape(&root), "R(C(3,1),2)");
+        assert!(root.split(2, 4, Axis::Column, false));
+        assert_eq!(shape(&root), "R(C(3,1),C(2,4))");
+        assert_eq!(leaves(&root), [3, 1, 2, 4]);
+    }
+
+    #[test]
+    fn splitting_a_pane_that_isnt_there_changes_nothing() {
+        let mut root = split(Axis::Row, 0.3, Node::Leaf(1), Node::Leaf(2));
+        assert!(!root.split(9, 5, Axis::Column, false));
+        assert_eq!(shape(&root), "R0.3(1,2)");
+    }
+
+    #[test]
+    fn a_closed_pane_hands_its_place_to_its_sibling() {
+        // 1 | (2 over (3 | 4))
+        let mut root = split(
+            Axis::Row,
+            0.3,
+            Node::Leaf(1),
+            split(Axis::Column, 0.7, Node::Leaf(2), split(Axis::Row, 0.5, Node::Leaf(3), Node::Leaf(4))),
+        );
+        assert!(root.remove(4));
+        assert_eq!(shape(&root), "R0.3(1,C0.7(2,3))");
+        // The last pane but one in a branch: the branch is now just its pane.
+        assert!(root.remove(2));
+        assert_eq!(shape(&root), "R0.3(1,3)");
+        // The sibling keeps its own splits and ratios when it moves up.
+        let mut root = split(Axis::Row, 0.3, Node::Leaf(1), split(Axis::Column, 0.7, Node::Leaf(2), Node::Leaf(3)));
+        assert!(root.remove(1));
+        assert_eq!(shape(&root), "C0.7(2,3)");
+        assert!(root.remove(3));
+        assert_eq!(shape(&root), "2");
+    }
+
+    #[test]
+    fn closing_the_only_pane_leaves_the_tab_to_its_caller() {
+        let mut root = Node::Leaf(7);
+        assert!(!root.remove(7));
+        assert_eq!(shape(&root), "7");
+        // Nor does closing a pane that isn't there change anything.
+        let mut root = split(Axis::Row, 0.5, Node::Leaf(1), Node::Leaf(2));
+        assert!(!root.remove(3));
+        assert_eq!(shape(&root), "R(1,2)");
+    }
+
+    #[test]
+    fn panes_are_found_anywhere_in_the_tree() {
+        let root = split(Axis::Row, 0.5, Node::Leaf(1), split(Axis::Column, 0.5, Node::Leaf(2), Node::Leaf(3)));
+        for id in [1, 2, 3] {
+            assert!(root.contains(id), "{id}");
+        }
+        assert!(!root.contains(4));
+        assert!(!root.contains(0));
+    }
+
+    #[test]
+    fn side_by_side_panes_share_the_width_around_a_one_pixel_line() {
+        let rect = Rect::new(10.0, 20.0, 1001.0, 600.0);
+        let (a, b, line) = split_rect(rect, Axis::Row, 0.5);
+        assert_eq!(a, Rect::new(10.0, 20.0, 500.0, 600.0));
+        assert_eq!(line, Rect::new(510.0, 20.0, GAP, 600.0));
+        assert_eq!(b, Rect::new(511.0, 20.0, 500.0, 600.0));
+        let (a, b, line) = split_rect(rect, Axis::Column, 0.25);
+        assert_eq!(a, Rect::new(10.0, 20.0, 1001.0, 150.0));
+        assert_eq!(line, Rect::new(10.0, 170.0, 1001.0, GAP));
+        assert_eq!(b, Rect::new(10.0, 171.0, 1001.0, 449.0));
+    }
+
+    #[test]
+    fn uneven_ratios_round_to_whole_pixels_and_lose_none() {
+        let rect = Rect::new(0.0, 0.0, 777.0, 333.0);
+        for ratio in [0.05, 0.1, 0.333, 0.5, 0.618, 0.95] {
+            for axis in [Axis::Row, Axis::Column] {
+                let (a, b, line) = split_rect(rect, axis, ratio);
+                for r in [a, b, line] {
+                    assert_eq!(r.x.fract() + r.y.fract() + r.w.fract() + r.h.fract(), 0.0, "{ratio} {axis:?}");
+                }
+                match axis {
+                    Axis::Row => assert_eq!(a.w + line.w + b.w, rect.w),
+                    Axis::Column => assert_eq!(a.h + line.h + b.h, rect.h),
+                }
+                assert_eq!(b.right(), rect.right());
+                assert_eq!(b.bottom(), rect.bottom());
+            }
+        }
+    }
+
+    #[test]
+    fn nested_panes_tile_the_tab_with_nothing_over_another() {
+        // (1 over 2) | (3 | (4 over 5)), with uneven ratios.
+        let root = split(
+            Axis::Row,
+            0.4,
+            split(Axis::Column, 0.3, Node::Leaf(1), Node::Leaf(2)),
+            split(Axis::Row, 0.6, Node::Leaf(3), split(Axis::Column, 0.5, Node::Leaf(4), Node::Leaf(5))),
+        );
+        let rect = Rect::new(100.0, 50.0, 1200.0, 800.0);
+        let (panes, dividers) = lay_out(&root, rect);
+        assert_eq!(panes.iter().map(|p| p.0).collect::<Vec<_>>(), [1, 2, 3, 4, 5]);
+        assert_eq!(dividers.len(), 4);
+        let area = |r: &Rect| r.w * r.h;
+        let covered: f32 =
+            panes.iter().map(|(_, r)| area(r)).sum::<f32>() + dividers.iter().map(|d| area(&d.line)).sum::<f32>();
+        assert_eq!(covered, area(&rect));
+        let all: Vec<Rect> = panes.iter().map(|p| p.1).chain(dividers.iter().map(|d| d.line)).collect();
+        for (i, a) in all.iter().enumerate() {
+            assert!(a.x >= rect.x && a.y >= rect.y && a.right() <= rect.right() && a.bottom() <= rect.bottom());
+            for b in &all[i + 1..] {
+                let apart = a.right() <= b.x || b.right() <= a.x || a.bottom() <= b.y || b.bottom() <= a.y;
+                assert!(apart, "{a:?} overlaps {b:?}");
+            }
+        }
+        // Pane 1 sits over pane 2 in the left 40%.
+        let (one, two) = (panes[0].1, panes[1].1);
+        assert_eq!((one.x, one.w), (two.x, two.w));
+        assert_eq!(one.w, ((1200.0 - GAP) * 0.4f32).round());
+        assert!(one.bottom() < two.y);
+    }
+
+    #[test]
+    fn each_divider_leads_back_to_its_split() {
+        let mut root = split(Axis::Row, 0.5, Node::Leaf(1), split(Axis::Column, 0.5, Node::Leaf(2), Node::Leaf(3)));
+        let rect = Rect::new(0.0, 0.0, 801.0, 601.0);
+        let (_, dividers) = lay_out(&root, rect);
+        assert_eq!(dividers[0].path, Vec::<bool>::new());
+        assert_eq!(dividers[0].axis, Axis::Row);
+        assert_eq!(dividers[0].parent, rect);
+        assert_eq!(dividers[1].path, [true]);
+        assert_eq!(dividers[1].axis, Axis::Column);
+        assert_eq!(dividers[1].parent, Rect::new(401.0, 0.0, 400.0, 601.0));
+        // Dragging a divider sets its split's ratio, and the panes follow.
+        let Some(Node::Split { ratio, .. }) = root.at_path(&dividers[1].path) else { panic!("no split there") };
+        *ratio = 0.25;
+        let (panes, _) = lay_out(&root, rect);
+        assert_eq!(panes[1].1.h, 150.0);
+        assert_eq!(panes[2].1.h, 450.0);
+        // Paths into panes stop there; paths past a pane lead nowhere.
+        assert!(matches!(root.at_path(&[false]), Some(Node::Leaf(1))));
+        assert!(matches!(root.at_path(&[true, true]), Some(Node::Leaf(3))));
+        assert!(root.at_path(&[false, true]).is_none());
+    }
+
+    #[test]
+    fn a_divider_is_easier_to_grab_than_it_is_to_see() {
+        let rect = Rect::new(0.0, 0.0, 1001.0, 601.0);
+        let (_, _, line) = split_rect(rect, Axis::Row, 0.5);
+        let divider = Divider { line, axis: Axis::Row, parent: rect, path: Vec::new() };
+        let grab = divider.grab_area();
+        assert_eq!(grab, Rect::new(line.x - GRAB, 0.0, GAP + 2.0 * GRAB, 601.0));
+        assert!(grab.contains(line.x - GRAB + 0.5, 300.0) && grab.contains(line.x + GAP + GRAB - 0.5, 300.0));
+        let (_, _, line) = split_rect(rect, Axis::Column, 0.5);
+        let divider = Divider { line, axis: Axis::Column, parent: rect, path: Vec::new() };
+        assert_eq!(divider.grab_area(), Rect::new(0.0, line.y - GRAB, 1001.0, GAP + 2.0 * GRAB));
+    }
+}
