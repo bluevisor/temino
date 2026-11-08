@@ -10,6 +10,7 @@
 //! Settings: `relay` (the relay's address), `relay_token` and
 //! `relay_device` (this machine's sign-in, from `sign_in`).
 
+use crate::Locked;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -77,7 +78,7 @@ pub fn notify(kind: &str, tab: usize) {
     if !signed_in() {
         return;
     }
-    let mut notices = NOTICES.lock().unwrap();
+    let mut notices = NOTICES.locked();
     notices.push(format!(r#"{{"type":"notify","kind":"{kind}","tab":{tab}}}"#));
     // Offline for a while: only the latest few are worth sending.
     let excess = notices.len().saturating_sub(4);
@@ -85,7 +86,7 @@ pub fn notify(kind: &str, tab: usize) {
 }
 
 pub fn decide(device: &str, allow: bool) {
-    DECISIONS.lock().unwrap().push((device.to_owned(), allow));
+    DECISIONS.locked().push((device.to_owned(), allow));
 }
 
 /// Signs this machine in: the browser goes to the relay's sign-in page,
@@ -164,18 +165,18 @@ fn sign_in_now() -> Result<(), String> {
 
 /// The phones controlling this machine now: device id, then name.
 pub fn connected() -> Vec<(String, String)> {
-    CONNECTED.lock().unwrap().clone()
+    CONNECTED.locked().clone()
 }
 
 /// Ends phone `device`'s session and takes back its approval, so it can't
 /// come straight back: it has to ask, and you allow it, again.
 pub fn disconnect(device: &str) {
-    DISCONNECTS.lock().unwrap().push(device.to_owned());
+    DISCONNECTS.locked().push(device.to_owned());
 }
 
 /// Publishes who's connected when that changed, and redraws Settings.
 fn set_connected(now: Vec<(String, String)>) {
-    let mut connected = CONNECTED.lock().unwrap();
+    let mut connected = CONNECTED.locked();
     if *connected != now {
         *connected = now;
         drop(connected);
@@ -266,7 +267,7 @@ fn serve_relay() -> Result<(), String> {
             let _ = socket.close(None);
             return Ok(());
         }
-        let decisions: Vec<(String, bool)> = std::mem::take(&mut *DECISIONS.lock().unwrap());
+        let decisions: Vec<(String, bool)> = std::mem::take(&mut *DECISIONS.locked());
         for (id, allow) in decisions {
             let Some(peer) = peers.get_mut(&id) else { continue };
             peer.asked = false;
@@ -281,7 +282,7 @@ fn serve_relay() -> Result<(), String> {
                 peers.remove(&id);
             }
         }
-        let cut: Vec<String> = std::mem::take(&mut *DISCONNECTS.lock().unwrap());
+        let cut: Vec<String> = std::mem::take(&mut *DISCONNECTS.locked());
         for id in cut {
             if let Some(device) = devices.get(&id) {
                 e2e::forget(&device.key);
@@ -306,7 +307,7 @@ fn serve_relay() -> Result<(), String> {
                 seal(id, peer, &state, &mut out)?;
             }
         }
-        out.append(&mut NOTICES.lock().unwrap());
+        out.append(&mut NOTICES.locked());
         for message in out.drain(..) {
             socket.send(tungstenite::Message::text(message)).map_err(|e| e.to_string())?;
         }
@@ -361,7 +362,8 @@ fn relay_message(
             });
         }
         Some("recv") => {
-            let (Some(from), Some(data)) = (message.str_at("from"), message.str_at("data").and_then(from_base64)) else {
+            let (Some(from), Some(data)) = (message.str_at("from"), message.str_at("data").and_then(from_base64))
+            else {
                 return;
             };
             let Some(device) = devices.get(from).filter(|d| d.kind == "phone") else { return };
@@ -466,9 +468,8 @@ fn decode(text: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        let escaped = (bytes[i] == b'%')
-            .then(|| Some(hex(*bytes.get(i + 1)?)? * 16 + hex(*bytes.get(i + 2)?)?))
-            .flatten();
+        let escaped =
+            (bytes[i] == b'%').then(|| Some(hex(*bytes.get(i + 1)?)? * 16 + hex(*bytes.get(i + 2)?)?)).flatten();
         match (escaped, bytes[i]) {
             (Some(b), _) => {
                 out.push(b as u8);
@@ -488,7 +489,8 @@ const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 fn base64(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let n =
+            (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
             if i <= chunk.len() {
                 out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);

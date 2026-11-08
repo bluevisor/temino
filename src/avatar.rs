@@ -2,6 +2,7 @@
 //! on the pane each is in. Each is fetched once (with curl, as updates
 //! are), kept in the settings directory, and cut to a circle.
 
+use crate::Locked;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -18,13 +19,13 @@ static PHOTOS: Mutex<Option<HashMap<String, Option<Arc<Picture>>>>> = Mutex::new
 
 /// The photo at `url`, once it's here.
 pub fn get(url: &str) -> Option<Arc<Picture>> {
-    PHOTOS.lock().unwrap().as_ref()?.get(url).cloned().flatten()
+    PHOTOS.locked().as_ref()?.get(url).cloned().flatten()
 }
 
 /// Starts fetching the photo at `url` (an https address), once.
 pub fn fetch(url: &str) {
     {
-        let mut photos = PHOTOS.lock().unwrap();
+        let mut photos = PHOTOS.locked();
         let photos = photos.get_or_insert_with(HashMap::new);
         if photos.contains_key(url) {
             return;
@@ -34,7 +35,7 @@ pub fn fetch(url: &str) {
     let url = url.to_owned();
     let _ = std::thread::Builder::new().name("avatar".into()).spawn(move || {
         let photo = load(&url);
-        if let Some(photos) = PHOTOS.lock().unwrap().as_mut() {
+        if let Some(photos) = PHOTOS.locked().as_mut() {
             photos.insert(url, photo);
         }
         crate::remote::refresh();
@@ -70,7 +71,7 @@ fn circle(bytes: &[u8]) -> Option<Arc<Picture>> {
     let square = image.crop_imm((image.width() - side) / 2, (image.height() - side) / 2, side, side);
     let mut rgba = square.resize_exact(SIZE, SIZE, image::imageops::FilterType::Triangle).into_rgba8().into_raw();
     let r = SIZE as f32 / 2.0;
-    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (x, y) = ((i as u32 % SIZE) as f32 + 0.5 - r, (i as u32 / SIZE) as f32 + 0.5 - r);
         // A pixel's worth of soft edge.
         let inside = (r - (x * x + y * y).sqrt()).clamp(0.0, 1.0);

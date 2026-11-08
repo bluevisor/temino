@@ -572,4 +572,94 @@ mod tests {
         assert_eq!(library[0].theme().accent, Theme::dark().accent);
         assert_eq!(library.len(), BUILT_IN.len());
     }
+
+    #[test]
+    fn every_color_a_ghostty_theme_sets_is_read() {
+        let mut text = String::from("background = #282a36\nforeground = f8f8f2\ncursor-color = #ff79c6\n");
+        text.push_str("selection-background =   #44475a  \n");
+        for i in 0..16 {
+            text.push_str(&format!("palette = {i}=#{:06x}\n", 0x10 * (i + 1)));
+        }
+        let palette = parse_palette("Dracula", &text).unwrap();
+        assert_eq!(palette.name, "Dracula");
+        assert_eq!((palette.background, palette.foreground), (0x282a36, 0xf8f8f2));
+        assert_eq!((palette.cursor, palette.selection, palette.accent), (Some(0xff79c6), Some(0x44475a), None));
+        assert_eq!(palette.ansi, std::array::from_fn(|i| 0x10 * (i as u32 + 1)));
+    }
+
+    #[test]
+    fn broken_lines_in_a_theme_file_are_skipped() {
+        let defaults = parse_palette("x", "background=#000000\nforeground=#ffffff").unwrap().ansi;
+        let text = "\
+            # palette = 2=#00ff00\n\
+            just some words\n\
+            background = #101010\r\n\
+            foreground = #eeeeee\n\
+            font-family = Menlo\n\
+            palette = 16=#123456\n\
+            palette = -1=#123456\n\
+            palette = x=#123456\n\
+            palette = #123456\n\
+            palette = 3=#zzzzzz\n\
+            palette = 4 = #abcdef\n\
+            cursor-color = not a color\n\
+            =\n";
+        let palette = parse_palette("Broken", text).unwrap();
+        assert_eq!((palette.background, palette.foreground), (0x101010, 0xeeeeee));
+        assert_eq!(palette.cursor, None);
+        // Only the one good palette line took; the rest keep Temino's own.
+        let mut expected = defaults;
+        expected[4] = 0xabcdef;
+        assert_eq!(palette.ansi, expected);
+        // Without a readable background and foreground there's no theme.
+        assert!(parse_palette("x", "background = #12345g\nforeground = #ffffff").is_none());
+        assert!(parse_palette("x", "background = #000000").is_none());
+        assert!(parse_palette("x", "").is_none());
+    }
+
+    #[test]
+    fn a_theme_files_colors_become_the_ui() {
+        let mut text = String::from("background = #fdf6e3\nforeground = #657b83\n");
+        for (i, rgb) in [(1, 0xdc322f), (2, 0x859900), (3, 0xb58900), (5, 0xd33682), (12, 0x268bd2)] {
+            text.push_str(&format!("palette = {i}=#{rgb:06x}\n"));
+        }
+        let theme = parse_palette("Solarized Light", &text).unwrap().theme();
+        assert_eq!(theme.background, Color::hex(0xfdf6e3));
+        assert_eq!(theme.text, Color::hex(0x657b83));
+        assert_eq!(
+            (theme.error, theme.success, theme.warning),
+            (Color::hex(0xdc322f), Color::hex(0x859900), Color::hex(0xb58900))
+        );
+        // No accent or cursor set: both are ANSI 12; selection is the accent, faint.
+        assert_eq!(theme.accent, Color::hex(0x268bd2));
+        assert_eq!(theme.cursor, theme.accent);
+        assert_eq!(theme.selection, theme.accent.alpha(0.3));
+        // A light background lifts panels toward black.
+        assert!(theme.light());
+        assert_eq!(theme.lift(), Color::hex(0x000000));
+    }
+
+    #[test]
+    fn theme_files_join_the_library_by_name() {
+        let dir = std::env::temp_dir().join(format!("temino-themes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = "background = #111111\nforeground = #eeeeee\n";
+        std::fs::write(dir.join("Zenburn.conf"), good).unwrap();
+        std::fs::write(dir.join("Ayu"), good).unwrap();
+        std::fs::write(dir.join(".DS_Store"), good).unwrap();
+        std::fs::write(dir.join("Notes"), "not a theme").unwrap();
+        std::fs::write(dir.join("Apple II"), "background = #000000\nforeground = #00ff00\n").unwrap();
+        let library = library(dir.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        let names: Vec<&str> = library.iter().map(|p| p.name.as_str()).collect();
+        // Hidden files and files that aren't themes are left out; one named
+        // like a built-in replaces it.
+        assert_eq!(&names[BUILT_IN.len() - 1..], ["Apple II", "Ayu", "Zenburn"]);
+        assert_eq!(names.iter().filter(|&&n| n == "Apple II").count(), 1);
+        assert_eq!(library.len(), BUILT_IN.len() + 2);
+        let apple = library.iter().find(|p| p.name == "Apple II").unwrap();
+        assert_eq!(apple.foreground, 0x00ff00);
+        assert_eq!(names[0], "Temino");
+    }
 }

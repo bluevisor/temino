@@ -35,6 +35,7 @@ mod scene;
 mod session;
 mod settings;
 mod shells;
+mod store;
 mod text;
 mod theme;
 mod ui;
@@ -43,6 +44,7 @@ mod viewer;
 
 use std::sync::mpsc;
 use std::thread;
+pub use store::Locked;
 
 pub enum Msg {
     Ui(platform::UiEvent),
@@ -97,7 +99,7 @@ pub fn save_setting(key: &str, value: &str) {
         .collect();
     lines.push(format!("{prefix}{value}"));
     create_private_dir(&settings_dir());
-    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+    store::write_atomic(&path, (lines.join("\n") + "\n").as_bytes(), false);
 }
 
 /// Makes `dir` (and its parents) and leaves it readable only by you, as
@@ -111,27 +113,20 @@ pub fn create_private_dir(dir: &str) {
     }
 }
 
-/// Writes `path` readable only by you, including when it already exists.
+/// Replaces `path`, readable only by you, all at once (see
+/// `store::write_atomic`).
 pub fn write_private(path: &str, contents: impl AsRef<[u8]>) {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        options.mode(0o600);
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    if let Ok(mut file) = options.open(path) {
-        let _ = file.write_all(contents.as_ref());
-    }
+    store::write_atomic(path, contents.as_ref(), true);
 }
 
 /// Reports a fatal error the way native apps do, with an alert.
 pub fn fatal(message: &str) {
     eprintln!("temino: {message}");
     create_private_dir(&settings_dir());
-    let _ = std::fs::write(format!("{}/crash.log", settings_dir()), format!("{message}\n"));
+    store::log(message);
+    // crash.log keeps the latest crash on its own, for a bug report.
+    let line = format!("{} {} {message}\n", store::timestamp_now(), env!("CARGO_PKG_VERSION"));
+    let _ = std::fs::write(format!("{}/crash.log", settings_dir()), line);
     platform::alert(&format!("Temino: {message}"));
 }
 
@@ -171,17 +166,7 @@ fn main() {
         let frames = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(3);
         std::process::exit(app::selftest(path, width, height, frames));
     }
-    std::panic::set_hook(Box::new(|info| {
-        let location = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
-        let payload = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_default();
-        fatal(&format!("crashed: {payload}{location}"));
-        platform::quit();
-    }));
+    store::install_panic_hook();
 
     let (sender, receiver) = mpsc::channel();
     platform::app_new("application/x-vnd.bluevisor-Temino");

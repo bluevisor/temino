@@ -57,8 +57,10 @@ impl Find {
         }
         let needle: Vec<char> = self.query.chars().collect();
         let fold = !self.query.chars().any(char::is_uppercase);
+        let before = self.scanned.len();
         self.scanned.retain(|id, _| blocks.iter().any(|b| b.id == *id));
-        let mut changed = query_changed;
+        // Blocks cleared away (Cmd+K) take their matches with them.
+        let mut changed = query_changed || self.scanned.len() != before;
         for block in blocks {
             let stale = match self.scanned.get(&block.id) {
                 None => true,
@@ -189,5 +191,154 @@ mod tests {
         find.step(true);
         assert_eq!(find.current, Some(m(2)));
         assert_eq!(find.status(), "3 of 3");
+    }
+    use crate::session::{GridSize, Session};
+    use crate::theme::Theme;
+
+    /// A session with one finished command block per output.
+    fn session(outputs: &[&str]) -> Session {
+        let theme = Theme::dark();
+        let mut session = Session::new(GridSize { columns: 30, lines: 8 });
+        for output in outputs {
+            session.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07", &theme);
+            session.submit("cmd");
+            session.feed(format!("\x1b]133;C\x07{output}\x1b]133;D;0\x07").as_bytes(), &theme);
+        }
+        session
+    }
+
+    fn found(find: &Find) -> Vec<(usize, usize, usize)> {
+        find.matches.iter().map(|m| (m.line, m.start, m.end)).collect()
+    }
+
+    /// Makes every block's last search old enough to be redone.
+    fn age(find: &mut Find) {
+        for (_, at, _) in find.scanned.values_mut() {
+            *at -= RESCAN;
+        }
+    }
+
+    #[test]
+    fn smart_case_matches_across_blocks() {
+        let session = session(&["Error: one\r\nerror two", "no problems", "ERROR three"]);
+        assert_eq!(session.blocks.len(), 3);
+        let mut find = Find::new(String::new());
+        find.query = "error".into();
+        find.refresh(&session.blocks);
+        assert_eq!(found(&find), [(0, 0, 5), (1, 0, 5), (0, 0, 5)]);
+        assert_eq!(find.matches[2].block, session.blocks[2].id);
+        // An uppercase letter makes it case-sensitive.
+        find.query = "Error".into();
+        find.refresh(&session.blocks);
+        assert_eq!(found(&find), [(0, 0, 5)]);
+        assert_eq!(find.status(), "1 of 1");
+    }
+
+    #[test]
+    fn a_new_query_starts_at_the_newest_match() {
+        let session = session(&["a x", "b x x"]);
+        let mut find = Find::new("old".into());
+        assert!(find.selected);
+        find.query = "x".into();
+        find.refresh(&session.blocks);
+        assert_eq!(find.matches.len(), 3);
+        assert_eq!(find.current, find.matches.last().copied());
+        assert!(find.reveal);
+        assert_eq!(find.status(), "3 of 3");
+        find.step(true);
+        assert_eq!(find.status(), "2 of 3");
+        // Searching again without changes keeps the place.
+        find.reveal = false;
+        find.refresh(&session.blocks);
+        assert_eq!((find.status().as_str(), find.reveal), ("2 of 3", false));
+    }
+
+    #[test]
+    fn status_says_when_nothing_matches() {
+        let session = session(&["hello"]);
+        let mut find = Find::new(String::new());
+        assert!(!find.selected);
+        find.refresh(&session.blocks);
+        assert_eq!(find.status(), "");
+        find.query = "zzz".into();
+        find.refresh(&session.blocks);
+        assert_eq!((find.status().as_str(), find.current, find.reveal), ("No matches", None, false));
+        // Stepping with nothing to step to is harmless.
+        find.step(false);
+        assert_eq!(find.current, None);
+    }
+
+    #[test]
+    fn matches_cover_both_cells_of_wide_characters() {
+        let session = session(&["中文 and 文"]);
+        let mut find = Find::new(String::new());
+        find.query = "文".into();
+        find.refresh(&session.blocks);
+        // 中 is columns 0-1, 文 2-3, then " and " and 文 at 9-10.
+        assert_eq!(found(&find), [(0, 2, 4), (0, 9, 11)]);
+        find.query = "文 a".into();
+        find.refresh(&session.blocks);
+        assert_eq!(found(&find), [(0, 2, 6)]);
+    }
+
+    #[test]
+    fn a_printing_block_is_searched_again_and_the_place_is_kept() {
+        let theme = Theme::dark();
+        let mut session = session(&["x"]);
+        session.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07", &theme);
+        session.submit("tail -f log");
+        session.feed(b"\x1b]133;C\x07x one\r\n", &theme);
+        let mut find = Find::new(String::new());
+        find.query = "x".into();
+        find.refresh(&session.blocks);
+        assert_eq!(find.matches.len(), 2);
+        find.step(true);
+        let current = find.current;
+        session.feed(b"x two\r\n", &theme);
+        // Within a quarter second the old search stands.
+        find.refresh(&session.blocks);
+        assert_eq!(find.matches.len(), 2);
+        age(&mut find);
+        find.refresh(&session.blocks);
+        assert_eq!(find.matches.len(), 3);
+        assert_eq!(find.current, current);
+        assert_eq!(find.status(), "1 of 3");
+    }
+
+    #[test]
+    fn removed_blocks_lose_their_matches() {
+        let mut session = session(&["x", "x"]);
+        let mut find = Find::new(String::new());
+        find.query = "x".into();
+        find.refresh(&session.blocks);
+        assert_eq!(find.matches.len(), 2);
+        session.blocks.remove(1);
+        find.refresh(&session.blocks);
+        assert_eq!(find.matches.len(), 1);
+        assert_eq!(find.current, Some(find.matches[0]));
+    }
+
+    #[test]
+    fn marks_are_the_matches_on_the_lines_shown() {
+        let session = session(&["x\r\nx\r\nx"]);
+        let id = session.blocks[0].id;
+        let mut find = Find::new(String::new());
+        find.query = "x".into();
+        find.refresh(&session.blocks);
+        assert_eq!(find.marks(id, 1, 3), [(1, 0, 1, false), (2, 0, 1, true)]);
+        assert_eq!(find.marks(id, 0, 1), [(0, 0, 1, false)]);
+        assert_eq!(find.marks(id, 3, 9), []);
+        assert_eq!(find.marks(id + 100, 0, 9), []);
+    }
+
+    #[test]
+    fn a_needle_longer_than_the_row_finds_nothing() {
+        let needle: Vec<char> = "abc".chars().collect();
+        assert_eq!(find_in(&row("ab"), &needle, true), vec![]);
+        assert_eq!(find_in(&row("abc"), &[], true), vec![]);
+        assert_eq!(find_in(&row("xabc"), &needle, false), vec![(1, 4)]);
+        // Folding works beyond ASCII.
+        let needle: Vec<char> = "straße".chars().collect();
+        assert_eq!(find_in(&row("STRASSE Straße"), &needle, true), vec![(8, 14)]);
     }
 }

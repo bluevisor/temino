@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned: a new Rust release brings new lints, which with -D warnings
+      # would fail every open PR at once. Bump on purpose.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Shells and a software Vulkan driver
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh fish mesa-vulkan-drivers libvulkan1
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets
+      - name: Test
+        run: cargo test --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Noise interop with the web client
+        run: cargo test --locked -- --ignored interop_with_the_web_client
+      # Renders frames on the GPU and reads them back. GitHub's macOS
+      # runners have no Metal device, so only Linux (Mesa's lavapipe) runs it.
+      - name: Render self-test
+        if: runner.os == 'Linux'
+        run: cargo run --locked -- --selftest "$RUNNER_TEMP/selftest.ppm"
+
+  relay:
+    name: Relay
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Syntax
+        run: for f in src/*.js public/*.js; do node --check "$f"; done
+      - name: Web Push payload
+        run: node test/webpush.mjs

@@ -3,6 +3,7 @@
 //! leaves on screen, and, for Claude Code, from the session records and
 //! transcripts it keeps under ~/.claude.
 
+use crate::Locked;
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
@@ -227,11 +228,11 @@ impl Watcher {
     }
 
     pub fn set_group(&self, group: i32) {
-        self.shared.lock().unwrap().group = group;
+        self.shared.locked().group = group;
     }
 
     pub fn report(&self) -> Option<Report> {
-        self.shared.lock().unwrap().report.clone()
+        self.shared.locked().report.clone()
     }
 }
 
@@ -239,7 +240,7 @@ fn watch(shared: Arc<Mutex<Watch>>) {
     let mut transcript = Transcript::default();
     // Only the watcher's own handle left: the pane let go.
     while Arc::strong_count(&shared) > 1 {
-        let group = shared.lock().unwrap().group;
+        let group = shared.locked().group;
         let report = (group > 0).then(|| claude_session(group)).flatten().map(|session| {
             let path = format!("{}/projects/{}/{}.jsonl", claude_dir(), project_dir(&session.cwd), session.id);
             if transcript.path != path {
@@ -256,7 +257,7 @@ fn watch(shared: Arc<Mutex<Watch>>) {
                 busy: session.busy,
             }
         });
-        shared.lock().unwrap().report = report;
+        shared.locked().report = report;
         std::thread::sleep(Duration::from_secs(1));
     }
 }

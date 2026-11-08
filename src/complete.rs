@@ -134,8 +134,10 @@ fn word_start(text: &str, cursor: usize) -> usize {
 
 /// Whether the word starting at `start` is in command position.
 fn command_position(text: &str, start: usize) -> bool {
-    let before = text[..start].trim_end();
-    before.is_empty() || before.ends_with(['|', ';', '&', '(', '\n']) || before.ends_with("sudo")
+    // Spaces only: a newline before the word starts a new command.
+    let before = text[..start].trim_end_matches([' ', '\t']);
+    let last_word = before.rsplit(|c: char| c.is_whitespace() || matches!(c, '|' | ';' | '&' | '(')).next();
+    before.is_empty() || before.ends_with(['|', ';', '&', '(', '\n']) || last_word == Some("sudo")
 }
 
 pub fn complete(text: &str, cursor: usize, cwd: &str, commands: &mut Commands) -> Option<Completion> {
@@ -257,5 +259,183 @@ mod tests {
         assert_eq!(labels("cat no", &mut commands), ["notebook "]);
         assert_eq!(labels("cat NO", &mut commands), ["Notes.txt ", "notebook "]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    /// A scratch directory for one test, removed when the test ends.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str, files: &[&str]) -> Scratch {
+            let dir = std::env::temp_dir().join(format!("temino-complete-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            for file in files {
+                let path = dir.join(file);
+                if let Some(folder) = file.strip_suffix('/') {
+                    std::fs::create_dir_all(dir.join(folder)).unwrap();
+                } else {
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, "").unwrap();
+                }
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn replacements(text: &str, cwd: &str, commands: &mut Commands) -> Vec<String> {
+        complete(text, text.len(), cwd, commands)
+            .map_or(Vec::new(), |c| c.candidates.into_iter().map(|c| c.replacement).collect())
+    }
+
+    fn candidate(replacement: &str) -> Candidate {
+        Candidate { replacement: replacement.into(), label: replacement.into(), kind: Kind::File }
+    }
+
+    #[test]
+    fn shell_specials_are_escaped_and_unescaped() {
+        assert_eq!(escape("my file (1).txt"), r"my\ file\ \(1\).txt");
+        assert_eq!(
+            escape("a'b\"c$d`e&f|g;h<i>j*k?l!m#n~o{p}q[r]s\\t"),
+            r#"a\'b\"c\$d\`e\&f\|g\;h\<i\>j\*k\?l\!m\#n\~o\{p\}q\[r\]s\\t"#
+        );
+        assert_eq!(escape("中文-ok_1.rs"), "中文-ok_1.rs");
+        assert_eq!(unescape(r"my\ file"), "my file");
+        assert_eq!(unescape(r"'quoted dir'/x"), "quoted dir/x");
+        assert_eq!(unescape(r#""a"\\b"#), r"a\b");
+        assert_eq!(unescape("trailing\\"), "trailing");
+        for name in ["plain", "with space", "it's", "$HOME", "a\\b", "中 文"] {
+            assert_eq!(unescape(&escape(name)), name);
+        }
+    }
+
+    #[test]
+    fn words_end_at_unescaped_separators() {
+        assert_eq!(word_start("ls foo", 6), 3);
+        assert_eq!(word_start(r"cat my\ fi", 10), 4);
+        assert_eq!(word_start("a|b", 3), 2);
+        assert_eq!(word_start("a;b", 3), 2);
+        assert_eq!(word_start("a&&b", 4), 3);
+        assert_eq!(word_start("(cd x", 3), 1);
+        assert_eq!(word_start("one\ntwo", 7), 4);
+        assert_eq!(word_start("one\ttwo", 7), 4);
+        assert_eq!(word_start("", 0), 0);
+        assert_eq!(word_start("ls 中文", "ls 中文".len()), 3);
+        // Up to the caret only.
+        assert_eq!(word_start("ls foo bar", 6), 3);
+    }
+
+    #[test]
+    fn the_first_word_and_words_after_operators_are_commands() {
+        assert!(command_position("", 0));
+        assert!(command_position("  ", 2));
+        assert!(command_position("ls | gr", 5));
+        assert!(command_position("a; b", 3));
+        assert!(command_position("a && b", 5));
+        assert!(command_position("(cd", 1));
+        assert!(command_position("sudo ap", 5));
+        assert!(!command_position("ls fo", 3));
+        assert!(!command_position("git commit", 4));
+    }
+
+    #[test]
+    fn only_sudo_itself_starts_a_command() {
+        assert!(!command_position("visudo fi", 7));
+        assert!(command_position("sudo fi", 5));
+    }
+
+    #[test]
+    fn the_first_word_of_a_new_line_is_a_command() {
+        assert!(command_position("ls\ngit", 3));
+    }
+
+    #[test]
+    fn commands_come_from_the_given_path_and_the_builtins() {
+        let bin = Scratch::new("bin", &["bin/mytool", "bin/mytask", "other/mything"]);
+        let mut commands = Commands::new();
+        commands.use_path(Some(&format!("{0}/bin::.:{0}/missing", bin.path())));
+        assert_eq!(replacements("myt", "/", &mut commands), ["mytask ", "mytool "]);
+        assert_eq!(replacements("ls | myto", "/", &mut commands), ["mytool "]);
+        assert_eq!(replacements("sudo myto", "/", &mut commands), ["mytool "]);
+        assert!(replacements("ech", "/", &mut commands).contains(&"echo ".to_owned()));
+        assert!(commands.exists("mytool"));
+        assert!(commands.exists("cd"));
+        assert!(!commands.exists("mything"));
+        // A name with a slash is checked as a path.
+        assert!(commands.exists(&format!("{}/other/mything", bin.path())));
+        assert!(!commands.exists("./no/such/tool"));
+        // A new path is scanned at once.
+        commands.use_path(Some(&format!("{}/other", bin.path())));
+        assert!(commands.exists("mything"));
+        assert!(!commands.exists("mytool"));
+    }
+
+    #[test]
+    fn files_are_completed_relative_to_the_working_directory() {
+        let dir =
+            Scratch::new("files", &["src/", "src/main.rs", "src/menu.rs", "Cargo.toml", "my file.txt", ".hidden"]);
+        let cwd = dir.path();
+        let mut commands = Commands::new();
+        assert_eq!(replacements("cat src/m", cwd, &mut commands), ["src/main.rs ", "src/menu.rs "]);
+        assert_eq!(replacements("cat src/ma", cwd, &mut commands), ["src/main.rs "]);
+        // Spaces are escaped in the replacement, and an escaped space typed matches.
+        assert_eq!(replacements("cat my", cwd, &mut commands), [r"my\ file.txt "]);
+        assert_eq!(replacements(r"cat my\ f", cwd, &mut commands), [r"my\ file.txt "]);
+        // Hidden files only when the word starts with a dot.
+        assert!(!replacements("cat ", cwd, &mut commands).iter().any(|r| r.contains("hidden")));
+        assert_eq!(replacements("cat .h", cwd, &mut commands), [".hidden "]);
+        // Directories first, then files, each sorted.
+        assert_eq!(replacements("cat ", cwd, &mut commands), ["src/", "Cargo.toml ", r"my\ file.txt "]);
+        assert_eq!(replacements("cat nothing", cwd, &mut commands), Vec::<String>::new());
+        assert!(complete("cat no/such/dir/x", 17, cwd, &mut commands).is_none());
+    }
+
+    #[test]
+    fn absolute_paths_and_a_slash_in_the_first_word_complete_files() {
+        let dir = Scratch::new("abs", &["run.sh", "sub/"]);
+        let mut commands = Commands::new();
+        let text = format!("{}/ru", dir.path());
+        assert_eq!(replacements(&text, "/", &mut commands), [format!("{}/run.sh ", escape(dir.path()))]);
+        assert_eq!(replacements("./ru", dir.path(), &mut commands), ["./run.sh "]);
+        assert_eq!(replacements("cd s", dir.path(), &mut commands), ["sub/"]);
+    }
+
+    #[test]
+    fn completion_covers_the_word_up_to_the_caret() {
+        let dir = Scratch::new("caret", &["alpha", "beta"]);
+        let mut commands = Commands::new();
+        let completion = complete("cat al tail", 6, dir.path(), &mut commands).unwrap();
+        assert_eq!((completion.start, completion.end, completion.selected), (4, 6, 0));
+        assert_eq!(completion.candidates[0].replacement, "alpha ");
+        assert_eq!(completion.candidates[0].label, "alpha");
+        assert_eq!(completion.candidates[0].kind, Kind::File);
+    }
+
+    #[test]
+    fn the_common_prefix_respects_character_boundaries() {
+        assert_eq!(common_prefix(&[candidate("中文a"), candidate("中文b")]), "中文");
+        assert_eq!(common_prefix(&[candidate("中a"), candidate("文a")]), "");
+        assert_eq!(common_prefix(&[candidate("only")]), "only");
+        assert_eq!(common_prefix(&[candidate("abc"), candidate("ab"), candidate("abd")]), "ab");
+        assert_eq!(common_prefix(&[candidate("é1"), candidate("é2")]), "é");
+    }
+
+    #[test]
+    fn hints_need_something_to_add() {
+        let dir = Scratch::new("hint", &["readme.md"]);
+        let mut commands = Commands::new();
+        commands.use_path(Some(dir.path()));
+        assert_eq!(hint("cat read", dir.path(), &mut commands).as_deref(), Some("me.md"));
+        // Already complete: the trailing space isn't hinted.
+        assert_eq!(hint("cat readme.md", dir.path(), &mut commands), None);
+        assert_eq!(hint("cat zzz", dir.path(), &mut commands), None);
     }
 }
