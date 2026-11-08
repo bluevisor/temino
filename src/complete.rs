@@ -134,8 +134,10 @@ fn word_start(text: &str, cursor: usize) -> usize {
 
 /// Whether the word starting at `start` is in command position.
 fn command_position(text: &str, start: usize) -> bool {
-    let before = text[..start].trim_end();
-    before.is_empty() || before.ends_with(['|', ';', '&', '(', '\n']) || before.ends_with("sudo")
+    // Spaces only: a newline before the word starts a new command.
+    let before = text[..start].trim_end_matches([' ', '\t']);
+    let last_word = before.rsplit(|c: char| c.is_whitespace() || matches!(c, '|' | ';' | '&' | '(')).next();
+    before.is_empty() || before.ends_with(['|', ';', '&', '(', '\n']) || last_word == Some("sudo")
 }
 
 pub fn complete(text: &str, cursor: usize, cwd: &str, commands: &mut Commands) -> Option<Completion> {
@@ -345,14 +347,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: a word ending in \"sudo\" (visudo) puts the next word in command position"]
     fn only_sudo_itself_starts_a_command() {
         assert!(!command_position("visudo fi", 7));
         assert!(command_position("sudo fi", 5));
     }
 
     #[test]
-    #[ignore = "bug: a new line's first word isn't completed as a command (trim_end drops the newline it checks for)"]
     fn the_first_word_of_a_new_line_is_a_command() {
         assert!(command_position("ls\ngit", 3));
     }

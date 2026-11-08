@@ -120,6 +120,9 @@ pub fn parse_combo(text: &str) -> Option<Combo> {
             "ctrl" | "control" => held |= mods::CONTROL,
             "alt" | "opt" | "option" | "meta" => held |= mods::OPTION,
             "shift" => held |= mods::SHIFT,
+            // Two keys (`cmd+a+b`) or a misspelled modifier (`ctlr+t`): not a
+            // combo, rather than quietly binding the last key on its own.
+            _ if key.is_some() => return None,
             other => key = Some(other.to_owned()),
         }
     }
@@ -364,7 +367,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: a misspelled modifier is taken as a key and dropped: `ctlr+t = new_tab` binds plain t, so typing t opens a tab"]
     fn misspelled_modifiers_and_extra_keys_are_rejected() {
         let (list, errors) = parse("ctlr+t = new_tab");
         assert_eq!((list.len(), errors.len()), (0, 1));

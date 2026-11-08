@@ -99,6 +99,13 @@ pub fn encode(event: &KeyEvent, mode: TermMode) -> Vec<u8> {
     }
 
     let mut bytes = event.bytes.clone();
+    if meta && !event.shift() && bytes.len() == 1 && !bytes[0].is_ascii_graphic() {
+        // Alt as Meta: the unshifted key when the keymap turned the
+        // combination into something else (Ctrl is applied to it below).
+        if let Some(base) = event.base_char().filter(|c| c.is_ascii_graphic()) {
+            bytes = vec![base as u8];
+        }
+    }
     if event.ctrl() && bytes.len() == 1 {
         // Make sure Ctrl+letter is a control character even if the keymap
         // didn't map it.
@@ -117,13 +124,6 @@ pub fn encode(event: &KeyEvent, mode: TermMode) -> Vec<u8> {
         };
     }
     if meta && !bytes.is_empty() {
-        // Alt as Meta: ESC prefix, using the unshifted key when the
-        // keymap turned the combination into something else.
-        if let Some(base) = event.base_char().filter(|c| c.is_ascii_graphic()) {
-            if !event.shift() && bytes.len() == 1 && !bytes[0].is_ascii_graphic() {
-                bytes = vec![base as u8];
-            }
-        }
         bytes.insert(0, 0x1b);
     }
     bytes
@@ -265,7 +265,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: Ctrl+Alt+letter sends ESC + the letter, dropping Ctrl (xterm sends ESC + the control byte)"]
     fn ctrl_alt_letter_keeps_the_control_character() {
         assert_eq!(typed('a', mods::CONTROL | mods::OPTION, b"a"), b"\x1b\x01");
         assert_eq!(typed('a', mods::CONTROL | mods::OPTION, &[0x01]), b"\x1b\x01");
