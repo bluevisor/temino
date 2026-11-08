@@ -32,9 +32,15 @@ impl Pane {
         scene.set_origin(0.0, 0.0);
     }
     pub(super) fn selection_span(&self, id: u64) -> Option<Span> {
-        let selection = self.selection.filter(|s| s.block == id && !s.command)?;
+        let selection = self.selection.filter(|s| s.block == id)?;
         let block = self.session.blocks.iter().find(|b| b.id == id)?;
-        let (mut start, mut end) = normalize(selection);
+        let (from, to) = normalize(selection);
+        if !to.0 {
+            return None;
+        }
+        // From the command: the output from its start.
+        let mut start = if from.0 { (from.1, from.2) } else { (0, 0) };
+        let mut end = (to.1, to.2);
         let columns = self.session.size.columns;
         match selection.mode {
             SelectMode::Char => {}
@@ -60,10 +66,20 @@ impl Pane {
     }
     /// The selection within a block's command, in its wrapped rows.
     pub(super) fn command_span(&self, id: u64) -> Option<Span> {
-        let selection = self.selection.filter(|s| s.block == id && s.command)?;
+        let selection = self.selection.filter(|s| s.block == id)?;
         let block = self.session.blocks.iter().find(|b| b.id == id)?;
-        let (mut start, mut end) = normalize(selection);
+        let (from, to) = normalize(selection);
+        if from.0 {
+            return None;
+        }
         let columns = self.session.size.columns.max(1);
+        let mut start = (from.1, from.2);
+        // Into the output: the command to its end.
+        let mut end = if to.0 {
+            (command_rows(&block.command, columns).len().saturating_sub(1), columns - 1)
+        } else {
+            (to.1, to.2)
+        };
         match selection.mode {
             SelectMode::Char => {}
             SelectMode::Line => {

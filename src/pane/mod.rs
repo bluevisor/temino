@@ -130,16 +130,19 @@ enum SelectMode {
     Line,
 }
 
-/// A mouse selection inside one block's output (or its command, in
-/// wrapped rows), in (line, column).
+/// A mouse selection inside one block: its command (in wrapped rows), its
+/// output, or from one into the other.
 #[derive(Clone, Copy)]
 struct Selection {
     block: u64,
-    command: bool,
-    anchor: (usize, usize),
-    head: (usize, usize),
+    anchor: Spot,
+    head: Spot,
     mode: SelectMode,
 }
+
+/// A place in a block: (in the output, not the command; line; column). The
+/// command comes first, so a drag from it reaches down into the output.
+type Spot = (bool, usize, usize);
 
 struct BlockLayout {
     id: u64,
