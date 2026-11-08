@@ -30,10 +30,9 @@ impl Pane {
     pub(super) fn selection_text(&self) -> Option<String> {
         let selection = self.selection?;
         let block = self.session.blocks.iter().find(|b| b.id == selection.block)?;
-        let text = if selection.command {
+        let mut text = String::new();
+        if let Some(((l0, c0), (l1, c1))) = self.command_span(block.id) {
             let rows = command_rows(&block.command, self.session.size.columns.max(1));
-            let ((l0, c0), (l1, c1)) = self.command_span(block.id)?;
-            let mut text = String::new();
             for (index, (row, ends_line)) in rows.iter().enumerate().take(l1 + 1).skip(l0) {
                 let chars: Vec<char> = row.chars().collect();
                 let from = if index == l0 { c0.min(chars.len()) } else { 0 };
@@ -43,11 +42,13 @@ impl Pane {
                     text.push('\n');
                 }
             }
-            text
-        } else {
-            let (start, end) = self.selection_span(block.id).unwrap_or_else(|| normalize(selection));
-            block.text_between(start, end)
-        };
+        }
+        if let Some((start, end)) = self.selection_span(block.id) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&block.text_between(start, end));
+        }
         Some(text).filter(|text| !text.is_empty())
     }
     pub(super) fn copy(&mut self, ctx: &mut Ctx, command_only: bool) {
@@ -333,7 +334,8 @@ impl Pane {
             n if n >= 3 => SelectMode::Line,
             _ => SelectMode::Char,
         };
-        self.selection = Some(Selection { block, command, anchor: (line, column), head: (line, column), mode });
+        let spot = (!command, line, column);
+        self.selection = Some(Selection { block, anchor: spot, head: spot, mode });
         self.dragging = true;
     }
     /// The pointer moved over (or, while dragging, away from) the pane;
@@ -381,25 +383,26 @@ impl Pane {
         }
         let Some(mut selection) = self.selection else { return cursor };
         let cell = ctx.text.cell;
-        let (line, column) = if let Some((_, ox, oy)) = self.layout.alt {
+        let spot = if let Some((_, ox, oy)) = self.layout.alt {
             let column = ((x - ox) / cell.width).max(0.0) as usize;
             let line = ((y - oy) / cell.height).max(0.0) as usize;
-            (line.min(self.session.size.lines - 1), column)
+            (true, line.min(self.session.size.lines - 1), column)
         } else {
             let Some(layout) = self.layout.blocks.iter().find(|b| b.id == selection.block) else { return cursor };
-            let (top, lines) = if selection.command {
-                (layout.command_y, layout.command_rows)
-            } else {
-                (layout.output_y, layout.lines)
-            };
+            // Above the output, the command's rows; below them, the output's
+            // lines: one drag can take both.
+            let in_command = layout.command_rows > 0 && (layout.lines == 0 || y < layout.output_y);
+            let (top, lines) =
+                if in_command { (layout.command_y, layout.command_rows) } else { (layout.output_y, layout.lines) };
             if lines == 0 {
                 return cursor;
             }
             let line = ((y - top) / cell.height).floor().clamp(0.0, (lines - 1) as f32) as usize;
             let column = ((x - layout.output_x) / cell.width).max(0.0) as usize;
-            (line, column)
+            (!in_command, line, column)
         };
-        selection.head = (line, column.min(self.session.size.columns - 1));
+        let (output, line, column) = spot;
+        selection.head = (output, line, column.min(self.session.size.columns - 1));
         self.selection = Some(selection);
         cursor
     }
@@ -529,7 +532,7 @@ impl Pane {
     }
 }
 
-pub(super) fn normalize(selection: Selection) -> ((usize, usize), (usize, usize)) {
+pub(super) fn normalize(selection: Selection) -> (Spot, Spot) {
     if selection.anchor <= selection.head {
         (selection.anchor, selection.head)
     } else {
