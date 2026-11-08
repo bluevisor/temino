@@ -183,7 +183,11 @@ impl App {
             ("Split Right", format!("{cmd}D"), MenuAction::SplitRight),
             ("Split Down", format!("{cmd}E"), MenuAction::SplitDown),
             // The built-in browser is macOS's (platform::VIEWERS).
-            ("Browser Pane", if platform::VIEWERS { "⌥⌘D".to_owned() } else { String::new() }, MenuAction::BrowserPane),
+            (
+                "Open Browser Pane",
+                if platform::VIEWERS { "⌥⌘D".to_owned() } else { String::new() },
+                MenuAction::BrowserPane,
+            ),
             ("Close Pane", format!("{cmd}W"), MenuAction::ClosePane),
         ];
         let h = rows.len() as f32 * MENU_ROW + 12.0 + 2.0 * 9.0;
