@@ -55,8 +55,12 @@ impl Value {
     }
 }
 
+/// How deep arrays and objects may nest: deeper text (from a broken or
+/// hostile server) is refused rather than overflowing the stack.
+const MAX_DEPTH: usize = 512;
+
 pub fn parse(text: &str) -> Option<Value> {
-    let mut parser = Parser { bytes: text.as_bytes(), at: 0 };
+    let mut parser = Parser { bytes: text.as_bytes(), at: 0, depth: 0 };
     let value = parser.value()?;
     parser.space();
     (parser.at == parser.bytes.len()).then_some(value)
@@ -65,6 +69,7 @@ pub fn parse(text: &str) -> Option<Value> {
 struct Parser<'a> {
     bytes: &'a [u8],
     at: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -83,6 +88,16 @@ impl Parser<'_> {
     }
 
     fn value(&mut self) -> Option<Value> {
+        if self.depth >= MAX_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let value = self.value_here();
+        self.depth -= 1;
+        value
+    }
+
+    fn value_here(&mut self) -> Option<Value> {
         self.space();
         match *self.bytes.get(self.at)? {
             b'{' => {
@@ -172,7 +187,14 @@ impl Parser<'_> {
                             let mut code = self.hex4()?;
                             if (0xd800..0xdc00).contains(&code) && self.eat("\\u") {
                                 let low = self.hex4()?;
-                                code = 0x10000 + ((code - 0xd800) << 10) + (low.wrapping_sub(0xdc00) & 0x3ff);
+                                if (0xdc00..0xe000).contains(&low) {
+                                    code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
+                                } else {
+                                    // Half a pair: a replacement, then the
+                                    // next escape as itself.
+                                    out.push('\u{fffd}');
+                                    code = low;
+                                }
                             }
                             out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
                         }
@@ -219,7 +241,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: a high surrogate followed by a \\u escape that isn't a low surrogate swallows it: \"\\ud83d\\u0041\" reads as U+1F441, not U+FFFD then A"]
     fn half_a_surrogate_pair_doesnt_eat_the_next_escape() {
         assert_eq!(string(r#""\ud83d\u0041""#).as_deref(), Some("\u{fffd}A"));
     }
@@ -325,7 +346,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: nesting recurses once per level, so a deeply nested line overflows the stack and aborts (this aborts the test run too)"]
     fn very_deep_nesting_is_refused_instead_of_crashing() {
         let deep = "[".repeat(1_000_000);
         assert_eq!(parse(&deep), None);

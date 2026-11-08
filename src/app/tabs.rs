@@ -481,11 +481,22 @@ pub(super) fn recap_idle() -> Duration {
     Duration::from_secs_f32(minutes.max(0.0) * 60.0)
 }
 
+/// `line` without list numbering (`1.`, `2)`) or a bullet (`-`, `*`) in
+/// front; a number that's part of the text (`404 errors`) stays.
+fn strip_list_marker(line: &str) -> &str {
+    let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = match rest.strip_prefix(['.', ')']) {
+        Some(rest) if rest.len() < line.len() - 1 => rest,
+        _ => line,
+    };
+    rest.trim_start_matches(['-', '*', ' '])
+}
+
 /// The model's two lines: a tab's title and its summary. Labels it may
 /// add anyway ("Title:", "2.") come off; a title too long isn't one.
 pub(super) fn title_and_summary(reply: &str) -> Option<(String, Option<String>)> {
     let mut lines = reply.lines().map(str::trim).filter(|line| !line.is_empty()).map(|line| {
-        let line = line.trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | ' '));
+        let line = strip_list_marker(line);
         let line = ["Title:", "Summary:", "Line 1:", "Line 2:"]
             .iter()
             .find_map(|label| line.strip_prefix(label))
@@ -552,7 +563,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: title_and_summary strips leading digits as list numbering, so \"404 errors\" becomes \"errors\""]
     fn titles_that_start_with_a_number_keep_it() {
         let (title, summary) = title_and_summary("404 errors in the API\n3 tests still failing").unwrap();
         assert_eq!(title, "404 errors in the API");

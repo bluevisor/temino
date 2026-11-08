@@ -150,14 +150,14 @@ pub(super) fn read_node<'a>(
         Some("C") => Some(Axis::Column),
         _ => None,
     };
-    if let (Some(axis), Ok(ratio)) = (axis, token[1..].parse::<f32>()) {
+    if let (Some(axis), Ok(ratio)) = (axis, token.get(1..).unwrap_or("").parse::<f32>()) {
         let first = Box::new(read_node(tokens, focus, open)?);
         let second = Box::new(read_node(tokens, focus, open)?);
         return Ok(Node::Split { axis, ratio: ratio.clamp(0.05, 0.95), first, second });
     }
     let (focused, cwd) = match token.get(..1) {
-        Some("F") => (true, &token[1..]),
-        Some("P") => (false, &token[1..]),
+        Some("F") => (true, token.get(1..).unwrap_or("")),
+        Some("P") => (false, token.get(1..).unwrap_or("")),
         _ => (true, token),
     };
     let cwd = Some(cwd.to_owned()).filter(|d| std::path::Path::new(d).is_dir());
@@ -369,7 +369,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: an empty or cut-short layout field panics at token[1..] in read_node, so a damaged tabs file crashes every launch"]
     fn a_damaged_layout_opens_a_pane_instead_of_crashing() {
         // An empty layout field (`*\t\t\tname`), and a split cut off before its second side.
         let (node, _, _) = restore("");
