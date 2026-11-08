@@ -233,6 +233,7 @@ impl App {
             }
             MenuAction::SplitRight => self.split(Axis::Row, false),
             MenuAction::SplitDown => self.split(Axis::Column, false),
+            MenuAction::BrowserPane => self.open_browser(false),
             MenuAction::ClosePane => {
                 if let Some(id) = self.focused_id() {
                     self.close_pane(id);

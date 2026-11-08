@@ -216,4 +216,6 @@ pub enum ViewerEvent {
     Failed(String),
     /// Its close button was clicked.
     Close,
+    /// Enter in a browser's address bar: what was typed there.
+    Address(String),
 }

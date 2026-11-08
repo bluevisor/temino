@@ -428,9 +428,18 @@ impl ApplicationHandler<(u32, Request)> for Handler {
             #[cfg(target_os = "macos")]
             Request::ViewerClose(id) => unsafe { temino_viewer_close(id) },
             #[cfg(target_os = "macos")]
+            Request::ViewerGo(id, address) => {
+                let address = std::ffi::CString::new(address.replace('\0', "")).unwrap_or_default();
+                unsafe { temino_viewer_go(id, address.as_ptr()) };
+            }
+            #[cfg(target_os = "macos")]
             Request::ViewerFocus(id) => unsafe { temino_viewer_focus(id.unwrap_or(0)) },
             #[cfg(not(target_os = "macos"))]
-            Request::ViewerOpen(..) | Request::ViewerPlace(_) | Request::ViewerClose(_) | Request::ViewerFocus(_) => {}
+            Request::ViewerOpen(..)
+            | Request::ViewerPlace(_)
+            | Request::ViewerClose(_)
+            | Request::ViewerFocus(_)
+            | Request::ViewerGo(..) => {}
             Request::NewWindow(cwd) => self.open_window(event_loop, Some(no), cwd),
             Request::CloseWindow => self.close_window(event_loop, no),
             Request::Quit => {

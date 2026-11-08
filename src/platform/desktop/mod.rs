@@ -70,6 +70,7 @@ extern "C" {
     fn temino_viewer_open(id: u64, kind: i32, target: *const std::ffi::c_char, style: *const ViewerStyle);
     fn temino_viewer_place(id: u64, x: f64, y: f64, width: f64, height: f64, visible: bool);
     fn temino_viewer_close(id: u64);
+    fn temino_viewer_go(id: u64, address: *const std::ffi::c_char);
     /// Gives the keyboard to viewer `id`, or with 0 back to the terminal.
     fn temino_viewer_focus(id: u64);
 }
@@ -114,6 +115,8 @@ enum Request {
     ViewerClose(u64),
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ViewerFocus(Option<u64>),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    ViewerGo(u64, String),
     /// A new window, its first tab in this directory.
     NewWindow(Option<String>),
     /// This window's core is done: close it (and quit with the last one).
@@ -326,6 +329,7 @@ mod menu {
     }
 
     const SHIFT: u32 = 1 << 17;
+    const OPTION: u32 = 1 << 19;
     const COMMAND: u32 = 1 << 20;
 
     /// Menu, label, key equivalent, extra modifiers, and the key the item
@@ -342,6 +346,9 @@ mod menu {
         ("Shell", Some("Split Right"), "d", 0, None, 'd'),
         ("Shell", Some("Split Down"), "e", 0, None, 'e'),
         ("Shell", Some("Split Up"), "e", SHIFT, None, 'e'),
+        ("Shell", None, "", 0, None, '\0'),
+        ("Shell", Some("New Browser Tab"), "t", OPTION, None, 't'),
+        ("Shell", Some("Open Browser Pane"), "d", OPTION, None, 'd'),
         ("Shell", None, "", 0, None, '\0'),
         ("Shell", Some("Close Pane"), "w", 0, None, 'w'),
         ("Shell", None, "", 0, None, '\0'),
@@ -375,8 +382,9 @@ mod menu {
     extern "C" fn pick(tag: i32) {
         let Some(&(_, _, _, extra, named, c)) = ITEMS.get(tag as usize) else { return };
         let shift = if extra & SHIFT != 0 { mods::SHIFT } else { 0 };
+        let option = if extra & OPTION != 0 { mods::OPTION } else { 0 };
         let bytes = if named.is_some() { Vec::new() } else { c.to_string().into_bytes() };
-        let event = UiEvent::Key(KeyEvent { named, mods: mods::COMMAND | shift, raw_char: c as u32, bytes });
+        let event = UiEvent::Key(KeyEvent { named, mods: mods::COMMAND | shift | option, raw_char: c as u32, bytes });
         if let Some(sender) = MENU_SENDER.locked().as_ref() {
             let _ = sender.send(Msg::Ui(event));
         }
@@ -474,6 +482,11 @@ pub fn viewer_close(id: u64) {
     request(Request::ViewerClose(viewer_id(id)));
 }
 
+/// Takes browser `id` to `address`, keeping its history.
+pub fn viewer_go(id: u64, address: &str) {
+    request(Request::ViewerGo(viewer_id(id), address.to_owned()));
+}
+
 /// Gives the keyboard to viewer `id`, or with None back to the window's terminal.
 pub fn viewer_focus(id: Option<u64>) {
     request(Request::ViewerFocus(Some(viewer_id(id.unwrap_or(0)))));
@@ -495,6 +508,7 @@ extern "C" fn viewer_event(id: u64, kind: i32, text: *const std::ffi::c_char) {
         3 => ViewerEvent::Dirty(true),
         4 => ViewerEvent::Dirty(false),
         6 => ViewerEvent::Close,
+        7 => ViewerEvent::Address(text),
         _ => ViewerEvent::Failed(text),
     };
     // To the core of the viewer's window, by the pane id it knows.

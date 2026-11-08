@@ -212,6 +212,14 @@ impl App {
                     self.step_tab(1);
                     true
                 }
+                (_, Some('t')) if key.option() => {
+                    self.open_browser(true);
+                    true
+                }
+                (_, Some('d')) if key.option() => {
+                    self.open_browser(false);
+                    true
+                }
                 (_, Some('t')) => {
                     if let Err(error) = self.new_tab() {
                         self.ctx.show_toast(&error);

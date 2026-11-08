@@ -203,6 +203,7 @@ enum MenuAction {
     Clear,
     SplitRight,
     SplitDown,
+    BrowserPane,
     ClosePane,
     // The account menu, from the sidebar's foot.
     Account,

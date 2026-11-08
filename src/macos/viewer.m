@@ -40,7 +40,19 @@ typedef struct {
 
 // Kinds and events, as in src/platform/mod.rs and desktop.rs.
 enum { KIND_TEXT = 0, KIND_WEB = 1, KIND_IMAGE = 2 };
-enum { EVENT_FOCUSED = 0, EVENT_TITLE = 1, EVENT_URL = 2, EVENT_DIRTY = 3, EVENT_CLEAN = 4, EVENT_FAILED = 5, EVENT_CLOSE = 6 };
+enum {
+	EVENT_FOCUSED = 0,
+	EVENT_TITLE = 1,
+	EVENT_URL = 2,
+	EVENT_DIRTY = 3,
+	EVENT_CLEAN = 4,
+	EVENT_FAILED = 5,
+	EVENT_CLOSE = 6,
+	EVENT_ADDRESS = 7,
+};
+
+// What a new browser shows (viewer::BLANK).
+static NSString* const kBlank = @"about:blank";
 
 static const CGFloat kViewerHeader = 30;
 static const CGFloat kViewerButton = 24;
@@ -105,7 +117,7 @@ abbreviated(NSString* path)
 @end
 
 
-@interface TeminoViewer : NSView <NSTextViewDelegate, WKNavigationDelegate, WKUIDelegate>
+@interface TeminoViewer : NSView <NSTextViewDelegate, NSTextFieldDelegate, WKNavigationDelegate, WKUIDelegate>
 @property(nonatomic) uint64_t viewerId;
 @property(nonatomic) int kind;
 // The file's path, or the page's address.
@@ -182,6 +194,26 @@ abbreviated(NSString* path)
 	place.font = [NSFont systemFontOfSize:11];
 	place.textColor = style_color(style->faint);
 	place.lineBreakMode = NSLineBreakByTruncatingMiddle;
+	if (self.kind == KIND_WEB) {
+		// The address bar: click (or Command+L) to type an address or a search.
+		place.editable = YES;
+		place.selectable = YES;
+		place.bezeled = NO;
+		place.drawsBackground = NO;
+		place.focusRingType = NSFocusRingTypeNone;
+		place.usesSingleLineMode = YES;
+		place.cell.scrollable = YES;
+		place.cell.wraps = NO;
+		place.textColor = style_color(style->dim);
+		place.placeholderAttributedString = [[NSAttributedString alloc] initWithString:@"Search or type an address"
+			attributes:@{NSForegroundColorAttributeName: style_color(style->faint), NSFontAttributeName: place.font}];
+		place.wantsLayer = YES;
+		place.layer.backgroundColor = style_color(style->background).CGColor;
+		place.layer.cornerRadius = 5;
+		place.delegate = self;
+		place.target = self;
+		place.action = @selector(addressEntered:);
+	}
 	[header addSubview:place];
 	self.placeLabel = place;
 	NSView* dot = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 6, 6)];
@@ -218,7 +250,8 @@ abbreviated(NSString* path)
 {
 	if (title != nil)
 		self.titleLabel.stringValue = title;
-	if (place != nil)
+	// Not while you're typing a new address over it.
+	if (place != nil && self.placeLabel.currentEditor == nil)
 		self.placeLabel.stringValue = place;
 	[self layoutHeader];
 }
@@ -245,6 +278,21 @@ abbreviated(NSString* path)
 		x += 12;
 	}
 	self.dirtyDot.hidden = !self.dirty;
+	if (self.kind == KIND_WEB) {
+		// The address bar takes the room the title leaves, at least half.
+		CGFloat start = MIN(x, 12 + MAX(0, right - 12 - 8) / 2);
+		if (start < x) {
+			titleWidth = MAX(0, start - 12 - 6);
+			self.titleLabel.frame = NSMakeRect(12, NSMinY(self.titleLabel.frame), titleWidth, NSHeight(self.titleLabel.frame));
+			self.titleLabel.hidden = titleWidth < 30;
+			x = start;
+		}
+		CGFloat fieldHeight = 20;
+		CGFloat fieldWidth = MAX(0, right - x - 6);
+		self.placeLabel.frame = NSMakeRect(x, round((kViewerHeader - fieldHeight) / 2), fieldWidth, fieldHeight);
+		self.placeLabel.hidden = fieldWidth < 60;
+		return;
+	}
 	[self.placeLabel sizeToFit];
 	height = NSHeight(self.placeLabel.frame);
 	CGFloat placeWidth = MIN(NSWidth(self.placeLabel.frame), MAX(0, right - x - 8));
@@ -287,6 +335,45 @@ abbreviated(NSString* path)
 - (void)reloadClicked:(id)sender
 {
 	[self.webView reload];
+}
+
+// Enter in the address bar: the app works out where it goes (an address
+// or a search) and answers with temino_viewer_go.
+- (void)addressEntered:(id)sender
+{
+	NSString* typed = self.placeLabel.stringValue;
+	if (typed.length == 0)
+		return;
+	viewer_send(self.viewerId, EVENT_ADDRESS, typed);
+	[self.window makeFirstResponder:self.webView];
+}
+
+// Escape in the address bar puts the page's address back and leaves it.
+- (BOOL)control:(NSControl*)control textView:(NSTextView*)view doCommandBySelector:(SEL)command
+{
+	if (control != self.placeLabel || command != @selector(cancelOperation:))
+		return NO;
+	NSString* address = self.webView.URL.absoluteString;
+	self.placeLabel.stringValue = [address isEqual:kBlank] || address == nil ? @"" : address;
+	[self.window makeFirstResponder:self.webView];
+	return YES;
+}
+
+- (void)focusAddress
+{
+	[self.window makeFirstResponder:self.placeLabel];
+	[self.placeLabel.currentEditor selectAll:nil];
+}
+
+- (void)go:(NSString*)address
+{
+	NSURL* url = [NSURL URLWithString:address];
+	if (url == nil)
+		return;
+	if (url.isFileURL)
+		[self.webView loadFileURL:url allowingReadAccessToURL:url.URLByDeletingLastPathComponent];
+	else
+		[self.webView loadRequest:[NSURLRequest requestWithURL:url]];
 }
 
 - (void)openText:(const TeminoViewerStyle*)style
@@ -362,6 +449,11 @@ abbreviated(NSString* path)
 	if ([target hasPrefix:@"/"]) {
 		NSURL* url = [NSURL fileURLWithPath:target];
 		[web loadFileURL:url allowingReadAccessToURL:url.URLByDeletingLastPathComponent];
+	} else if ([target isEqual:kBlank]) {
+		// Nothing yet: the address bar takes the keyboard.
+		[self showTitle:@"New Page" place:@""];
+		self.focusView = self.placeLabel;
+		self.pendingFocus = YES;
 	} else {
 		NSURL* url = [NSURL URLWithString:target];
 		if (url != nil)
@@ -452,6 +544,9 @@ abbreviated(NSString* path)
 	} else if ([key isEqual:@"r"] && !shift && self.webView != nil) {
 		[self.webView reload];
 		return YES;
+	} else if ([key isEqual:@"l"] && !shift && self.webView != nil) {
+		[self focusAddress];
+		return YES;
 	} else if ([key isEqual:@"c"] && !shift)
 		action = @selector(copy:);
 	else if ([key isEqual:@"x"] && !shift)
@@ -486,8 +581,12 @@ abbreviated(NSString* path)
 		if (url != nil) {
 			NSString* address = url.isFileURL ? url.path : url.absoluteString;
 			self.path = address;
-			[self showTitle:nil place:url.isFileURL ? abbreviated(address) : address];
+			NSString* shown = url.isFileURL ? abbreviated(address) : address;
+			[self showTitle:nil place:[address isEqual:kBlank] ? @"" : shown];
 			viewer_send(self.viewerId, EVENT_URL, address);
+			// Once something loads, the page has the keyboard, not the bar.
+			if (self.focusView == self.placeLabel && ![address isEqual:kBlank])
+				self.focusView = self.webView;
 		}
 	}
 }
@@ -653,6 +752,19 @@ temino_viewer_place(uint64_t id, double x, double y, double width, double height
 	}
 	if (visible && viewer.pendingFocus)
 		viewer_take_focus(viewer);
+}
+
+// Takes browser `id` to `address` (already worked out by the app),
+// keeping its back and forward history.
+void
+temino_viewer_go(uint64_t id, const char* address)
+{
+	TeminoViewer* viewer = viewer_for(id);
+	NSString* text = [NSString stringWithUTF8String:address];
+	if (viewer == nil || viewer.webView == nil || text == nil)
+		return;
+	[viewer go:text];
+	[viewer.window makeFirstResponder:viewer.webView];
 }
 
 void
