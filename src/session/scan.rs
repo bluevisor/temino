@@ -162,12 +162,18 @@ pub(super) fn visible_lines(bytes: &[u8]) -> Vec<String> {
                         }
                     }
                 }
-                Some(']') => {
+                // OSC, DCS, SOS, PM and APC strings run to BEL or ESC \.
+                Some(']' | 'P' | 'X' | '^' | '_') => {
                     while let Some(n) = chars.next() {
                         if n == '\x07' || (n == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
                             break;
                         }
                     }
+                }
+                // ESC ( B, ESC # 8 and the like: middle bytes, then one final.
+                Some(' '..='/') => {
+                    while chars.next_if(|n| (' '..='/').contains(n)).is_some() {}
+                    chars.next();
                 }
                 _ => {}
             },
@@ -409,9 +415,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: ESC ( B (charset select, part of tput sgr0) leaves a stray B in the visible line"]
     fn charset_selection_is_not_visible() {
         assert_eq!(visible_lines(b"\x1b(B\x1b[mls"), ["ls"]);
+        assert_eq!(visible_lines(b"a\x1b#8b\x1bPq#0;2\x1b\\c\x1b7d"), ["abcd"]);
     }
 
     #[test]

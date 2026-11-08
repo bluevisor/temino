@@ -57,8 +57,10 @@ impl Find {
         }
         let needle: Vec<char> = self.query.chars().collect();
         let fold = !self.query.chars().any(char::is_uppercase);
+        let before = self.scanned.len();
         self.scanned.retain(|id, _| blocks.iter().any(|b| b.id == *id));
-        let mut changed = query_changed;
+        // Blocks cleared away (Cmd+K) take their matches with them.
+        let mut changed = query_changed || self.scanned.len() != before;
         for block in blocks {
             let stale = match self.scanned.get(&block.id) {
                 None => true,
@@ -304,7 +306,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: after blocks are removed (Cmd+K) with nothing else changed, their matches stay in the count and in Next/Previous"]
     fn removed_blocks_lose_their_matches() {
         let mut session = session(&["x", "x"]);
         let mut find = Find::new(String::new());

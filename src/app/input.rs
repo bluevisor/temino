@@ -120,11 +120,16 @@ impl App {
     }
     /// A `text:` binding: typed into the focused pane; a line end at the
     /// prompt runs the line.
-    pub(super) fn type_text(&mut self, text: &str) {
+    /// A `text:` binding: typed into the command editor, or sent to the
+    /// running program byte for byte.
+    pub(super) fn type_text(&mut self, bytes: &[u8]) {
         let Some(id) = self.focused_id() else { return };
         let Self { panes, ctx, .. } = self;
         let Some(pane) = panes.iter_mut().find(|p| p.id == id) else { return };
-        if pane.session.editor_active() {
+        let text = String::from_utf8_lossy(bytes);
+        if pane.session.active().is_some() {
+            pane.type_bytes(bytes);
+        } else if pane.session.editor_active() {
             for (i, line) in text.split(['\r', '\n']).enumerate() {
                 if i > 0 {
                     let enter = KeyEvent { named: Some(Named::Enter), mods: 0, raw_char: 13, bytes: vec![b'\r'] };
@@ -133,7 +138,7 @@ impl App {
                 pane.text_input(line);
             }
         } else {
-            pane.text_input(text);
+            pane.text_input(&text);
         }
     }
     /// Window shortcuts (tabs, splits, font size); the rest go to the pane.

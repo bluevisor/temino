@@ -14,7 +14,7 @@ pub enum Bind {
     /// One of ACTIONS, by name.
     Action(&'static str),
     /// Typed into the pane, escapes decoded.
-    Text(String),
+    Text(Vec<u8>),
     /// Nothing: the key's default shortcut is off.
     Ignore,
 }
@@ -160,28 +160,30 @@ pub fn parse_combo(text: &str) -> Option<Combo> {
     Some(Combo { mods: held, named, c })
 }
 
-/// `\n`, `\r`, `\t`, `\e`, `\\` and `\xNN` in a `text:` binding.
-fn unescape(text: &str) -> String {
-    let mut out = String::new();
+/// `\n`, `\r`, `\t`, `\e`, `\\` and `\xNN` in a `text:` binding. `\xNN` is
+/// that one byte, even above 0x7f (Meta-style keys send raw high bytes).
+fn unescape(text: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<u8>, c: char| out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\\' {
-            out.push(c);
+            push(&mut out, c);
             continue;
         }
         match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('e') => out.push('\x1b'),
+            Some('n') => out.push(b'\n'),
+            Some('r') => out.push(b'\r'),
+            Some('t') => out.push(b'\t'),
+            Some('e') => out.push(0x1b),
             Some('x') => {
                 let hex: String = (0..2).filter_map(|_| chars.next_if(char::is_ascii_hexdigit)).collect();
-                if let Some(c) = u8::from_str_radix(&hex, 16).ok().map(char::from) {
-                    out.push(c);
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    out.push(byte);
                 }
             }
-            Some(other) => out.push(other),
-            None => out.push('\\'),
+            Some(other) => push(&mut out, other),
+            None => out.push(b'\\'),
         }
     }
     out
@@ -299,7 +301,7 @@ mod tests {
         assert_eq!(list.len(), 4);
         assert_eq!(list[0].0.c, '=');
         assert_eq!(list[0].1, Bind::Action("bigger_text"));
-        assert_eq!(list[2].1, Bind::Text("ls\r".into()));
+        assert_eq!(list[2].1, Bind::Text(b"ls\r".to_vec()));
         assert_eq!(list[3].1, Bind::Ignore);
         assert_eq!(errors.len(), 2);
     }
@@ -376,7 +378,7 @@ mod tests {
     #[test]
     fn text_bindings_decode_escapes() {
         let text = |line: &str| match parse(line).0.pop() {
-            Some((_, Bind::Text(text))) => text,
+            Some((_, Bind::Text(text))) => String::from_utf8(text).unwrap(),
             other => panic!("{line}: {other:?}"),
         };
         assert_eq!(text(r"cmd+j = text:a\nb\tc\rd"), "a\nb\tc\rd");
@@ -394,11 +396,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: `text:\\xff` types the two UTF-8 bytes of ÿ, not the single byte the keys template promises"]
     fn hex_escapes_above_ascii_are_single_bytes() {
         let (list, _) = parse(r"cmd+j = text:\xff");
         let Bind::Text(text) = &list[0].1 else { panic!() };
-        assert_eq!(text.as_bytes(), [0xff]);
+        assert_eq!(text, &[0xff]);
     }
 
     #[test]
@@ -444,7 +445,7 @@ mod tests {
         let (list, errors) = parse("cmd+t = new_window\ncmd+t = text:hi\nctrl+t = ignore");
         assert!(errors.is_empty());
         let bindings = Bindings { list, ..Bindings::default() };
-        assert_eq!(bindings.find(&press(None, mods::COMMAND, 't')), Some(&Bind::Text("hi".into())));
+        assert_eq!(bindings.find(&press(None, mods::COMMAND, 't')), Some(&Bind::Text(b"hi".to_vec())));
         assert_eq!(bindings.find(&press(None, mods::CONTROL, 't')), Some(&Bind::Ignore));
         assert_eq!(bindings.find(&press(None, mods::OPTION, 't')), None);
     }

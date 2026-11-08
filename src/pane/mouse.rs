@@ -104,6 +104,15 @@ impl Pane {
             self.selected = None;
         }
     }
+    /// Bytes for the running program, as they are (a key binding's `\xff`
+    /// is one byte, not UTF-8).
+    pub fn type_bytes(&mut self, bytes: &[u8]) {
+        self.recap = None;
+        self.track_typing(&String::from_utf8_lossy(bytes));
+        self.session.write(bytes);
+        self.selection = None;
+        self.pin_to_bottom();
+    }
     pub(super) fn paste(&mut self, text: Option<String>) {
         if let Some(block) = self.session.active() {
             let bracketed = block.term.mode().contains(TermMode::BRACKETED_PASTE);

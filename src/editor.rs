@@ -10,14 +10,76 @@ pub struct Editor {
     undo: Vec<(String, usize)>,
     /// Position in history while browsing with Up/Down, and the draft.
     browsing: Option<(usize, String)>,
+    /// The column Up/Down aims for, and where the caret was when it last
+    /// moved that way: passing a shorter line doesn't lose the column.
+    goal: Option<(usize, usize)>,
 }
 
+/// A character that belongs to the one before it on screen: a combining
+/// mark, a variation selector (❤️), a skin tone (👍🏽), a joiner (👨‍👩‍👧), a
+/// keycap (1️⃣) or a flag tag.
+fn extends(c: char) -> bool {
+    matches!(c, '\u{200c}' | '\u{200d}' | '\u{fe00}'..='\u{fe0f}' | '\u{20e3}' | '\u{1f3fb}'..='\u{1f3ff}' | '\u{e0020}'..='\u{e007f}')
+        || (!c.is_control() && unicode_width::UnicodeWidthChar::width(c) == Some(0))
+}
+
+fn is_regional(c: char) -> bool {
+    ('\u{1f1e6}'..='\u{1f1ff}').contains(&c)
+}
+
+/// Whether `c` stays on screen as one character with the `before` it.
+fn joins(before: char, c: char) -> bool {
+    extends(c) || before == '\u{200d}'
+}
+
+/// The start of the character the caret is after, a whole emoji sequence
+/// or accented letter at once, so Backspace and Left never split one.
 fn prev_boundary(text: &str, at: usize) -> usize {
+    let mut chars = text[..at].char_indices().rev().peekable();
+    let Some((mut start, mut c)) = chars.next() else { return 0 };
+    if is_regional(c) {
+        // Flags are pairs of letters: 🇺🇸 is U then S.
+        let run = text[..start].chars().rev().take_while(|&c| is_regional(c)).count();
+        if run % 2 == 1 {
+            return prev_boundary_char(text, start);
+        }
+        return start;
+    }
+    while let Some(&(i, before)) = chars.peek() {
+        if !joins(before, c) || before == '\n' {
+            break;
+        }
+        (start, c) = (i, before);
+        chars.next();
+    }
+    start
+}
+
+fn prev_boundary_char(text: &str, at: usize) -> usize {
     text[..at].char_indices().next_back().map_or(0, |(i, _)| i)
 }
 
+/// The end of the character the caret is before (see `prev_boundary`).
 fn next_boundary(text: &str, at: usize) -> usize {
-    text[at..].chars().next().map_or(at, |c| at + c.len_utf8())
+    let mut chars = text[at..].chars();
+    let Some(mut c) = chars.next() else { return at };
+    let mut end = at + c.len_utf8();
+    if is_regional(c) {
+        // Flags pair from the start of the run of letters.
+        let run = text[..at].chars().rev().take_while(|&c| is_regional(c)).count();
+        match chars.next() {
+            Some(next) if run % 2 == 0 && is_regional(next) => return end + next.len_utf8(),
+            _ => return end,
+        }
+    }
+    for next in chars {
+        if c == '\n' || !joins(c, next) {
+            break;
+        }
+        end += next.len_utf8();
+        c = next;
+    }
+    end
 }
 
 fn is_word(c: char) -> bool {
@@ -26,7 +88,7 @@ fn is_word(c: char) -> bool {
 
 impl Editor {
     pub fn new() -> Editor {
-        Editor { text: String::new(), cursor: 0, anchor: None, undo: Vec::new(), browsing: None }
+        Editor { text: String::new(), cursor: 0, anchor: None, undo: Vec::new(), browsing: None, goal: None }
     }
 
     fn snapshot(&mut self) {
@@ -272,12 +334,15 @@ impl Editor {
             }
         }
         let end = self.line_end(start);
-        let mut cells = 0;
-        for (i, c) in self.text[start..end].char_indices() {
-            cells += width(c);
+        let (mut at, mut cells) = (start, 0);
+        while at < end {
+            // A whole emoji sequence at a time, so the caret never lands inside one.
+            let next = next_boundary(&self.text, at).min(end);
+            cells += columns(&self.text[at..next]);
             if cells > column {
-                return start + i;
+                return at;
             }
+            at = next;
         }
         end
     }
@@ -285,14 +350,20 @@ impl Editor {
     /// Moves between lines; returns false on the first/last line so the
     /// caller can browse history instead.
     pub fn vertical(&mut self, down: bool, select: bool) -> bool {
-        let (line, column) = self.position(self.cursor);
+        let (line, here) = self.position(self.cursor);
         let lines = self.line_count();
         if (down && line + 1 >= lines) || (!down && line == 0) {
             return false;
         }
+        // Still where the last Up/Down left it: aim for the same column.
+        let column = match self.goal {
+            Some((at, column)) if at == self.cursor => column,
+            _ => here,
+        };
         let target = if down { line + 1 } else { line - 1 };
         let to = self.offset(target, column);
         self.place(to, select);
+        self.goal = Some((to, column));
         true
     }
 
@@ -537,7 +608,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: Backspace removes one code point, so 👍🏽 becomes 👍 and a ZWJ family emoji falls apart"]
     fn backspace_removes_a_whole_emoji() {
         let mut editor = typed("ok 👍🏽");
         editor.backspace();
@@ -545,6 +615,47 @@ mod tests {
         let mut editor = typed("👨‍👩‍👧");
         editor.backspace();
         assert_eq!(editor.text, "");
+    }
+
+    #[test]
+    fn the_caret_steps_over_whole_characters() {
+        // Delete, Left and Right treat each of these as one character.
+        for each in ["👍🏽", "👨‍👩‍👧", "🇺🇸", "e\u{301}", "❤️", "1️⃣"] {
+            let mut editor = typed(&format!("a{each}b"));
+            editor.left(false, false);
+            editor.left(false, false);
+            assert_eq!(editor.cursor, 1, "{each}");
+            editor.right(false, false);
+            assert_eq!(editor.cursor, 1 + each.len(), "{each}");
+            editor.cursor = 1;
+            editor.delete();
+            assert_eq!(editor.text, "ab", "{each}");
+        }
+        // Two flags side by side are two characters.
+        let mut editor = typed("🇺🇸🇫🇷");
+        editor.backspace();
+        assert_eq!(editor.text, "🇺🇸");
+        // A joiner never reaches across a line break.
+        let mut editor = typed("a\n\u{301}");
+        editor.backspace();
+        assert_eq!(editor.text, "a\n");
+    }
+
+    #[test]
+    fn up_and_down_remember_the_column_past_a_short_line() {
+        let mut editor = typed("abcdef\nab\nabcdef");
+        editor.cursor = 5;
+        assert!(editor.vertical(true, false));
+        assert_eq!(editor.cursor, "abcdef\nab".len());
+        assert!(editor.vertical(true, false));
+        assert_eq!(editor.cursor, "abcdef\nab\nabcde".len());
+        assert!(editor.vertical(false, false));
+        assert!(editor.vertical(false, false));
+        assert_eq!(editor.cursor, 5);
+        // Moving any other way sets a new column.
+        editor.cursor = 1;
+        assert!(editor.vertical(true, false));
+        assert_eq!(editor.cursor, "abcdef\na".len());
     }
 
     #[test]
@@ -688,12 +799,18 @@ mod tests {
         assert!(editor.vertical(true, false));
         assert_eq!(editor.cursor, "abcdef\nab".len());
         assert!(editor.vertical(true, false));
-        // Column 2 is the start of 文.
-        assert_eq!(editor.cursor, "abcdef\nab\n中".len());
+        // Still aiming for column 5, which falls after 中文x (2+2+1 cells).
+        assert_eq!(editor.cursor, "abcdef\nab\n中文x".len());
         assert!(!editor.vertical(true, false));
         assert!(editor.vertical(false, true));
         assert!(editor.vertical(false, true));
-        assert_eq!(editor.selected_text(), Some("cdef\nab\n中"));
+        assert_eq!(editor.selected_text(), Some("f\nab\n中文x"));
+        // Column 3 is inside 文, so the caret lands before it.
+        editor.cursor = 3;
+        assert!(editor.vertical(true, false));
+        assert!(editor.vertical(true, false));
+        assert_eq!(editor.cursor, "abcdef\nab\n中".len());
+        editor.cursor = 2;
         assert!(!editor.vertical(false, false));
         assert_eq!(editor.line_count(), 3);
         assert_eq!(editor.position(editor.text.len()), (2, 7));
