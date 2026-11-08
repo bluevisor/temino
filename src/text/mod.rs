@@ -748,4 +748,3 @@ impl TextSystem {
         entry
     }
 }
-

@@ -29,21 +29,21 @@ use crate::update::{self, Release};
 use crate::viewer::{self, Viewer};
 use crate::Msg;
 
-mod start;
-mod layout;
-mod persist;
-mod control;
-mod prefs;
-mod input;
-mod tabs;
-mod draw;
-mod overlays;
 mod chrome;
-pub use start::*;
-use prefs::*;
-use tabs::*;
-pub use overlays::*;
+mod control;
+mod draw;
+mod input;
+mod layout;
+mod overlays;
+mod persist;
+mod prefs;
+mod start;
+mod tabs;
 use chrome::*;
+pub use overlays::*;
+use prefs::*;
+pub use start::*;
+use tabs::*;
 
 /// The terminal font size at zoom 1, which every UI size is designed at.
 const BASE_FONT_SIZE: f32 = 14.0;
@@ -116,7 +116,8 @@ const TITLE_CHARS: usize = 8000;
 /// lighter), so the two rows read as one palette.
 const TAB_COLORS: [u32; 12] = [
     0xf2737a, 0xf0a35e, 0xe5c76b, 0x8ccf7e, 0x67b0e8, 0xc47fd5, // red … purple
-    0xf5a18f, 0xf3cf7a, 0xeae885, 0x94d798, 0x82a5ec, 0xdd96da, // salmon, apricot, lemon, mint, periwinkle, orchid
+    0xf5a18f, 0xf3cf7a, 0xeae885, 0x94d798, 0x82a5ec,
+    0xdd96da, // salmon, apricot, lemon, mint, periwinkle, orchid
 ];
 const SWATCHES: usize = 6;
 

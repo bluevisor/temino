@@ -146,7 +146,11 @@ impl App {
         }
         let side = self.tab_area();
         let column = self.strip == TabStrip::Left && !self.compact && side.w > 0.0;
-        let bar = if column { Rect::new(side.w, 0.0, self.width - side.w, top) } else { Rect::new(0.0, 0.0, self.width, top) };
+        let bar = if column {
+            Rect::new(side.w, 0.0, self.width - side.w, top)
+        } else {
+            Rect::new(0.0, 0.0, self.width, top)
+        };
         let summary = self.tabs.get(self.active).and_then(|tab| tab.ai_title.summary.clone());
         let Self { scene, ctx, title, .. } = self;
         let Ctx { text, theme, .. } = ctx;

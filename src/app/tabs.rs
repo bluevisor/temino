@@ -427,7 +427,10 @@ impl App {
                         if let Some(need @ (AgentState::Waiting | AgentState::Done)) = state {
                             if away && pane.needs_since.map(|(was, _)| was) != Some(need) {
                                 #[cfg(not(target_os = "haiku"))]
-                                crate::relay::notify(if need == AgentState::Waiting { "waiting" } else { "done" }, index + 1);
+                                crate::relay::notify(
+                                    if need == AgentState::Waiting { "waiting" } else { "done" },
+                                    index + 1,
+                                );
                             }
                         }
                         pane.agent_now = state;

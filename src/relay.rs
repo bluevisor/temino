@@ -361,7 +361,8 @@ fn relay_message(
             });
         }
         Some("recv") => {
-            let (Some(from), Some(data)) = (message.str_at("from"), message.str_at("data").and_then(from_base64)) else {
+            let (Some(from), Some(data)) = (message.str_at("from"), message.str_at("data").and_then(from_base64))
+            else {
                 return;
             };
             let Some(device) = devices.get(from).filter(|d| d.kind == "phone") else { return };
@@ -466,9 +467,8 @@ fn decode(text: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        let escaped = (bytes[i] == b'%')
-            .then(|| Some(hex(*bytes.get(i + 1)?)? * 16 + hex(*bytes.get(i + 2)?)?))
-            .flatten();
+        let escaped =
+            (bytes[i] == b'%').then(|| Some(hex(*bytes.get(i + 1)?)? * 16 + hex(*bytes.get(i + 2)?)?)).flatten();
         match (escaped, bytes[i]) {
             (Some(b), _) => {
                 out.push(b as u8);
@@ -488,7 +488,8 @@ const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 fn base64(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let n =
+            (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
             if i <= chunk.len() {
                 out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);

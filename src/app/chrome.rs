@@ -532,7 +532,13 @@ pub(super) struct ShellHeader {
 /// The bar over a plain terminal (headers on): a dot (lit while a command
 /// runs, red after one failed), the folder, the command running, then the
 /// last command, how it ended and when, and the git branch.
-pub(super) fn draw_shell_header(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, bar: Rect, shell: &ShellHeader) {
+pub(super) fn draw_shell_header(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    bar: Rect,
+    shell: &ShellHeader,
+) {
     let ShellHeader { busy, failed, .. } = *shell;
     scene.fill(bar, theme.panel(SURFACE_LIFT));
     scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);

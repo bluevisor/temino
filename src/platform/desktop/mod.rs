@@ -635,4 +635,3 @@ pub fn foreground_group(master: i32) -> i32 {
 pub fn process_group(pid: i32) -> i32 {
     unsafe { libc::getpgid(pid) }
 }
-

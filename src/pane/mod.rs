@@ -27,11 +27,11 @@ use crate::ui::{self, GridView, Span};
 use crate::Msg;
 
 mod attention;
-mod typing;
-mod mouse;
 mod draw;
-use mouse::*;
+mod mouse;
+mod typing;
 use draw::*;
+use mouse::*;
 
 pub const PAD_X: f32 = 14.0;
 const ALT_PAD_Y: f32 = 8.0;
@@ -77,11 +77,8 @@ const RECAP_CHARS: usize = 6000;
 /// The launch banner: 5-pixel-tall block letters packed two pixel rows per
 /// cell with half blocks, so it's 30x3 cells. Every stroke is one pixel
 /// wide.
-const BANNER: &[&str] = &[
-    "▀▀█▀▀ █▀▀▀ █▄ ▄█ ▀█▀ █▄ █ █▀▀█",
-    "  █   █▀▀  █ ▀ █  █  █ ▀█ █  █",
-    "  ▀   ▀▀▀▀ ▀   ▀ ▀▀▀ ▀  ▀ ▀▀▀▀",
-];
+const BANNER: &[&str] =
+    &["▀▀█▀▀ █▀▀▀ █▄ ▄█ ▀█▀ █▄ █ █▀▀█", "  █   █▀▀  █ ▀ █  █  █ ▀█ █  █", "  ▀   ▀▀▀▀ ▀   ▀ ▀▀▀ ▀  ▀ ▀▀▀▀"];
 /// The big banner for very wide panes, in figlet's "ANSI Shadow" style.
 const BANNER_LARGE: &[&str] = &[
     "████████╗███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ",

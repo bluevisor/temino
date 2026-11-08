@@ -54,7 +54,11 @@ pub enum Command {
     Refresh,
     /// A phone came through the relay with a key not approved here: ask
     /// (its device id, its name, the code both screens show).
-    Ask { device: String, name: String, code: String },
+    Ask {
+        device: String,
+        name: String,
+        code: String,
+    },
     /// That phone's request is over: it got in, or it left.
     Settled(String),
 }
@@ -201,13 +205,8 @@ struct Hub {
     next_client: u64,
 }
 
-static HUB: Mutex<Hub> = Mutex::new(Hub {
-    windows: Vec::new(),
-    version: 0,
-    watching: Vec::new(),
-    in_control: Vec::new(),
-    next_client: 0,
-});
+static HUB: Mutex<Hub> =
+    Mutex::new(Hub { windows: Vec::new(), version: 0, watching: Vec::new(), in_control: Vec::new(), next_client: 0 });
 /// Clients past their hello: while there are none, windows don't bother
 /// building their state.
 static CLIENTS: AtomicUsize = AtomicUsize::new(0);
@@ -397,9 +396,12 @@ fn watch(client: u64, message: &Value) {
         .collect();
     let mut hub = HUB.lock().unwrap();
     // Gone from the pane it was in (back up to the tab or the window).
-    let left = hub.in_control.iter().find(|(id, _, _)| *id == client).and_then(|(_, _, at)| *at).filter(|at| {
-        !(panes.len() == 1 && panes[0] == *at)
-    });
+    let left = hub
+        .in_control
+        .iter()
+        .find(|(id, _, _)| *id == client)
+        .and_then(|(_, _, at)| *at)
+        .filter(|at| !(panes.len() == 1 && panes[0] == *at));
     if let Some(slot) = hub.watching.iter_mut().find(|(id, _)| *id == client) {
         slot.1 = panes;
     }

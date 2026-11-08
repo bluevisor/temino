@@ -387,7 +387,8 @@ impl Pane {
             let mut colors = vec![ctx.theme.text; text.len()];
             if !self.ai {
                 ctx.commands.use_path(self.session.path.as_deref());
-                for (start, end, color) in crate::ui::highlight(text, self.editor.cursor, &mut ctx.commands, &ctx.theme) {
+                for (start, end, color) in crate::ui::highlight(text, self.editor.cursor, &mut ctx.commands, &ctx.theme)
+                {
                     for slot in &mut colors[start.min(text.len())..end.min(text.len())] {
                         *slot = color;
                     }

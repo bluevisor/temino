@@ -26,10 +26,10 @@ use crate::theme::Theme;
 use crate::Msg;
 
 mod block;
-mod scan;
 mod links;
-pub use scan::*;
+mod scan;
 pub use links::*;
+pub use scan::*;
 
 const BASH_INTEGRATION: &str = include_str!("../shell/temino.bash");
 const ZSH_ENV: &str = include_str!("../shell/zshenv");

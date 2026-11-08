@@ -404,7 +404,11 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                             win.window.window_handle().map(|h| h.as_raw()),
                             Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_))
                         );
-                        if x11 { y + height.max(1) } else { y }
+                        if x11 {
+                            y + height.max(1)
+                        } else {
+                            y
+                        }
                     };
                     win.window.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(1, height.max(1)));
                 }

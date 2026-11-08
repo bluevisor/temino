@@ -435,15 +435,12 @@ impl Ui<'_> {
                 .to_owned(),
             ),
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
-            Row::Extended => (
-                "Extended tab list",
-                {
-                    // On Linux the command modifier is Ctrl+Shift already.
-                    let command = crate::platform::COMMAND_NAME;
-                    let shift = if command.contains("Shift") { "" } else { "+Shift" };
-                    format!("Under the active tab, what each pane is doing · {command}{shift}+B")
-                },
-            ),
+            Row::Extended => ("Extended tab list", {
+                // On Linux the command modifier is Ctrl+Shift already.
+                let command = crate::platform::COMMAND_NAME;
+                let shift = if command.contains("Shift") { "" } else { "+Shift" };
+                format!("Under the active tab, what each pane is doing · {command}{shift}+B")
+            }),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
             Row::Remote => (
@@ -463,7 +460,8 @@ impl Ui<'_> {
             Row::Field(Field::LlmUrl) => ("Server", "OpenAI-compatible; list several with commas".to_owned()),
             Row::Field(Field::LlmKey) => {
                 let provider = PROVIDERS[values.provider];
-                let detail = if provider.is("custom") { "If the server asks for one" } else { "Kept for this provider only" };
+                let detail =
+                    if provider.is("custom") { "If the server asks for one" } else { "Kept for this provider only" };
                 ("API key", detail.to_owned())
             }
             Row::Field(Field::LlmModel) => ("Model name", "As the provider names it".to_owned()),

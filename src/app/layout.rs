@@ -56,7 +56,13 @@ impl Node {
 
     /// Lays the tree out in `rect`: each pane's rectangle, and the dividers
     /// (with the path to their split, false = first child).
-    pub(super) fn layout(&self, rect: Rect, path: &mut Vec<bool>, panes: &mut Vec<(u64, Rect)>, dividers: &mut Vec<Divider>) {
+    pub(super) fn layout(
+        &self,
+        rect: Rect,
+        path: &mut Vec<bool>,
+        panes: &mut Vec<(u64, Rect)>,
+        dividers: &mut Vec<Divider>,
+    ) {
         match self {
             Node::Leaf(id) => panes.push((*id, rect)),
             Node::Split { axis, ratio, first, second } => {

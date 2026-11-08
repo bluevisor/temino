@@ -127,17 +127,18 @@ impl App {
         let ascent = text.ui_ascent(12.0);
         let mut row_y = y + 6.0;
         type Hits = Vec<(Rect, MenuAction)>;
-        let item = |scene: &mut Scene, text: &mut TextSystem, hits: &mut Hits, label: &str, shortcut: &str, action, row_y| {
-            let row = Rect::new(x + 5.0, row_y, MENU_WIDTH - 10.0, MENU_ROW);
-            if row.contains(mx, my) {
-                scene.quad(Quad::new(row, theme.accent.alpha(0.22)).radius(5.0));
-            }
-            let baseline = (row.y + (row.h + ascent * 0.72) / 2.0).round();
-            text.draw_text(scene, label, row.x + 9.0, baseline, UI, 12.0, theme.text);
-            let w = text.measure(shortcut, UI, 11.0);
-            text.draw_text(scene, shortcut, row.right() - 9.0 - w, baseline, UI, 11.0, theme.text_faint);
-            hits.push((row, action));
-        };
+        let item =
+            |scene: &mut Scene, text: &mut TextSystem, hits: &mut Hits, label: &str, shortcut: &str, action, row_y| {
+                let row = Rect::new(x + 5.0, row_y, MENU_WIDTH - 10.0, MENU_ROW);
+                if row.contains(mx, my) {
+                    scene.quad(Quad::new(row, theme.accent.alpha(0.22)).radius(5.0));
+                }
+                let baseline = (row.y + (row.h + ascent * 0.72) / 2.0).round();
+                text.draw_text(scene, label, row.x + 9.0, baseline, UI, 12.0, theme.text);
+                let w = text.measure(shortcut, UI, 11.0);
+                text.draw_text(scene, shortcut, row.right() - 9.0 - w, baseline, UI, 11.0, theme.text_faint);
+                hits.push((row, action));
+            };
         let divider = |scene: &mut Scene, row_y: f32| {
             scene.fill(Rect::new(x + 10.0, row_y + 4.0, MENU_WIDTH - 20.0, 1.0), theme.divider);
         };
@@ -372,7 +373,15 @@ impl App {
             scene.quad(Quad::new(card, theme.raised).radius(10.0).border(1.0, theme.divider));
             let title = text.elide(&format!("“{name}” wants to control this computer"), UI_BOLD, 13.0, W - 28.0);
             text.draw_text(scene, &title, card.x + 14.0, card.y + 26.0, UI_BOLD, 13.0, theme.text);
-            text.draw_text(scene, "Allow only if it shows this code:", card.x + 14.0, card.y + 46.0, UI, 11.5, theme.text_dim);
+            text.draw_text(
+                scene,
+                "Allow only if it shows this code:",
+                card.x + 14.0,
+                card.y + 46.0,
+                UI,
+                11.5,
+                theme.text_dim,
+            );
             let spaced = format!("{} {}", &code[..3.min(code.len())], &code[3.min(code.len())..]);
             text.draw_text(scene, &spaced, card.x + 14.0, card.y + 80.0, UI_BOLD, 26.0, theme.text);
             let mut x = card.right() - 14.0;
@@ -498,7 +507,15 @@ pub fn draw_people(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, rect
                 let initial: String = who.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
                 let w = text.measure(&initial, UI_BOLD, 10.5);
                 let baseline = (face.y + (face.h + text.ui_ascent(10.5) * 0.72) / 2.0).round();
-                text.draw_text(scene, &initial, face.x + (face.w - w) / 2.0, baseline, UI_BOLD, 10.5, Color::hex(0x0b0d12));
+                text.draw_text(
+                    scene,
+                    &initial,
+                    face.x + (face.w - w) / 2.0,
+                    baseline,
+                    UI_BOLD,
+                    10.5,
+                    Color::hex(0x0b0d12),
+                );
             }
         }
         let baseline = (pill.y + (pill.h + ascent * 0.72) / 2.0).round();

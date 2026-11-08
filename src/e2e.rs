@@ -74,7 +74,11 @@ fn builder() -> Builder<'static> {
 /// message sent.
 pub enum Session {
     Handshake(Box<HandshakeState>, Commit),
-    Open { transport: Box<TransportState>, code: String, partial: Vec<u8> },
+    Open {
+        transport: Box<TransportState>,
+        code: String,
+        partial: Vec<u8>,
+    },
     /// A handshake that failed partway: the phone starts over.
     Broken,
 }
@@ -328,7 +332,8 @@ mod tests {
         // A relay posing as the phone would pick its key after seeing the
         // Mac's value, to steer the digits: the promise covers the key, so
         // the same value with another key than promised is turned away.
-        let (promised, used, mac_keys) = (Keys::generate().unwrap(), Keys::generate().unwrap(), Keys::generate().unwrap());
+        let (promised, used, mac_keys) =
+            (Keys::generate().unwrap(), Keys::generate().unwrap(), Keys::generate().unwrap());
         let mine = [7u8; 32];
         let promise = Sha256::new().chain_update(mine).chain_update(&promised.public).finalize();
         let mut phone = builder().local_private_key(&used.private).build_initiator().unwrap();
