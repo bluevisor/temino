@@ -6,6 +6,7 @@
 // window, the machine, and you (every machine on your account).
 
 import { Session, generateKeys, hex, b64, fromB64 } from "/noise.js";
+import { MAG_DEFAULT, aroundCursor, clampLines, lastOutput, magRows } from "/mag.js";
 
 const LEVELS = ["pane", "tab", "window", "machine", "user"];
 const query = new URLSearchParams(location.search);
@@ -578,20 +579,25 @@ function screenHtml(p, live) {
     <div class="cmd"><span class="pr">${ed.ai ? "✦" : "❯"}</span> ${line}${caret}${ghost}${!ed.text && !ghost && live ? `<span class="hint">Tap to type</span>` : ""}</div>${menu}</div>`;
 }
 
-// ---- the magnifier: the lines around the cursor, large, above the keys
+// ---- the magnifier: the input line and the output above it, large
 // A phone fits a whole pane only in small type, so the line being typed on
-// is repeated big. It follows the cursor: the Mac's command line when one
-// is up, else the row the cursor is on in a full-screen program (Claude
-// Code's input box, vim) or a running command, with a row either side.
-const MAG_CONTEXT = 1;
+// is repeated big, with the last lines of output above it (mag.js picks
+// them). It follows the cursor: the Mac's command line when one is up, else
+// the row the cursor is on in a full-screen program (Claude Code's input
+// box, vim) or a running command. The grip on top sets how many lines of
+// output it shows (5 unless changed), kept on this phone.
 let magOn = store.get("temino-mag") != null ? store.get("temino-mag") === "1" : !matchMedia("(min-width: 768px)").matches;
+let magLines = store.get("temino-mag-lines") != null ? clampLines(Number(store.get("temino-mag-lines")) || 0) : MAG_DEFAULT;
+const termRows = (rows, cursor) => {
+  const m = magRows(rows, cursor);
+  return m.rows.length ? `<pre class="term">${m.rows.map((r, i) => rowHtml(r, i === m.cursor?.[0] ? m.cursor[1] : null)).join("\n")}</pre>` : "";
+};
 function magHtml(p) {
   const sc = p && p.screen;
   if (!sc) return "";
   const around = (lines, cr, cc) => {
-    if (cr < 0 || cr >= lines.length) return "";
-    const from = Math.max(0, cr - MAG_CONTEXT), to = Math.min(lines.length, cr + MAG_CONTEXT + 1);
-    return `<pre class="term">${lines.slice(from, to).map((r, i) => rowHtml(r, from + i === cr ? cc : null)).join("\n")}</pre>`;
+    const span = aroundCursor(lines, cr, magLines);
+    return span ? termRows(lines.slice(span.from, span.to), [cr - span.from, cc]) : "";
   };
   if (sc.mode === "grid") {
     const [cr, cc] = sc.cursor || [-1, -1];
@@ -600,7 +606,8 @@ function magHtml(p) {
   const ed = sc.editor && shown(p.id, sc.editor);
   if (ed) {
     const atEnd = ed.cursor >= Array.from(ed.text).length, ghost = atEnd && ed.suggestion;
-    return `<div class="cmd"><span class="pr">${ed.ai ? "✦" : "❯"}</span> ${rowHtml(colored(ed), ghost ? null : ed.cursor)}`
+    return termRows(lastOutput(sc.blocks, magLines))
+      + `<div class="cmd"><span class="pr">${ed.ai ? "✦" : "❯"}</span> ${rowHtml(colored(ed), ghost ? null : ed.cursor)}`
       + (ghost ? `<span class="cur"> </span><span class="ghost">${esc(ed.suggestion)}</span>` : "") + `</div>`;
   }
   const b = [...sc.blocks].reverse().find((x) => x.running && x.cursor);
@@ -609,13 +616,41 @@ function magHtml(p) {
 function drawMag(p) {
   const mag = $("mag");
   const html = magOn && level === "pane" ? magHtml(p) : "";
-  mag.hidden = !html;
+  mag.hidden = $("maggrip").hidden = !html;
   $("magkey").classList.toggle("on", magOn);
   if (!html) return;
   mag.innerHTML = html;
-  // Keep the cursor in view, a third in from the left so what follows shows.
-  const cur = mag.querySelector(".cur");
-  if (cur) mag.scrollLeft = Math.max(0, cur.offsetLeft - mag.clientWidth / 3);
+  // Lines wrap, so only the height can overflow: keep the input line (last) in view.
+  mag.scrollTop = mag.scrollHeight;
+}
+
+// Drag the grip up for more lines of output, down for fewer. A line is the
+// magnifier's line height; the count shows on the grip while dragging.
+{
+  const grip = $("maggrip");
+  let start = null;
+  grip.onpointerdown = (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    const row = parseFloat(getComputedStyle($("mag").querySelector("pre, .cmd") || $("mag")).lineHeight) || 22;
+    start = { y: e.clientY, lines: magLines, row };
+    grip.classList.add("on");
+    grip.dataset.n = `${magLines} line${magLines === 1 ? "" : "s"}`;
+  };
+  grip.onpointermove = (e) => {
+    if (!start) return;
+    const n = clampLines(start.lines + (start.y - e.clientY) / start.row);
+    if (n === magLines) return;
+    magLines = n;
+    grip.dataset.n = `${n} line${n === 1 ? "" : "s"}`;
+    drawMag(currentPane());
+  };
+  grip.onpointerup = grip.onpointercancel = () => {
+    if (!start) return;
+    start = null;
+    grip.classList.remove("on");
+    store.set("temino-mag-lines", String(magLines));
+  };
 }
 
 // ---- an agent waiting on you, or done

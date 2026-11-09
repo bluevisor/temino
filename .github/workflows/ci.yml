@@ -66,3 +66,5 @@ jobs:
         run: for f in src/*.js public/*.js; do node --check "$f"; done
       - name: Web Push payload
         run: node test/webpush.mjs
+      - name: Magnifier lines
+        run: node test/mag.mjs
