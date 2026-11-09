@@ -10,6 +10,8 @@
 
 export const MAG_DEFAULT = 5;
 export const MAG_MAX = 30;
+// Text rows of shell output kept above the shown lines, to drag back through.
+export const MAG_HISTORY = 200;
 
 export const texty = (row) => (row || []).some(([t]) => /[\p{L}\p{N}]/u.test(t));
 
@@ -39,6 +41,15 @@ export function lastOutput(blocks, want) {
     }
   }
   return rows;
+}
+
+// Where the last `want` text rows of `rows` start (rows.length for none, 0
+// when there are fewer): the rows before it are history, above the view.
+export function tailStart(rows, want) {
+  if (want <= 0) return rows.length;
+  let got = 0;
+  for (let i = rows.length - 1; i >= 0; i--) if (texty(rows[i]) && ++got === want) return i;
+  return 0;
 }
 
 export const clampLines = (n) => Math.min(MAG_MAX, Math.max(0, Math.round(n)));

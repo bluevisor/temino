@@ -93,9 +93,11 @@
   #keys button { flex: none; padding: 6px 12px; }
   #keys #magkey.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--raised)); }
   /* The magnifier: the input line and the output above it in reading-size
-     type, scrolled to the cursor; at most about half the screen. */
+     type, scrolled to the cursor; at most about half the screen. Earlier
+     lines sit above, out of view: drag inside to scroll back to them. */
   #mag { position: relative; margin: 0 0 8px; padding: 6px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 0 0 8px 8px;
-    border-top: 0; overflow-x: hidden; overflow-y: auto; max-height: 45dvh; scrollbar-width: none; }
+    border-top: 0; overflow-x: hidden; overflow-y: auto; max-height: 45dvh; scrollbar-width: none;
+    overscroll-behavior: contain; touch-action: pan-y; }
   /* Its grip: drag up for more lines of output, down for fewer. */
   #maggrip { height: 18px; display: flex; align-items: center; justify-content: center; touch-action: none; cursor: ns-resize;
     background: var(--bg); border: 1px solid var(--line); border-bottom: 0; border-radius: 8px 8px 0 0; color: var(--faint); font-size: 12px; }
