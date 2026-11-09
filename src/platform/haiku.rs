@@ -389,4 +389,5 @@ pub fn selection_get() -> Option<String> {
 pub fn viewer_open(_id: u64, _kind: super::ViewerKind, _target: &str, _style: super::ViewerStyle) {}
 pub fn viewer_place(_frames: Vec<(u64, [f32; 4], bool)>) {}
 pub fn viewer_close(_id: u64) {}
+pub fn viewer_go(_id: u64, _address: &str) {}
 pub fn viewer_focus(_id: Option<u64>) {}

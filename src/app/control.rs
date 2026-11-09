@@ -29,6 +29,44 @@ impl App {
         tab.zoomed = false;
         self.set_focus(id);
     }
+    /// A browser with nothing in it yet, its address bar waiting: beside
+    /// the focused pane, or (`new_tab`) as a tab of its own.
+    pub(super) fn open_browser(&mut self, new_tab: bool) {
+        if !platform::VIEWERS {
+            self.ctx.show_toast("The built-in browser is macOS-only for now");
+            return;
+        }
+        let from = self.focused_id().filter(|&id| id != SETTINGS);
+        let style = self.viewer_style();
+        let id = self.next_id;
+        self.next_id += 1;
+        platform::viewer_open(id, viewer::Kind::Web, viewer::BLANK, style);
+        self.viewers.push(Viewer::new(id, viewer::Kind::Web, viewer::BLANK.to_owned()));
+        match from {
+            Some(from) if !new_tab => {
+                let tab = &mut self.tabs[self.active];
+                tab.root.split(from, id, Axis::Row, false);
+                tab.zoomed = false;
+            }
+            _ => {
+                self.tabs.push(Tab {
+                    root: Node::Leaf(id),
+                    focus: id,
+                    zoomed: false,
+                    name: None,
+                    color: None,
+                    shown: None,
+                    slide: None,
+                    mark: None,
+                    marked_at: None,
+                    ai_title: AiTitle::default(),
+                });
+                self.switch_tab(self.tabs.len() - 1);
+            }
+        }
+        self.set_focus(id);
+        self.relayout();
+    }
     /// This window as remotes see it: its tabs and their panes, what each
     /// agent is doing, and the screens of the panes a remote watches.
     pub(super) fn remote_state(&mut self) -> (String, std::collections::HashMap<String, String>) {
@@ -228,6 +266,7 @@ impl App {
                 self.ctx.toast = Some((error, Instant::now() + Duration::from_secs(4)));
             }
             ViewerEvent::Close => self.close_pane(id),
+            ViewerEvent::Address(typed) => platform::viewer_go(id, &viewer::address(&typed)),
         }
         self.dirty = true;
     }

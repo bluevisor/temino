@@ -55,6 +55,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("close_pane", "cmd+w"),
     ("split_right", "cmd+d"),
     ("split_down", "cmd+e"),
+    ("new_browser_tab", "cmd+alt+t"),
+    ("browser_pane", "cmd+alt+d"),
     ("zoom_pane", "cmd+enter"),
     ("next_tab", "cmd+shift+]"),
     ("previous_tab", "cmd+shift+["),
