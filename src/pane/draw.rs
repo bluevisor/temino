@@ -472,7 +472,7 @@ impl Pane {
         let hint = if self.completion.is_none() { self.suggestion(ctx) } else { None };
         // Coming back to the pane, its recap takes the hint's place (an
         // agent's goes in its header instead).
-        let recap = self.recap.as_ref().filter(|_| !(ctx.headers && self.agent_now.is_some())).map(Recap::line);
+        let recap = self.recap.as_ref().filter(|_| self.agent_now.is_none()).map(Recap::line);
         let Ctx { text, theme, commands, user_host, .. } = ctx;
         let Pane { session, editor, layout, completion, ai, .. } = self;
         let ai = *ai && phase == Phase::Ready;

@@ -248,7 +248,6 @@ impl App {
             provider: crate::llm::PROVIDERS.iter().position(|&p| p == crate::llm::chosen()).unwrap_or(0),
             fields: Field::ALL.map(|field| crate::setting(&field.key()).unwrap_or_default()),
             editing: self.field.clone(),
-            headers: self.headers,
             #[cfg(not(target_os = "haiku"))]
             remote: Some(crate::relay::signed_in()),
             remote_account: ["account_login", "account_name"]
@@ -348,12 +347,6 @@ impl App {
             }
             #[cfg(target_os = "haiku")]
             Action::Disconnect(_) => {}
-            Action::Headers(headers) => {
-                self.headers = headers;
-                self.ctx.headers = headers != Headers::Off;
-                crate::save_setting("headers", headers.key());
-                self.relayout();
-            }
             Action::Edit(field) => {
                 self.finish_field();
                 let text = crate::setting(&field.key()).unwrap_or_default();

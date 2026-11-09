@@ -42,7 +42,7 @@ impl App {
         self.draw_viewers(&visible);
         self.wake_for_agents(&agents);
         self.pane_hits.clear();
-        self.draw_agent_headers(&visible);
+        self.draw_agent_headers();
         self.draw_remote_marks(&visible);
         for divider in &self.dividers {
             self.scene.set_layer(LAYER_OVERLAY);
@@ -79,24 +79,23 @@ impl App {
             }
         }
     }
-    /// The bar over each pane with an agent: what it's doing and for how
-    /// long, what you last asked it, its subagents and its session. A
-    /// listed program gets its name and how long it has run; any other
-    /// terminal (headers on) its running command, or its folder at rest.
-    pub(super) fn draw_agent_headers(&mut self, visible: &[(u64, Rect)]) {
+    /// The bar over every pane: over an agent, what it's doing and for
+    /// how long, what you last asked it, its subagents and its session; over
+    /// a listed program, its name and how long it has run; over any other
+    /// terminal, its running command, or its folder at rest. The focused
+    /// pane's is lit. An agent's, opened, pushes its terminal down.
+    pub(super) fn draw_agent_headers(&mut self) {
         self.header_hits.clear();
-        if self.headers == Headers::Off {
+        if self.tabs.is_empty() {
             return;
         }
         let now = Instant::now();
         let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
         let focus = self.focused_id();
         let sender = self.ctx.sender.clone();
-        for &(id, rect) in visible {
+        let mut moved = false;
+        for (id, slot) in self.tab_slots(self.active).0 {
             let Some(index) = self.panes.iter().position(|pane| pane.id == id) else { continue };
-            if !self.has_header(&self.panes[index]) || rect.h <= 2.0 * AGENT_HEADER {
-                continue;
-            }
             let pane = &mut self.panes[index];
             let info = pane.agent_info(now);
             let program = pane.program_now.clone();
@@ -111,25 +110,39 @@ impl App {
                     detail: if busy { String::new() } else { pane.idle_line(&pane.session.cwd, now) },
                 }
             });
-            let bar = Rect::new(rect.x, rect.y - AGENT_HEADER, rect.w, AGENT_HEADER);
+            let bar = Rect::new(slot.x, slot.y, slot.w, AGENT_HEADER.min(slot.h));
             let hover = self.header_hover == Some(id);
-            let Self { scene, ctx, pane_hits, header_hits, .. } = self;
+            let focused = Some(id) == focus;
+            let Self { scene, ctx, pane_hits, header_hits, panes, .. } = self;
             let Ctx { text, theme, .. } = ctx;
-            match (info, program, shell) {
+            let reach = match (info, program, shell) {
                 (Some(info), _, _) => {
-                    // Extended, it reaches over the top of the pane, at most
-                    // most of the way down.
-                    let room = (rect.h * 0.6).floor();
-                    let reach = draw_agent_header(scene, text, theme, bar, &info, Some(id) == focus, hover, room, t);
+                    let room = header_room(slot);
+                    let reach = draw_agent_header(scene, text, theme, bar, &info, focused, hover, room, t);
                     header_hits.push((Rect::new(bar.x, bar.y, bar.w, bar.h + reach), id));
+                    reach
                 }
                 (None, Some((name, started)), _) => {
-                    draw_program_header(scene, text, theme, bar, &name, now.duration_since(started))
+                    draw_program_header(scene, text, theme, bar, &name, now.duration_since(started), focused);
+                    0.0
                 }
-                (None, None, Some(shell)) => draw_shell_header(scene, text, theme, bar, &shell),
-                (None, None, None) => {}
-            }
+                (None, None, Some(shell)) => {
+                    draw_shell_header(scene, text, theme, bar, &shell, focused);
+                    0.0
+                }
+                (None, None, None) => 0.0,
+            };
             pane_hits.push((bar, self.active, id));
+            // The terminal makes room for what the header now takes.
+            let pane = &mut panes[index];
+            if (reach - pane.header_reach).abs() >= 1.0 {
+                pane.header_reach = reach;
+                moved = true;
+            }
+        }
+        if moved {
+            self.relayout();
+            self.dirty = true;
         }
     }
     /// The title bar over the window's top, where the system's would be.

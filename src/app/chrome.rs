@@ -255,12 +255,44 @@ pub(super) fn draw_agent_icon(
     x + size
 }
 
+/// What's left of pane place `slot` under its header, which reaches
+/// `reach` below its bar.
+pub(super) fn under_header(slot: Rect, reach: f32) -> Rect {
+    let top = (AGENT_HEADER + reach.min(header_room(slot))).min(slot.h - 1.0).max(0.0);
+    Rect::new(slot.x, slot.y + top, slot.w, slot.h - top)
+}
+
+/// How far an opened agent header may reach below its bar in pane place
+/// `slot`: at most half of it, leaving the terminal a few rows.
+pub(super) fn header_room(slot: Rect) -> f32 {
+    (slot.h * 0.5).floor().min(slot.h - 4.0 * AGENT_HEADER).max(0.0)
+}
+
+/// A header's ground, tinted with the accent while its pane is focused.
+fn header_ground(theme: &Theme, ground: Color, focused: bool) -> Color {
+    if focused {
+        ground.mix(theme.accent, 0.14)
+    } else {
+        ground
+    }
+}
+
+/// The edge under a header at `bottom`: a hairline, or while its pane is
+/// focused, a 2-point line in `lit`.
+fn draw_header_edge(scene: &mut Scene, theme: &Theme, bar: Rect, bottom: f32, focused: bool, lit: Color) {
+    if focused {
+        scene.fill(Rect::new(bar.x, bottom - 2.0, bar.w, 2.0), lit);
+    } else {
+        scene.fill(Rect::new(bar.x, bottom - 1.0, bar.w, 1.0), theme.divider);
+    }
+}
+
 /// The bar over an agent's pane. Left: the agent's mark and name, then a
 /// dot and what it's doing, with the turn's clock; then your last prompt.
 /// Right: its subagents, the prompts queued behind this turn, its
 /// session's name and how long it has run, and the toggle that extends it
-/// over the top of the pane (`header_details`), up to `room` tall. Returns
-/// how far it reaches below the bar.
+/// down (`header_details`), up to `room` tall, the terminal moving down to
+/// make room. Returns how far it reaches below the bar.
 pub(super) fn draw_agent_header(
     scene: &mut Scene,
     text: &mut TextSystem,
@@ -273,22 +305,16 @@ pub(super) fn draw_agent_header(
     t: f32,
 ) -> f32 {
     let color = agent_color(theme, info.state, t);
-    let ground = agent_ground(theme, info.state, t);
+    let ground = header_ground(theme, agent_ground(theme, info.state, t), focused);
     scene.fill(bar, ground);
     if info.state == AgentState::Running {
         draw_running_sweep(scene, theme, bar, t);
     }
     let reach = if info.open { draw_header_details(scene, text, theme, bar, info, ground, room, t) } else { 0.0 };
-    // The edge under it all, lit while the pane is focused and the agent busy.
-    let edge = bar.bottom() + reach;
-    if reach > 0.0 {
-        scene.set_layer(LAYER_OVERLAY);
-    }
-    scene.fill(Rect::new(bar.x, edge - 1.0, bar.w, 1.0), theme.divider);
-    if focused && info.state != AgentState::Idle {
-        scene.fill(Rect::new(bar.x, edge - 2.0, bar.w, 2.0), color.alpha(0.6));
-    }
-    scene.set_layer(LAYER_CONTENT);
+    // The edge under it all, lit while the pane is focused: in the agent's
+    // color while it's busy, else the accent.
+    let lit = if info.state == AgentState::Idle { theme.accent } else { color };
+    draw_header_edge(scene, theme, bar, bar.bottom() + reach, focused, lit);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
@@ -359,8 +385,8 @@ pub(super) fn draw_agent_header(
     reach
 }
 
-/// The extended header, under the bar and over the top of the pane, on the
-/// same ground: the recap and your prompt whole, what each subagent was
+/// The extended header, under the bar and above the terminal, on the same
+/// ground: the recap and your prompt whole, what each subagent was
 /// sent to do, the prompts queued, and where the session runs. At most
 /// `room` tall, cut short with an ellipsis. Returns its height.
 pub(super) fn draw_header_details(
@@ -431,11 +457,6 @@ pub(super) fn draw_header_details(
         return 0.0;
     }
     let panel = Rect::new(bar.x, bar.bottom(), bar.w, height);
-    scene.set_layer(LAYER_OVERLAY);
-    scene.shadow(Rect::new(panel.x, panel.y + 8.0, panel.w, panel.h - 8.0), Color::hex(0x000000).alpha(0.3), 0.0, 8.0);
-    // Opaque first: the ground is a see-through tint, and the pane's text
-    // is underneath.
-    scene.fill(panel, theme.background);
     scene.fill(panel, ground);
     // Where the bar meets its extension, a hairline.
     scene.fill(Rect::new(panel.x + PAD, panel.y, panel.w - 2.0 * PAD, 1.0), theme.divider.alpha(0.6));
@@ -452,7 +473,6 @@ pub(super) fn draw_header_details(
     let baseline = (y + facts_h / 2.0 + text.ui_ascent(11.0) * 0.36).round();
     text.draw_text(scene, &facts, panel.x + PAD, baseline, UI, 11.0, theme.text_faint);
     scene.pop_clip();
-    scene.set_layer(LAYER_CONTENT);
     height
 }
 
@@ -503,9 +523,10 @@ pub(super) fn draw_program_header(
     bar: Rect,
     name: &str,
     uptime: Duration,
+    focused: bool,
 ) {
-    scene.fill(bar, theme.panel(SURFACE_LIFT));
-    scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
+    scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focused));
+    draw_header_edge(scene, theme, bar, bar.bottom(), focused, theme.accent);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
@@ -529,7 +550,7 @@ pub(super) struct ShellHeader {
     pub(super) detail: String,
 }
 
-/// The bar over a plain terminal (headers on): a dot (lit while a command
+/// The bar over a plain terminal: a dot (lit while a command
 /// runs, red after one failed), the folder, the command running, then the
 /// last command, how it ended and when, and the git branch.
 pub(super) fn draw_shell_header(
@@ -538,10 +559,11 @@ pub(super) fn draw_shell_header(
     theme: &Theme,
     bar: Rect,
     shell: &ShellHeader,
+    focused: bool,
 ) {
     let ShellHeader { busy, failed, .. } = *shell;
-    scene.fill(bar, theme.panel(SURFACE_LIFT));
-    scene.fill(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), theme.divider);
+    scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focused));
+    draw_header_edge(scene, theme, bar, bar.bottom(), focused, theme.accent);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;

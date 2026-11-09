@@ -20,7 +20,7 @@ use crate::picture::Picture;
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::remote;
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
-use crate::settings::{self, Action, Field, Headers};
+use crate::settings::{self, Action, Field};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
 use crate::theme::{self, Color, Palette, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
@@ -367,9 +367,6 @@ pub struct App {
     /// The Settings text field being typed in, its text, and whether
     /// that's all selected.
     field: Option<(Field, String, bool)>,
-    /// Which panes get a header: those running an agent (or a listed
-    /// program), every terminal, or none.
-    headers: Headers,
     hover_tab: Option<usize>,
     /// When the pointer came onto the hovered tab, for its path's label.
     hover_at: Instant,
@@ -465,7 +462,6 @@ impl App {
             toast: None,
             shell,
             composing: false,
-            headers: Headers::parse(crate::setting("headers").as_deref()) != Headers::Off,
         };
         let mut app = App {
             gpu,
@@ -516,7 +512,6 @@ impl App {
             tab_menu: None,
             renaming: None,
             field: None,
-            headers: Headers::parse(crate::setting("headers").as_deref()),
             hover_tab: None,
             hover_at: Instant::now(),
             mouse: (0.0, 0.0),

@@ -359,8 +359,20 @@ impl App {
             TabStrip::Top => Rect::new(0.0, top + area.h, width, (height - area.h).max(1.0)),
         }
     }
-    /// Lays out one tab: its panes' rectangles and its dividers.
+    /// Lays out one tab: its panes' rectangles, under their headers, and
+    /// its dividers.
     pub(super) fn tab_layout(&self, index: usize) -> (Vec<(u64, Rect)>, Vec<Divider>) {
+        let (mut panes, dividers) = self.tab_slots(index);
+        for (id, rect) in &mut panes {
+            if let Some(pane) = self.panes.iter().find(|pane| pane.id == *id) {
+                *rect = under_header(*rect, pane.header_reach);
+            }
+        }
+        (panes, dividers)
+    }
+    /// Each pane's whole place in tab `index`, its header's included, and
+    /// the tab's dividers.
+    pub(super) fn tab_slots(&self, index: usize) -> (Vec<(u64, Rect)>, Vec<Divider>) {
         let tab = &self.tabs[index];
         let rect = self.content_rect();
         let (mut panes, mut dividers) = (Vec::new(), Vec::new());
@@ -369,24 +381,7 @@ impl App {
         } else {
             tab.root.layout(rect, &mut Vec::new(), &mut panes, &mut dividers);
         }
-        // A pane with an agent (or a listed program) in it gives its top
-        // to the header; with headers on, every terminal does.
-        for (id, rect) in &mut panes {
-            let header = self.panes.iter().any(|pane| pane.id == *id && self.has_header(pane));
-            if header && rect.h > 3.0 * AGENT_HEADER {
-                rect.y += AGENT_HEADER;
-                rect.h -= AGENT_HEADER;
-            }
-        }
         (panes, dividers)
-    }
-    /// Whether `pane` gets a header over it, by Settings ▸ Status header.
-    pub(super) fn has_header(&self, pane: &Pane) -> bool {
-        match self.headers {
-            Headers::Off => false,
-            Headers::Auto => pane.agent_now.is_some() || pane.program_now.is_some(),
-            Headers::On => true,
-        }
     }
     pub(super) fn visible_panes(&self) -> Vec<(u64, Rect)> {
         if self.tabs.is_empty() {
