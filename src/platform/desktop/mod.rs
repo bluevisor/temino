@@ -348,7 +348,7 @@ mod menu {
         ("Shell", Some("Split Up"), "e", SHIFT, None, 'e'),
         ("Shell", None, "", 0, None, '\0'),
         ("Shell", Some("New Browser Tab"), "t", OPTION, None, 't'),
-        ("Shell", Some("Open Browser Pane"), "d", OPTION, None, 'd'),
+        ("Shell", Some("Open Browser Pane"), "b", OPTION, None, 'b'),
         ("Shell", None, "", 0, None, '\0'),
         ("Shell", Some("Close Pane"), "w", 0, None, 'w'),
         ("Shell", None, "", 0, None, '\0'),
