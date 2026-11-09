@@ -107,9 +107,6 @@ pub struct Ctx {
     /// An input method is composing at the cursor: the prompt's hint stays
     /// out of its way.
     pub composing: bool,
-    /// Agents get a status header (Settings ▸ Tabs), and their recap
-    /// shows in it.
-    pub headers: bool,
 }
 
 impl Ctx {
@@ -230,6 +227,9 @@ pub struct Pane {
     /// Whether the agent's header is extended to show what it only has room
     /// to hint at: the whole prompt, the subagents' tasks, the queue.
     pub header_open: bool,
+    /// How far the opened header reaches below its bar, pushing the
+    /// terminal down by as much.
+    pub header_reach: f32,
     /// The agent's state this frame, read once by the window.
     pub agent_now: Option<AgentState>,
     /// Since when the agent has been waiting on you or done unseen, and which.
@@ -357,6 +357,7 @@ impl Pane {
             screen: None,
             agent_unseen: false,
             header_open: false,
+            header_reach: 0.0,
             program_now: None,
             agent_now: None,
             needs_since: None,
