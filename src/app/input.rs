@@ -216,7 +216,7 @@ impl App {
                     self.open_browser(true);
                     true
                 }
-                (_, Some('d')) if key.option() => {
+                (_, Some('b')) if key.option() => {
                     self.open_browser(false);
                     true
                 }
