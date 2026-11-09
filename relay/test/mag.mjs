@@ -1,6 +1,6 @@
 // The magnifier's lines (public/mag.js): node test/mag.mjs
 import assert from "node:assert/strict";
-import { MAG_DEFAULT, aroundCursor, clampLines, lastOutput, magRows, texty } from "../public/mag.js";
+import { MAG_DEFAULT, aroundCursor, clampLines, lastOutput, magRows, tailStart, texty } from "../public/mag.js";
 
 const row = (t) => [[t, "#fff", null, 0]];
 const blank = [];
@@ -24,6 +24,13 @@ const out = lastOutput(blocks, 5).map((r) => r.length ? r[0][0] : "");
 assert.deepEqual(out, ["a1", "a2", "a3", "b1", "", "b2"]);
 assert.deepEqual(lastOutput(blocks, 0), []);
 assert.deepEqual(lastOutput([], 5), []);
+
+// History: everything before the last 5 text rows is above the view.
+const all = lastOutput(blocks, 200);
+assert.equal(tailStart(all, 5), all.length - lastOutput(blocks, 5).length);
+assert.equal(tailStart(all, 2), all.indexOf(all.find((r) => r.length && r[0][0] === "b1")));
+assert.equal(tailStart(all, 0), all.length);
+assert.equal(tailStart(all, 99), 0);
 
 assert.equal(clampLines(-3), 0);
 assert.equal(clampLines(7.4), 7);

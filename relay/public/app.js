@@ -6,7 +6,7 @@
 // window, the machine, and you (every machine on your account).
 
 import { Session, generateKeys, hex, b64, fromB64 } from "/noise.js";
-import { MAG_DEFAULT, aroundCursor, clampLines, lastOutput, magRows } from "/mag.js";
+import { MAG_DEFAULT, MAG_HISTORY, aroundCursor, clampLines, lastOutput, magRows, tailStart } from "/mag.js";
 
 const LEVELS = ["pane", "tab", "window", "machine", "user"];
 const query = new URLSearchParams(location.search);
@@ -184,6 +184,7 @@ async function start(id) {
 }
 
 async function send(message) {
+  if (message.type === "key" || message.type === "text") magHome();
   if (!session || !session.open) return;
   const desktop = devices.find((d) => d.id === machine);
   if (desktop && hex(session.peer) !== desktop.pub) return;
@@ -592,12 +593,17 @@ const termRows = (rows, cursor) => {
   const m = magRows(rows, cursor);
   return m.rows.length ? `<pre class="term">${m.rows.map((r, i) => rowHtml(r, i === m.cursor?.[0] ? m.cursor[1] : null)).join("\n")}</pre>` : "";
 };
+// The lines shown are the bottom of the panel; what came before them is kept
+// above, so dragging inside the panel scrolls back through it. Scrolled
+// back, it stays put as the screen changes; typing, or a tap, brings it
+// back to the cursor.
+let magBack = 0; // px scrolled up from the bottom; 0 follows the cursor
 function magHtml(p) {
   const sc = p && p.screen;
-  if (!sc) return "";
+  if (!sc) return null;
   const around = (lines, cr, cc) => {
     const span = aroundCursor(lines, cr, magLines);
-    return span ? termRows(lines.slice(span.from, span.to), [cr - span.from, cc]) : "";
+    return span && { hist: termRows(lines.slice(0, span.from)), win: termRows(lines.slice(span.from, span.to), [cr - span.from, cc]) };
   };
   if (sc.mode === "grid") {
     const [cr, cc] = sc.cursor || [-1, -1];
@@ -606,23 +612,34 @@ function magHtml(p) {
   const ed = sc.editor && shown(p.id, sc.editor);
   if (ed) {
     const atEnd = ed.cursor >= Array.from(ed.text).length, ghost = atEnd && ed.suggestion;
-    return termRows(lastOutput(sc.blocks, magLines))
+    const out = lastOutput(sc.blocks, MAG_HISTORY + magLines), k = tailStart(out, magLines);
+    return { hist: termRows(out.slice(0, k)), win: termRows(out.slice(k))
       + `<div class="cmd"><span class="pr">${ed.ai ? "✦" : "❯"}</span> ${rowHtml(colored(ed), ghost ? null : ed.cursor)}`
-      + (ghost ? `<span class="cur"> </span><span class="ghost">${esc(ed.suggestion)}</span>` : "") + `</div>`;
+      + (ghost ? `<span class="cur"> </span><span class="ghost">${esc(ed.suggestion)}</span>` : "") + `</div>` };
   }
   const b = [...sc.blocks].reverse().find((x) => x.running && x.cursor);
-  return b ? around(b.lines, b.cursor[0], b.cursor[1]) : "";
+  return b ? around(b.lines, b.cursor[0], b.cursor[1]) : null;
 }
 function drawMag(p) {
   const mag = $("mag");
-  const html = magOn && level === "pane" ? magHtml(p) : "";
-  mag.hidden = $("maggrip").hidden = !html;
+  const m = magOn && level === "pane" ? magHtml(p) : null;
+  mag.hidden = $("maggrip").hidden = !(m && m.win);
   $("magkey").classList.toggle("on", magOn);
-  if (!html) return;
-  mag.innerHTML = html;
-  // Lines wrap, so only the height can overflow: keep the input line (last) in view.
-  mag.scrollTop = mag.scrollHeight;
+  if (mag.hidden) return;
+  const top = mag.scrollTop;
+  mag.innerHTML = `<div>${m.hist}</div><div class="win">${m.win}</div>`;
+  // As tall as the shown lines (CSS caps it near half the screen; no top
+  // padding, or a sliver of history shows), the history out of view above
+  // them. Dragged back, it keeps its place as new output comes in below.
+  const cs = getComputedStyle(mag), px = (k) => parseFloat(cs[k]) || 0;
+  mag.style.height = `${mag.querySelector(".win").offsetHeight + px("paddingBottom") + px("borderBottomWidth")}px`;
+  mag.scrollTop = magBack ? top : mag.scrollHeight;
 }
+$("mag").onscroll = () => {
+  const mag = $("mag"), back = mag.scrollHeight - mag.scrollTop - mag.clientHeight;
+  magBack = back < 4 ? 0 : back;
+};
+const magHome = () => { if (magBack) { magBack = 0; drawMag(currentPane()); } };
 
 // Drag the grip up for more lines of output, down for fewer. A line is the
 // magnifier's line height; the count shows on the grip while dragging.
@@ -800,7 +817,7 @@ const key = (k, mods = []) => {
 const held = []; // typed before a new tab arrived: for that tab
 const text = (t) => { if (!at || !t) return; if (follow || starting) return held.push(() => text(t)); predict("text", t); send({ type: "text", window: at.window, pane: at.pane, text: t }); };
 $("keys").onpointerdown = (e) => e.preventDefault(); // keep the keyboard up
-$("mag").onclick = () => $("type").focus();
+$("mag").onclick = () => { magHome(); $("type").focus(); };
 $("keys").onclick = (e) => {
   const b = e.target.closest("button");
   if (!b) return;
