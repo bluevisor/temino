@@ -185,7 +185,7 @@ impl App {
             // The built-in browser is macOS's (platform::VIEWERS).
             (
                 "Open Browser Pane",
-                if platform::VIEWERS { "⌥⌘D".to_owned() } else { String::new() },
+                if platform::VIEWERS { "⌥⌘B".to_owned() } else { String::new() },
                 MenuAction::BrowserPane,
             ),
             ("Close Pane", format!("{cmd}W"), MenuAction::ClosePane),
