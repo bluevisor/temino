@@ -377,7 +377,15 @@ impl Ui<'_> {
             }
             Row::Opacity => ("Background opacity", "How much of the desktop shows through".to_owned()),
             Row::Blur => ("Blur behind the window", "Soften what shows through".to_owned()),
-            Row::Zoom => ("Size", format!("{:.0}% · Command+plus and Command+minus too", values.zoom)),
+            Row::Zoom => (
+                "Size",
+                format!(
+                    "{:.0}% · {} and {} too",
+                    values.zoom,
+                    crate::platform::shortcut("+"),
+                    crate::platform::shortcut("−")
+                ),
+            ),
             Row::Shell => ("Default shell", "For new tabs and panes; a missing one is installed".to_owned()),
             Row::Fetch => ("Fetch", "System info at the top of each new tab".to_owned()),
             Row::FetchConfig => {
@@ -387,8 +395,14 @@ impl Ui<'_> {
             Row::Extended => ("Extended tab list", {
                 // On Linux the command modifier is Ctrl+Shift already.
                 let command = crate::platform::COMMAND_NAME;
-                let shift = if command.contains("Shift") { "" } else { "+Shift" };
-                format!("Under the active tab, what each pane is doing · {command}{shift}+B")
+                let keys = if cfg!(target_os = "macos") {
+                    "⇧⌘B".to_owned()
+                } else if command.contains("Shift") {
+                    format!("{command}+B")
+                } else {
+                    format!("{command}+Shift+B")
+                };
+                format!("Under the active tab, what each pane is doing · {keys}")
             }),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),

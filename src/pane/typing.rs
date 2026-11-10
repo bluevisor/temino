@@ -181,7 +181,7 @@ impl Pane {
         let width = (self.rect.w - 16.0).min(340.0);
         let bar = Rect::new(self.rect.w - width - 8.0, 6.0, width, 30.0);
         scene.set_layer(LAYER_OVERLAY);
-        scene.shadow(bar, Color::hex(0x000000).alpha(0.4), 8.0, 6.0);
+        scene.shadow(bar, theme.shadow(0.4), 8.0, 6.0);
         scene.quad(Quad::new(bar, theme.background).radius(8.0));
         scene.quad(Quad::new(bar, theme.raised).radius(8.0).border(1.0, theme.accent.alpha(0.6)));
         let baseline = (bar.y + (bar.h + text.ui_ascent(font) * 0.72) / 2.0).round();

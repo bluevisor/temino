@@ -2,7 +2,8 @@ use super::*;
 
 /// A tab's background, in the sidebar or the strip: a tab with a color is
 /// tinted with it all over; the current tab is raised and drawn round with
-/// a clear border, in its color if it has one.
+/// a clear border, in its color if it has one. Any other tab lifts a
+/// little under the pointer.
 pub(super) fn draw_tab_background(
     scene: &mut Scene,
     theme: &Theme,
@@ -10,16 +11,27 @@ pub(super) fn draw_tab_background(
     color: Option<Color>,
     current: bool,
     dragged: bool,
+    hovered: bool,
 ) {
     let (fill, border) = match (color, current) {
         (Some(color), true) => (theme.raised.mix(color, 0.42), color.mix(theme.text, 0.25)),
-        (Some(color), false) => (color.alpha(0.22), color.alpha(0.0)),
+        (Some(color), false) => (color.alpha(if hovered { 0.3 } else { 0.22 }), color.alpha(0.0)),
         (None, true) => (theme.raised.mix(theme.text, 0.06), theme.text_dim),
+        (None, false) if hovered || dragged => (theme.panel(HOVER_LIFT), Color::TRANSPARENT),
         (None, false) => return,
     };
     let fill = if dragged { fill.mix(theme.text, 0.06) } else { fill };
     let width = if current { 1.5 } else { 1.0 };
     scene.quad(Quad::new(rect, fill).radius(6.0).border(width, border));
+}
+
+/// The sidebar's show/hide button: a window with its side panel marked off,
+/// centered in `button`.
+pub(super) fn draw_sidebar_icon(scene: &mut Scene, button: Rect, color: Color) {
+    let (w, h) = (15.0, 12.0);
+    let frame = Rect::new((button.x + (button.w - w) / 2.0).round(), (button.y + (button.h - h) / 2.0).round(), w, h);
+    scene.quad(Quad::new(frame, Color::TRANSPARENT).radius(3.0).border(1.25, color));
+    scene.fill(Rect::new(frame.x + 5.0, frame.y + 1.0, 1.25, h - 2.0), color);
 }
 
 /// A tab's number in a circle `size` across, ringed and colored by what its

@@ -25,7 +25,7 @@ impl App {
         let Self { scene, ctx, menu_hits, menu_rect, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
-        scene.shadow(rect, Color::hex(0x000000).alpha(0.5), 8.0, 10.0);
+        scene.shadow(rect, theme.shadow(0.5), 8.0, 10.0);
         scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
         let ascent = text.ui_ascent(12.0);
         let mut row_y = y + 6.0;
@@ -106,7 +106,6 @@ impl App {
     pub(super) fn draw_account_menu(&mut self) {
         let Some(menu) = &self.tab_menu else { return };
         let who = account_info();
-        let cmd = platform::COMMAND_NAME;
         let remote = cfg!(not(target_os = "haiku"));
         let profile = 46.0;
         let mut h = 12.0 + MENU_ROW;
@@ -122,7 +121,7 @@ impl App {
         let Self { scene, ctx, menu_hits, menu_rect, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
-        scene.shadow(rect, Color::hex(0x000000).alpha(0.5), 8.0, 10.0);
+        scene.shadow(rect, theme.shadow(0.5), 8.0, 10.0);
         scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
         let ascent = text.ui_ascent(12.0);
         let mut row_y = y + 6.0;
@@ -163,7 +162,7 @@ impl App {
             item(scene, text, menu_hits, "Sign In…", "", MenuAction::SignIn, row_y);
             row_y += MENU_ROW;
         }
-        item(scene, text, menu_hits, "Settings…", &format!("{cmd},"), MenuAction::Settings, row_y);
+        item(scene, text, menu_hits, "Settings…", &platform::shortcut(","), MenuAction::Settings, row_y);
         row_y += MENU_ROW;
         if who.is_some() {
             divider(scene, row_y);
@@ -175,20 +174,20 @@ impl App {
     }
     pub(super) fn draw_pane_menu(&mut self) {
         let Some(menu) = &self.tab_menu else { return };
-        let cmd = platform::COMMAND_NAME;
+        let cmd = platform::shortcut;
         let rows: [(&str, String, MenuAction); 7] = [
-            ("Copy", format!("{cmd}C"), MenuAction::Copy),
-            ("Paste", format!("{cmd}V"), MenuAction::Paste),
-            ("Clear", format!("{cmd}K"), MenuAction::Clear),
-            ("Split Right", format!("{cmd}D"), MenuAction::SplitRight),
-            ("Split Down", format!("{cmd}E"), MenuAction::SplitDown),
+            ("Copy", cmd("C"), MenuAction::Copy),
+            ("Paste", cmd("V"), MenuAction::Paste),
+            ("Clear", cmd("K"), MenuAction::Clear),
+            ("Split Right", cmd("D"), MenuAction::SplitRight),
+            ("Split Down", cmd("E"), MenuAction::SplitDown),
             // The built-in browser is macOS's (platform::VIEWERS).
             (
                 "Open Browser Pane",
                 if platform::VIEWERS { "⌥⌘B".to_owned() } else { String::new() },
                 MenuAction::BrowserPane,
             ),
-            ("Close Pane", format!("{cmd}W"), MenuAction::ClosePane),
+            ("Close Pane", cmd("W"), MenuAction::ClosePane),
         ];
         let h = rows.len() as f32 * MENU_ROW + 12.0 + 2.0 * 9.0;
         let x = menu.x.min(self.width - MENU_WIDTH - 8.0).max(4.0);
@@ -198,7 +197,7 @@ impl App {
         let Self { scene, ctx, menu_hits, menu_rect, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
-        scene.shadow(rect, Color::hex(0x000000).alpha(0.5), 8.0, 10.0);
+        scene.shadow(rect, theme.shadow(0.5), 8.0, 10.0);
         scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
         let ascent = text.ui_ascent(12.0);
         let mut row_y = y + 6.0;
@@ -289,7 +288,7 @@ impl App {
         };
         let card = Rect::new(x, bottom - h, W, h);
         scene.set_layer(LAYER_OVERLAY);
-        scene.shadow(card, Color::hex(0x000000).alpha(0.55), 10.0, 14.0);
+        scene.shadow(card, theme.shadow(0.55), 10.0, 14.0);
         scene.quad(Quad::new(card, theme.raised).radius(10.0).border(1.0, theme.divider));
         // The card's tail, pointing at the pill.
         if let Some(pill) = pill.filter(|_| !*compact) {
@@ -375,7 +374,7 @@ impl App {
         scene.set_layer(LAYER_OVERLAY);
         for (i, (device, name, code)) in asks.iter().enumerate() {
             let card = Rect::new(((width - W) / 2.0).round(), top + 12.0 + i as f32 * (H + 10.0), W, H);
-            scene.shadow(card, Color::hex(0x000000).alpha(0.55), 10.0, 14.0);
+            scene.shadow(card, theme.shadow(0.55), 10.0, 14.0);
             scene.quad(Quad::new(card, theme.raised).radius(10.0).border(1.0, theme.divider));
             let title = text.elide(&format!("“{name}” wants to control this computer"), UI_BOLD, 13.0, W - 28.0);
             text.draw_text(scene, &title, card.x + 14.0, card.y + 26.0, UI_BOLD, 13.0, theme.text);
@@ -423,7 +422,7 @@ impl App {
         scene.set_layer(LAYER_OVERLAY);
         let w = text.measure(&message, UI, 12.0) + 24.0;
         let rect = Rect::new(right - w - 14.0, bottom - 40.0, w, 28.0);
-        scene.shadow(rect, Color::hex(0x000000).alpha(0.5), 14.0, 8.0);
+        scene.shadow(rect, theme.shadow(0.5), 14.0, 8.0);
         scene.quad(Quad::new(rect, theme.raised).radius(14.0).border(1.0, theme.divider));
         text.draw_text(scene, &message, rect.x + 12.0, rect.y + 18.0, UI, 12.0, theme.text);
         scene.set_layer(LAYER_CONTENT);
@@ -498,7 +497,7 @@ pub fn draw_people(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, rect
         let label = text.measure(&who.name, UI, size);
         let x = right - (pad + avatar + 7.0 + label + 10.0);
         let pill = Rect::new(x, rect.y + 8.0, right - x, avatar + 2.0 * pad);
-        scene.shadow(pill, Color::hex(0x000000).alpha(0.3), pill.h / 2.0, 6.0);
+        scene.shadow(pill, theme.shadow(0.3), pill.h / 2.0, 6.0);
         scene.quad(Quad::new(pill, theme.raised).radius(pill.h / 2.0).border(1.0, theme.accent));
         let face = Rect::new(pill.x + pad, pill.y + pad, avatar, avatar);
         #[cfg(not(target_os = "haiku"))]

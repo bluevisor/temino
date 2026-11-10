@@ -82,7 +82,7 @@ impl App {
         self.tab_list = Some(visible);
         self.relayout();
         if !visible {
-            self.ctx.show_toast(&format!("Tabs hidden · {}+B shows them", platform::COMMAND_NAME));
+            self.ctx.show_toast(&format!("Tabs hidden · {} shows them", platform::shortcut("B")));
         }
     }
     pub(super) fn step_tab(&mut self, delta: i32) {

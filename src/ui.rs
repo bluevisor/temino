@@ -403,6 +403,11 @@ pub fn hint(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, key: &str, 
     key_width + 7.0 + label_width
 }
 
+/// How wide `hint` draws this keycap and label.
+pub fn hint_width(text: &mut TextSystem, key: &str, label: &str) -> f32 {
+    text.measure(key, UI, 11.0) + 12.0 + 7.0 + text.measure(label, UI, 12.0)
+}
+
 /// "45s", "3m 07s", "1h 04m".
 pub fn short_duration(d: std::time::Duration) -> String {
     let s = d.as_secs();

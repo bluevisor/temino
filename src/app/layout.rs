@@ -137,8 +137,9 @@ impl App {
             let viewer = &mut self.viewers[index];
             if viewer.dirty && !viewer.close_armed {
                 viewer.close_armed = true;
-                let cmd = platform::COMMAND_NAME;
-                let message = format!("{} has unsaved changes: {cmd}S saves, {cmd}W again discards them", viewer.title);
+                let (save, close) = (platform::shortcut("S"), platform::shortcut("W"));
+                let message =
+                    format!("{} has unsaved changes: {save} saves, {close} again discards them", viewer.title);
                 self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(5)));
                 self.dirty = true;
                 return;
