@@ -895,6 +895,7 @@ mod tests {
             extended: false,
             zoom: 100.0,
             updates: true,
+            analytics: true,
             see_through: true,
             remote: None,
             remote_account: String::new(),
