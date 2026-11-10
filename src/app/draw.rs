@@ -659,7 +659,12 @@ impl App {
         let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
         let w = (text.measure(&title, UI, 12.0) + 20.0).min(TAB_MAX_WIDTH * 1.5);
-        let label = Rect::new(row.right() + 8.0, row.y + 2.0, w, row.h - 4.0);
+        let title = text.elide(&title, UI, 12.0, (w - 20.0).max(0.0));
+        // Beside the row, but kept in the window the way the menus are:
+        // a tab at the right edge (the top strip's last ones) would
+        // otherwise push the hint off-screen.
+        let x = (row.right() + 8.0).min((self.width - w - 4.0).max(4.0));
+        let label = Rect::new(x, row.y + 2.0, w, row.h - 4.0);
         scene.shadow(label, theme.shadow(0.5), 8.0, 6.0);
         scene.quad(Quad::new(label, theme.raised).radius(6.0).border(1.0, theme.divider));
         scene.push_clip(label.inset(8.0, 0.0));
