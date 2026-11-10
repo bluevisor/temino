@@ -161,9 +161,33 @@ fn model(base: &str) -> Result<String, String> {
     Ok(first.ok_or("the server lists no models")?.to_owned())
 }
 
-/// The model's answer to `prompt` under `system`, trimmed.
+/// Models found to think before they answer: asked for a short reply, they
+/// spent the whole limit reasoning and said nothing. From then on they get
+/// THINKING_ROOM more tokens than the answer needs.
+static THINKERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+const THINKING_ROOM: u32 = 2000;
+
+/// The model's answer to `prompt` under `system`, trimmed: about
+/// `max_tokens` long at most. A model that thinks first is asked again,
+/// once, with room for it.
 pub fn complete(system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
     let (base, model) = server()?;
+    let thinks = THINKERS.locked().contains(&model);
+    let room = if thinks { THINKING_ROOM } else { 0 };
+    if let Some(text) = ask(&base, &model, system, prompt, max_tokens + room)? {
+        return Ok(text);
+    }
+    if !thinks {
+        THINKERS.locked().push(model.clone());
+        if let Some(text) = ask(&base, &model, system, prompt, max_tokens + THINKING_ROOM)? {
+            return Ok(text);
+        }
+    }
+    Err("the model gave no answer".to_owned())
+}
+
+/// One request; None when the model answered nothing.
+fn ask(base: &str, model: &str, system: &str, prompt: &str, max_tokens: u32) -> Result<Option<String>, String> {
     // Thinking models (Gemma 4, Qwen 3) otherwise spend the whole budget
     // reasoning and answer nothing; llama.cpp's templates take this switch.
     // Hosted APIs pass it on to models that may refuse it, or refuse it.
@@ -171,17 +195,24 @@ pub fn complete(system: &str, prompt: &str, max_tokens: u32) -> Result<String, S
     let thinking = if hosted { "" } else { r#""chat_template_kwargs":{"enable_thinking":false},"# };
     let body = format!(
         r#"{{"model":{},"temperature":0.2,{thinking}"max_tokens":{max_tokens},"messages":[{{"role":"system","content":{}}},{{"role":"user","content":{}}}]}}"#,
-        quote(&model),
+        quote(model),
         quote(system),
         quote(prompt),
     );
     let reply = curl(&format!("{base}/chat/completions"), Some(&body), 60).inspect_err(|_| forget_model())?;
-    let reply = json::parse(&reply).ok_or("unreadable reply")?;
+    answer(&reply)
+}
+
+/// The answer in a chat completion's reply; None when it's empty, as when
+/// the model's thinking used up the limit.
+fn answer(reply: &str) -> Result<Option<String>, String> {
+    let reply = json::parse(reply).ok_or("unreadable reply")?;
     let message = reply.get("choices").and_then(|c| c.array().first()).and_then(|c| c.get("message"));
-    let text = message.and_then(|m| m.str_at("content")).ok_or("no answer in the reply")?;
+    let message = message.ok_or("no answer in the reply")?;
+    let text = message.str_at("content").unwrap_or_default();
     // Some templates still lead with an empty thought.
     let text = ["</think>", "<channel|>"].iter().fold(text, |text, end| text.rsplit(end).next().unwrap_or(text));
-    Ok(text.trim().to_owned())
+    Ok(Some(text.trim().to_owned()).filter(|text| !text.is_empty()))
 }
 
 /// POSTs JSON `body` to `url` with a bearer `key`.
@@ -256,6 +287,18 @@ pub fn quote(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::json::Value;
+
+    #[test]
+    fn a_reply_that_is_all_thinking_counts_as_no_answer() {
+        let said = r#"{"choices":[{"message":{"content":" API logs\nTailing prod "}}]}"#;
+        assert_eq!(answer(said), Ok(Some("API logs\nTailing prod".to_owned())));
+        let thought = r#"{"choices":[{"finish_reason":"length","message":{"content":"","reasoning":"We need"}}]}"#;
+        assert_eq!(answer(thought), Ok(None));
+        let null = r#"{"choices":[{"message":{"content":null}}]}"#;
+        assert_eq!(answer(null), Ok(None));
+        assert_eq!(answer("<think>hm</think> Logs"), Err("unreadable reply".to_owned()));
+        assert!(answer(r#"{"error":{"message":"no such model"}}"#).is_err());
+    }
 
     #[test]
     fn providers_keep_their_keys_apart() {
