@@ -114,6 +114,12 @@ pub fn iterm(body: &str) -> Outcome {
     Outcome { show, reply: None }
 }
 
+/// The most base64 one chunked image may add up to before it is dropped:
+/// the scanner's own cap on a single image sequence (Scanner::MAX_IMAGE),
+/// applied across chunks, so a transmission that never ends can't grow
+/// memory without bound.
+const MAX_PENDING: usize = 64 << 20;
+
 /// Kitty graphics: images transmitted (in chunks) and put by id.
 #[derive(Default)]
 pub struct Kitty {
@@ -147,6 +153,12 @@ impl Kitty {
             None => Vec::new(),
         };
         data.extend_from_slice(payload.trim().as_bytes());
+        if data.len() > MAX_PENDING {
+            // Too much, over too many chunks: drop it whole. The next
+            // command starts a new image, as if this one never began.
+            self.pending = None;
+            return Outcome::default();
+        }
         if more {
             self.pending = Some((keys, data));
             return Outcome::default();
@@ -262,6 +274,20 @@ mod tests {
         assert_eq!(&shown.picture.rgba[..4], &[255, 0, 0, 255]);
         assert_eq!(outcome.reply.unwrap(), b"\x1b_Gi=7;OK\x1b\\");
         assert!(kitty.command("a=p,i=7,q=1").show.is_some());
+    }
+
+    #[test]
+    fn an_endless_chunked_image_is_dropped_and_the_next_one_still_works() {
+        let mut kitty = Kitty::default();
+        let chunk = "A".repeat(40 << 20);
+        assert!(kitty.command(&format!("a=T,f=32,s=1,v=1,i=9,m=1;{chunk}")).show.is_none());
+        // A second 40 MB chunk passes the 64 MB cap: the image is dropped.
+        assert!(kitty.command(&format!("m=1;{chunk}")).show.is_none());
+        // So the next, complete image is read as its own, not as the tail
+        // of the dropped one.
+        let outcome = kitty.command("a=T,f=24,s=1,v=2,i=7;/wAAAP8A");
+        let shown = outcome.show.unwrap();
+        assert_eq!((shown.picture.width, shown.picture.height), (1, 2));
     }
 
     #[test]
