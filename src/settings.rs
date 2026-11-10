@@ -57,6 +57,8 @@ pub struct Values {
     /// As a percentage of the default size.
     pub zoom: f32,
     pub updates: bool,
+    /// The daily anonymous usage ping is on (Settings ▸ Share anonymous usage).
+    pub analytics: bool,
     /// The window can be see-through (macOS).
     pub see_through: bool,
     /// Signed in for remote control; None where there's no relay (Haiku).
@@ -135,6 +137,7 @@ pub enum Action {
     /// Smaller (-1), the default (0) or bigger (+1).
     Zoom(i32),
     Updates(bool),
+    Analytics(bool),
     CheckForUpdates,
     /// End the session of the connected phone at this place in the list.
     Disconnect(usize),
@@ -245,7 +248,7 @@ impl Page {
             rows.push(Row::Phone);
             y = ui.section(x, y, width, "Remote Control", &rows, values);
         }
-        y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::CheckForUpdates], values);
+        y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::Analytics, Row::CheckForUpdates], values);
         let version = format!("Temino {}", env!("CARGO_PKG_VERSION"));
         ui.text.draw_text(ui.scene, &version, x, y + 4.0, UI, 11.5, theme.text_faint);
         y += 24.0;
@@ -288,6 +291,7 @@ enum Row {
     TabsTop,
     Extended,
     Updates,
+    Analytics,
     CheckForUpdates,
     Remote,
     /// A phone in control now, at this place in the list.
@@ -405,6 +409,10 @@ impl Ui<'_> {
                 format!("Under the active tab, what each pane is doing · {keys}")
             }),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
+            Row::Analytics => (
+                "Share anonymous usage",
+                "One daily ping: version and system only — never commands or content".to_owned(),
+            ),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
             Row::Remote => (
                 "Control from iPhone or iPad",
@@ -499,6 +507,7 @@ impl Ui<'_> {
             }
             Row::Extended => self.toggle(right, rect.y, values.extended, Action::Extended(!values.extended)),
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
+            Row::Analytics => self.toggle(right, rect.y, values.analytics, Action::Analytics(!values.analytics)),
             Row::CheckForUpdates => self.button(right, control_y, "Check for Updates", Action::CheckForUpdates),
             Row::Remote => match values.remote {
                 Some(true) => self.button(right, control_y, "Sign Out", Action::Remote(false)),
@@ -804,6 +813,7 @@ mod tests {
             extended: false,
             zoom: 100.0,
             updates: true,
+            analytics: true,
             see_through: true,
             remote: None,
             remote_account: String::new(),
@@ -836,7 +846,7 @@ mod tests {
         expected.extend([Action::TabsTop(false), Action::TabsTop(true), Action::Extended(true)]);
         expected.extend((0..PROVIDERS.len()).map(Action::Provider));
         expected.extend(Field::ALL.map(Action::Edit));
-        expected.extend([Action::Updates(false), Action::CheckForUpdates]);
+        expected.extend([Action::Updates(false), Action::Analytics(false), Action::CheckForUpdates]);
         assert_eq!(actions, expected);
         // A click lands on what's under it, and nothing overlaps.
         for (rect, action) in &page.hits {

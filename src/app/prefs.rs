@@ -244,6 +244,7 @@ impl App {
             extended: self.extended,
             zoom: self.zoom_percent(),
             updates: crate::setting("updates").as_deref() != Some("off"),
+            analytics: crate::setting("analytics").as_deref() != Some("off"),
             see_through: cfg!(target_os = "macos"),
             provider: crate::llm::PROVIDERS.iter().position(|&p| p == crate::llm::chosen()).unwrap_or(0),
             fields: Field::ALL.map(|field| crate::setting(&field.key()).unwrap_or_default()),
@@ -328,6 +329,7 @@ impl App {
             Action::Zoom(0) => self.change_font_size(DEFAULT_FONT_SIZE),
             Action::Zoom(step) => self.step_font_size(step as f32),
             Action::Updates(on) => crate::save_setting("updates", if on { "on" } else { "off" }),
+            Action::Analytics(on) => crate::save_setting("analytics", if on { "on" } else { "off" }),
             Action::CheckForUpdates => {
                 self.check_for_updates();
             }
