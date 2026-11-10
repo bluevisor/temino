@@ -88,16 +88,24 @@ impl Pane {
             }
             SelectMode::Word => {
                 let rows = command_rows(&block.command, columns);
-                let row = |line: usize| rows.get(line).map(|(s, _)| s.chars().collect::<Vec<_>>()).unwrap_or_default();
-                let is_word = |chars: &[char], column: usize| {
-                    chars.get(column).is_some_and(|&c| !c.is_whitespace() && !"()[]{}<>'\"`|;,".contains(c))
-                };
+                let row = |line: usize| rows.get(line).map(|(s, _)| s.as_str()).unwrap_or("");
+                let is_word = |c: char| !c.is_whitespace() && !"()[]{}<>'\"`|;,".contains(c);
+                // The span's columns are cells; expand over whole words by
+                // going through the rows' characters and back.
                 let (first, last) = (row(start.0), row(end.0));
-                while start.1 > 0 && is_word(&first, start.1 - 1) {
-                    start.1 -= 1;
+                let first_chars: Vec<char> = first.chars().collect();
+                let (mut at, _) = row_char_range(first, start.1, start.1);
+                while at > 0 && first_chars.get(at - 1).is_some_and(|&c| is_word(c)) {
+                    at -= 1;
                 }
-                while end.1 + 1 < columns && is_word(&last, end.1 + 1) {
-                    end.1 += 1;
+                start.1 = row_cell_of_char(first, at);
+                let last_chars: Vec<char> = last.chars().collect();
+                let (_, mut at) = row_char_range(last, end.1, end.1);
+                while last_chars.get(at).is_some_and(|&c| is_word(c)) {
+                    at += 1;
+                }
+                if at > 0 {
+                    end.1 = row_cell_of_char(last, at - 1) + crate::editor::width(last_chars[at - 1]) - 1;
                 }
             }
         }
@@ -131,11 +139,8 @@ impl Pane {
         let cell = text.cell;
         let columns = self.session.size.columns.max(1);
         let block = &mut self.session.blocks[index];
-        let command_lines = if block.kind != BlockKind::Background {
-            block.command.split('\n').map(|line| crate::editor::columns(line).div_ceil(columns).max(1)).sum()
-        } else {
-            0
-        };
+        let command_lines =
+            if block.kind != BlockKind::Background { command_rows(&block.command, columns).len() } else { 0 };
         let output = if block.alt_screen() { 0 } else { block.output_lines() };
         let mut height = BLOCK_PAD_TOP + META_HEIGHT + command_lines as f32 * cell.height + BLOCK_PAD_BOTTOM;
         if output > 0 {
@@ -415,12 +420,13 @@ impl Pane {
                 if let Some(((l0, c0), (l1, c1))) =
                     command_selection.filter(|((l0, _), (l1, _))| (*l0..=*l1).contains(&index))
                 {
-                    let len = row.chars().count();
-                    let from = if index == l0 { c0.min(len) } else { 0 };
-                    let to = if index == l1 { (c1 + 1).min(len) } else { len };
-                    if to > from {
-                        let x = PAD_X + from as f32 * cell.width;
-                        scene.fill(Rect::new(x, line_y, (to - from) as f32 * cell.width, cell.height), theme.selection);
+                    let from = if index == l0 { c0 } else { 0 };
+                    let to = if index == l1 { c1 } else { usize::MAX };
+                    let (start, end) = row_char_range(row, from, to);
+                    if end > start {
+                        let x = PAD_X + row_cell_of_char(row, start) as f32 * cell.width;
+                        let w = (row_cell_of_char(row, end) - row_cell_of_char(row, start)) as f32 * cell.width;
+                        scene.fill(Rect::new(x, line_y, w, cell.height), theme.selection);
                     }
                 }
                 text.draw_mono(scene, row, PAD_X, line_y, Style::BOLD, theme.text);
@@ -749,10 +755,77 @@ pub(super) fn waiting_on_ai(block: &Block, output: usize) -> bool {
 pub(super) fn command_rows(command: &str, columns: usize) -> Vec<(String, bool)> {
     let mut rows = Vec::new();
     for line in command.split('\n') {
-        let chars: Vec<char> = line.chars().collect();
-        let chunks: Vec<&[char]> = chars.chunks(columns).chain(chars.is_empty().then_some(&[][..])).collect();
-        let last = chunks.len() - 1;
-        rows.extend(chunks.into_iter().enumerate().map(|(i, chunk)| (chunk.iter().collect(), i == last)));
+        let mut row = String::new();
+        let mut used = 0;
+        for c in line.chars() {
+            let w = crate::editor::width(c);
+            // Wrap on cells, the grid's own measure: a wide character that
+            // would straddle the edge starts the next row instead.
+            if w > 0 && used > 0 && used + w > columns {
+                rows.push((std::mem::take(&mut row), false));
+                used = 0;
+            }
+            row.push(c);
+            used += w;
+        }
+        rows.push((row, true));
     }
     rows
+}
+
+/// The char range of a wrapped command row covering cells `from..=to`
+/// (clamped to the row): selection spots are in cells, the row's text is
+/// in chars, and a wide character covers two cells.
+pub(super) fn row_char_range(row: &str, from: usize, to: usize) -> (usize, usize) {
+    let (mut start, mut end, mut used) = (None, 0, 0);
+    for (index, c) in row.chars().enumerate() {
+        let w = crate::editor::width(c);
+        if start.is_none() && used + w > from {
+            start = Some(index);
+        }
+        if used <= to {
+            end = index + 1;
+        }
+        used += w;
+    }
+    (start.unwrap_or(end), end)
+}
+
+/// The cell a char index starts at in a wrapped command row.
+pub(super) fn row_cell_of_char(row: &str, char_index: usize) -> usize {
+    row.chars().take(char_index).map(crate::editor::width).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_rows_wrap_on_cells_not_chars() {
+        // ASCII is unchanged: chunks of `columns` characters.
+        let rows = command_rows("abcdefg", 3);
+        assert_eq!(rows, vec![("abc".into(), false), ("def".into(), false), ("g".into(), true)]);
+        // Wide characters take two cells each, so fewer fit a row.
+        let rows = command_rows("ab中文cd", 4);
+        assert_eq!(rows, vec![("ab中".into(), false), ("文cd".into(), true)]);
+        // A wide character that would straddle the edge wraps whole.
+        let rows = command_rows("abc中", 4);
+        assert_eq!(rows, vec![("abc".into(), false), ("中".into(), true)]);
+        // Empty lines still take a row, flagged as ending their line.
+        let rows = command_rows("a\n\nb", 5);
+        assert_eq!(rows, vec![("a".into(), true), ("".into(), true), ("b".into(), true)]);
+    }
+
+    #[test]
+    fn row_char_range_maps_cells_to_chars() {
+        // Cells: a = 0, 中 = 1..=2, b = 3.
+        let row = "a中b";
+        assert_eq!(row_char_range(row, 0, 0), (0, 1));
+        assert_eq!(row_char_range(row, 1, 2), (1, 2));
+        assert_eq!(row_char_range(row, 2, 2), (1, 2), "a cell inside a wide char is that char");
+        assert_eq!(row_char_range(row, 3, 3), (2, 3));
+        assert_eq!(row_char_range(row, 0, 99), (0, 3), "past the end clamps");
+        assert_eq!(row_cell_of_char(row, 2), 3);
+        assert_eq!(row_cell_of_char(row, 0), 0);
+    }
 }
