@@ -116,6 +116,16 @@ fn configured() -> Option<Vec<String>> {
     (!urls.is_empty()).then_some(urls)
 }
 
+/// Who answers, to show beside an answer: the provider, then the model
+/// last found on it (a custom server's is known once it has been asked).
+pub fn source() -> String {
+    let provider = chosen().name;
+    match SERVER.locked().as_ref() {
+        Some((_, model)) => format!("{provider} · {model}"),
+        None => provider.to_owned(),
+    }
+}
+
 /// Asks for the server and its model again: after its address or key
 /// changed, or a call to it failed.
 pub fn forget_model() {

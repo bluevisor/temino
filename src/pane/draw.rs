@@ -414,7 +414,13 @@ impl Pane {
                 x += 10.0;
                 x += text.draw_text(scene, "⎇ ", x, baseline, UI, 12.0, theme.variable.alpha(0.9));
                 let branch = text.elide(branch, UI, 12.0, (limit - x).max(0.0));
-                text.draw_text(scene, &branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+                x += text.draw_text(scene, &branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+            }
+            // Who answered, in what room is left before the time.
+            if let Some(source) = &block.source {
+                x += 12.0;
+                let shown = text.elide(source, UI, 12.0, (limit - x).max(0.0));
+                text.draw_text(scene, &shown, x, baseline, UI, 12.0, theme.text_faint);
             }
             text.draw_text(scene, &tail, tail_x, baseline, UI, 12.0, tail_ink);
             text.draw_text(scene, &lead, lead_x, baseline, UI, 12.0, lead_ink);

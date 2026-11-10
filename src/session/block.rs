@@ -29,6 +29,8 @@ impl Block {
             clears,
             generation: 0,
             pictures: Vec::new(),
+            prose: None,
+            source: None,
         }
     }
 
@@ -301,10 +303,14 @@ impl Block {
 
     pub(super) fn resize(&mut self, size: GridSize) {
         if self.size.columns != size.columns || self.size.lines != size.lines {
+            let rewrap = self.size.columns != size.columns;
             self.term.resize(size);
             self.size = size;
             self.lines = None;
             self.generation += 1;
+            if rewrap {
+                self.lay_prose();
+            }
         }
     }
 }
