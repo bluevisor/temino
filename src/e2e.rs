@@ -35,6 +35,11 @@ pub const PATTERN: &str = "Noise_XX_25519_AESGCM_SHA256";
 pub const PROLOGUE: &[u8] = b"temino-remote-1";
 /// Noise's largest message, less the tag and the more-to-come byte.
 const PIECE: usize = 65535 - 16 - 1;
+/// The largest message `open_frame` will put back together: a peer that
+/// keeps sending pieces and never the last one must not grow this
+/// machine's memory without bound. (The web client, relay/public/noise.js,
+/// keeps the same limit.)
+pub const MAX_MESSAGE: usize = 16 << 20;
 
 /// A device's long-term key pair.
 #[derive(Clone)]
@@ -219,6 +224,11 @@ impl Session {
         let mut plain = vec![0u8; frame.len()];
         let n = transport.read_message(frame, &mut plain).map_err(|e| e.to_string())?;
         let (&last, piece) = plain[..n].split_first().ok_or("empty frame")?;
+        if partial.len() + piece.len() > MAX_MESSAGE {
+            // Drop what was gathered, so the next message starts clean.
+            partial.clear();
+            return Err("a message bigger than the limit".into());
+        }
         partial.extend_from_slice(piece);
         Ok((last == 1).then(|| std::mem::take(partial)))
     }
@@ -344,6 +354,28 @@ mod tests {
         phone.read_message(&second, &mut scratch).unwrap();
         let n = phone.write_message(&mine, &mut out).unwrap();
         assert!(mac.handshake(&out[..n]).is_err());
+    }
+
+    #[test]
+    fn pieces_past_the_limit_are_refused_and_the_next_message_still_opens() {
+        let (mut phone, mut mac) = pair();
+        let big: Vec<u8> = (0..=MAX_MESSAGE as u32).map(|i| (i % 251) as u8).collect();
+        let frames = phone.seal(&big).unwrap();
+        let mut refused = false;
+        for frame in &frames {
+            match mac.open_frame(frame) {
+                Ok(Some(_)) => panic!("an over-limit message opened whole"),
+                Ok(None) => {}
+                Err(_) => {
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused, "the over-limit message was never refused");
+        // What was gathered is gone: a normal message still gets through.
+        let frame = phone.seal(b"ls").unwrap().remove(0);
+        assert_eq!(mac.open_frame(&frame).unwrap().unwrap(), b"ls");
     }
 
     #[test]
