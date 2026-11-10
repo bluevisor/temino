@@ -357,7 +357,10 @@ impl App {
             // Just taller than the text, centered on it.
             let h = (font + 6.0).round();
             let top = (baseline - ascent * 0.36 - h / 2.0).round();
-            let field = Rect::new(x - 3.0, top, (close.x - x - 1.0).max(0.0), h);
+            // To `right`, not to the close button: no × is drawn while
+            // editing (closable is false), and `right` already stops
+            // short of any badge or mark chip on the row.
+            let field = Rect::new(x - 3.0, top, (right - x + 3.0).max(0.0), h);
             scene.quad(Quad::new(field, theme.background).radius(3.0).border(1.0, theme.accent));
             scene.push_clip(field.inset(1.0, 0.0));
             let w = text.measure(name, UI, font);
