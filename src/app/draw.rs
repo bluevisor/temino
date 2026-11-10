@@ -328,11 +328,9 @@ impl App {
         let ascent = text.ui_ascent(font);
         let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
         let mut x = rect.x + if left { 10.0 } else { 8.0 };
-        if index < 9 || tab.agent.is_some() {
-            let center = (x + number / 2.0, rect.y + rect.h / 2.0);
-            draw_tab_number(scene, text, theme, index, center, number, tab.agent, tab.done_for, t);
-            x += number + 8.0;
-        }
+        let center = (x + number / 2.0, rect.y + rect.h / 2.0);
+        draw_tab_number(scene, text, theme, index, center, number, tab.agent, tab.done_for, t);
+        x += number + 8.0;
         let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
         let closable = hovered && tab.editing.is_none();
         let mut right = if closable { close.x - 4.0 } else { rect.right() - 8.0 };
@@ -501,7 +499,7 @@ impl App {
             }
             let below = rect.bottom() - 6.0;
             if meta > 0.0 {
-                self.draw_tab_meta(index, tab, count.as_deref(), Rect::new(rect.x, below, rect.w, meta));
+                self.draw_tab_meta(tab, count.as_deref(), Rect::new(rect.x, below, rect.w, meta));
             }
             self.draw_pane_lines(index, tab, Rect::new(rect.x, below + meta + 2.0, rect.w, extra));
             y += row.h + 4.0;
@@ -562,11 +560,10 @@ impl App {
     }
     /// A sidebar row's line under its title, lined up with it: how many
     /// panes, and the mark's chip.
-    pub(super) fn draw_tab_meta(&mut self, index: usize, tab: &TabView, count: Option<&str>, area: Rect) {
+    pub(super) fn draw_tab_meta(&mut self, tab: &TabView, count: Option<&str>, area: Rect) {
         let Self { scene, ctx, .. } = self;
         let Ctx { text, theme, .. } = ctx;
-        let numbered = index < 9 || tab.agent.is_some();
-        let mut x = area.x + if numbered { 10.0 + 22.0 + 8.0 } else { 10.0 };
+        let mut x = area.x + 10.0 + 22.0 + 8.0;
         let cy = area.y + area.h / 2.0;
         if let Some(count) = count {
             let baseline = (cy + text.ui_ascent(11.0) * 0.36).round();
