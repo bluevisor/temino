@@ -20,6 +20,10 @@
 const NAME = "Noise_XX_25519_AESGCM_SHA256";
 export const PROLOGUE = new TextEncoder().encode("temino-remote-1");
 const PIECE = 65535 - 16 - 1;
+// The largest message openFrame will put back together: a peer that
+// keeps sending pieces and never the last one must not grow this
+// page's memory without bound. (src/e2e.rs keeps the same limit.)
+export const MAX_MESSAGE = 16 << 20;
 const subtle = globalThis.crypto.subtle;
 
 const concat = (...parts) => {
@@ -121,6 +125,7 @@ export class Session {
     this.initiator = initiator;
     this.step = 0;
     this.partial = [];
+    this.partialBytes = 0;
   }
 
   static async initiate(keys) {
@@ -216,10 +221,20 @@ export class Session {
   // A frame in; the whole message once its last piece is.
   async openFrame(frame) {
     const plain = await this.recv.open(new Uint8Array(0), frame);
-    this.partial.push(plain.subarray(1));
+    if (plain.length === 0) throw new Error("empty frame");
+    const piece = plain.subarray(1);
+    this.partialBytes += piece.length;
+    if (this.partialBytes > MAX_MESSAGE) {
+      // Drop what was gathered, so the next message starts clean.
+      this.partial = [];
+      this.partialBytes = 0;
+      throw new Error("a message bigger than the limit");
+    }
+    this.partial.push(piece);
     if (plain[0] !== 1) return null;
     const whole = concat(...this.partial);
     this.partial = [];
+    this.partialBytes = 0;
     return whole;
   }
 }
