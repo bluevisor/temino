@@ -123,8 +123,18 @@ fn word_start(text: &str, cursor: usize) -> usize {
     let mut i = cursor;
     while i > 0 {
         let b = bytes[i - 1];
-        let escaped = i >= 2 && bytes[i - 2] == b'\\';
-        if (b == b' ' || b == b'\t' || b == b'\n' || b == b'|' || b == b';' || b == b'&' || b == b'(') && !escaped {
+        // A separator is escaped by an odd run of backslashes before it:
+        // `my\ file` is one word, but in `a\\ file` the backslash is
+        // itself escaped and the space still ends the word.
+        let mut slashes = 0;
+        let mut j = i - 1;
+        while j > 0 && bytes[j - 1] == b'\\' {
+            slashes += 1;
+            j -= 1;
+        }
+        if (b == b' ' || b == b'\t' || b == b'\n' || b == b'|' || b == b';' || b == b'&' || b == b'(')
+            && slashes % 2 == 0
+        {
             break;
         }
         i -= 1;
@@ -327,6 +337,10 @@ mod tests {
         assert_eq!(word_start("(cd x", 3), 1);
         assert_eq!(word_start("one\ntwo", 7), 4);
         assert_eq!(word_start("one\ttwo", 7), 4);
+        // An escaped backslash doesn't escape the space after it, but an
+        // odd run of backslashes still does.
+        assert_eq!(word_start(r"cat a\\ b", 9), 8);
+        assert_eq!(word_start(r"cat a\\\ b", 10), 4);
         assert_eq!(word_start("", 0), 0);
         assert_eq!(word_start("ls 中文", "ls 中文".len()), 3);
         // Up to the caret only.
