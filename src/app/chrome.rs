@@ -89,15 +89,17 @@ pub(super) fn draw_tab_number(
             ink
         }
     };
-    if index < 9 {
-        let label = format!("{}", index + 1);
-        let font = (size * 0.5 + 2.0).round();
-        let w = text.measure(&label, UI, font);
-        let baseline = (cy + text.ui_ascent(font) * 0.36).round();
-        text.draw_text(scene, &label, cx - w / 2.0, baseline, UI, font, color);
-    } else if agent.is_some() {
-        scene.quad(Quad::new(Rect::new(cx - 2.0, cy - 2.0, 4.0, 4.0), color).radius(2.0));
-    }
+    // Every tab gets its number; two or more digits shrink to fit the circle.
+    let label = format!("{}", index + 1);
+    let shrink = match label.len() {
+        1 => 0.0,
+        2 => 1.0,
+        _ => 3.0,
+    };
+    let font = (size * 0.5 + 2.0 - shrink).round();
+    let w = text.measure(&label, UI, font);
+    let baseline = (cy + text.ui_ascent(font) * 0.36).round();
+    text.draw_text(scene, &label, cx - w / 2.0, baseline, UI, font, color);
 }
 
 /// A finished turn you haven't seen: the green badge springs in, flashes
