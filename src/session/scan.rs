@@ -145,20 +145,43 @@ pub fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// What escape-stripped output leaves on screen, line by line: a bare
-/// carriage return rewinds the line (a line editor's redraw), \r\n ends it.
+/// What escape-stripped output leaves on screen, line by line. The
+/// screen is a cursor, not an eraser: a bare carriage return and a
+/// backspace only move it, so what follows overwrites (a line editor's
+/// redraw); \r\n ends the line, and ESC [ K wipes from the cursor on.
 pub(super) fn visible_lines(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes);
-    let mut lines = vec![String::new()];
+    let mut lines: Vec<String> = Vec::new();
+    let mut line: Vec<char> = Vec::new();
+    let mut cursor = 0usize;
+    // Trailing blanks are not visible, however the line got them.
+    let finish = |line: &Vec<char>| line.iter().collect::<String>().trim_end().to_owned();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        let line = lines.last_mut().unwrap();
         match c {
             '\x1b' => match chars.next() {
                 Some('[') => {
+                    let mut params = String::new();
+                    let mut final_byte = None;
                     for n in chars.by_ref() {
                         if ('@'..='~').contains(&n) {
+                            final_byte = Some(n);
                             break;
+                        }
+                        params.push(n);
+                    }
+                    if final_byte == Some('K') {
+                        match params.as_str() {
+                            // From the cursor to the end, or the whole line.
+                            "" | "0" | "2" => {
+                                line.truncate(if params == "2" { 0 } else { cursor });
+                                if params == "2" {
+                                    cursor = 0;
+                                }
+                            }
+                            // The start through the cursor becomes blanks.
+                            "1" => line.iter_mut().take(cursor + 1).for_each(|c| *c = ' '),
+                            _ => {}
                         }
                     }
                 }
@@ -178,15 +201,25 @@ pub(super) fn visible_lines(bytes: &[u8]) -> Vec<String> {
                 _ => {}
             },
             '\r' if chars.peek() == Some(&'\n') => {}
-            '\r' => line.clear(),
-            '\n' => lines.push(String::new()),
-            '\x08' => {
-                line.pop();
+            '\r' => cursor = 0,
+            '\n' => {
+                lines.push(finish(&line));
+                line.clear();
+                cursor = 0;
             }
+            '\x08' => cursor = cursor.saturating_sub(1),
             c if c.is_control() => {}
-            c => line.push(c),
+            c => {
+                if cursor == line.len() {
+                    line.push(c);
+                } else {
+                    line[cursor] = c;
+                }
+                cursor += 1;
+            }
         }
     }
+    lines.push(finish(&line));
     lines
 }
 
@@ -412,6 +445,22 @@ mod tests {
         assert_eq!(visible_lines(b"x\x1b["), ["x"]);
         assert_eq!(visible_lines(b"x\x1b]0;unterminated"), ["x"]);
         assert_eq!(visible_lines(b"x\x1b"), ["x"]);
+    }
+
+    #[test]
+    fn carriage_returns_and_backspaces_overwrite_rather_than_delete() {
+        // A shorter redraw over a longer line leaves the tail on screen.
+        assert_eq!(visible_lines(b"abcdef\rxy"), ["xycdef"]);
+        // Two backspaces put the next letter over the first one.
+        assert_eq!(visible_lines(b"ab\x08\x08c"), ["cb"]);
+        // What a prompt redraw really sends: back to the start, erase to
+        // the end of the line, then the new text.
+        assert_eq!(visible_lines(b"abcdef\r\x1b[Kxy"), ["xy"]);
+        assert_eq!(visible_lines(b"abcdef\r\x1b[2Kxy"), ["xy"]);
+        // Erasing the start leaves the rest, past the blanks (after a
+        // carriage return only the first cell is under the cursor).
+        assert_eq!(last_visible_line(b"abcdef\r\x1b[1K"), "bcdef");
+        assert_eq!(last_visible_line(b"abcdef\x08\x08\x1b[1K"), "f");
     }
 
     #[test]
