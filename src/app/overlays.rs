@@ -288,15 +288,11 @@ impl App {
             } else {
                 scene.push_clip(pill.inset(10.0, 0.0));
                 text.draw_text(scene, "↑", pill.x + 12.0, baseline, UI_BOLD, 12.0, Color::hex(0xffffff));
-                text.draw_text(
-                    scene,
-                    "Update Available…",
-                    pill.x + 26.0,
-                    baseline,
-                    UI_BOLD,
-                    12.0,
-                    Color::hex(0xffffff),
-                );
+                // Elided, not just clipped: at the sidebar's minimum
+                // width the pill is ~58px and the label was sawn off
+                // mid-word ("Upda") with no hint of more.
+                let label = text.elide("Update Available…", UI_BOLD, 12.0, (pill.w - 36.0).max(0.0));
+                text.draw_text(scene, &label, pill.x + 26.0, baseline, UI_BOLD, 12.0, Color::hex(0xffffff));
                 scene.pop_clip();
             }
             update_hits.push((pill, UpdateAction::Toggle));
