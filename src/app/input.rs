@@ -442,7 +442,13 @@ impl App {
             }
             if self.account_hit.contains(x, y) {
                 let hit = self.account_hit;
-                self.tab_menu = Some(TabMenu { tab: self.active, x: hit.x, y: hit.y - 6.0, kind: MenuKind::Account });
+                self.tab_menu = Some(TabMenu {
+                    tab: self.active,
+                    x: hit.x,
+                    y: hit.y - 6.0,
+                    kind: MenuKind::Account,
+                    opened: Instant::now(),
+                });
                 self.dirty = true;
                 return;
             }
@@ -488,7 +494,7 @@ impl App {
         let reports = self.panes.iter().find(|p| p.id == id).is_some_and(|p| p.reports_mouse());
         if secondary && !(reports && mods & platform::mods::SHIFT == 0) {
             self.finish_rename();
-            self.tab_menu = Some(TabMenu { tab: self.active, x, y, kind: MenuKind::Pane });
+            self.tab_menu = Some(TabMenu { tab: self.active, x, y, kind: MenuKind::Pane, opened: Instant::now() });
             return;
         }
         self.pointer = Pointer::Pane(id);

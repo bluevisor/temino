@@ -1,8 +1,38 @@
 use super::*;
 
 impl App {
-    /// The open tab menu: Rename, a row of colors, Close.
+    /// How far along something that came up at `since` is: how opaque, and
+    /// how many points short of its place. Keeps the frames coming until
+    /// it has settled.
+    pub(super) fn appear(&mut self, since: Instant) -> (f32, f32) {
+        let t = since.elapsed().as_secs_f32() / APPEAR.as_secs_f32();
+        if t >= 1.0 {
+            return (1.0, 0.0);
+        }
+        let next = Instant::now() + Duration::from_millis(16);
+        self.animation_at = Some(self.animation_at.map_or(next, |a| a.min(next)));
+        // Ease out: quick to start, settling gently.
+        let ease = 1.0 - (1.0 - t).powi(3);
+        (ease, (1.0 - ease) * APPEAR_TRAVEL)
+    }
+    /// The open menu, fading in as it settles into place: down from the
+    /// click, or up from the account button.
     pub(super) fn draw_tab_menu(&mut self) {
+        let Some((opened, up)) = self.tab_menu.as_ref().map(|menu| (menu.opened, menu.kind == MenuKind::Account))
+        else {
+            self.menu_hits.clear();
+            self.menu_rect = Rect::default();
+            return;
+        };
+        let (fade, short) = self.appear(opened);
+        self.scene.set_fade(fade);
+        self.scene.set_origin(0.0, if up { short } else { -short });
+        self.draw_open_menu();
+        self.scene.set_origin(0.0, 0.0);
+        self.scene.set_fade(1.0);
+    }
+    /// The open tab menu: Rename, a row of colors, Close.
+    fn draw_open_menu(&mut self) {
         self.menu_hits.clear();
         self.menu_rect = Rect::default();
         let Some(menu) = &self.tab_menu else { return };
@@ -411,8 +441,27 @@ impl App {
         scene.set_layer(LAYER_CONTENT);
     }
     pub(super) fn draw_toast(&mut self) {
-        let Some((message, _)) = &self.ctx.toast else { return };
-        let message = message.clone();
+        let Some((message, until)) = &self.ctx.toast else {
+            self.toast_shown = None;
+            return;
+        };
+        let (message, until) = (message.clone(), *until);
+        // In: up into place as it fades in. Out: fading over its last moments.
+        let now = Instant::now();
+        let shown = match &self.toast_shown {
+            Some((last, at)) if *last == message => *at,
+            _ => now,
+        };
+        self.toast_shown = Some((message.clone(), shown));
+        let (mut fade, short) = self.appear(shown);
+        let left = until.saturating_duration_since(now);
+        let wake = if left < TOAST_FADE {
+            fade = fade.min(left.as_secs_f32() / TOAST_FADE.as_secs_f32());
+            now + Duration::from_millis(16)
+        } else {
+            until - TOAST_FADE
+        };
+        self.animation_at = Some(self.animation_at.map_or(wake, |a| a.min(wake)));
         let (right, bottom) = match self.focused_id().and_then(|id| self.panes.iter().find(|p| p.id == id)) {
             Some(pane) => (pane.rect.right(), pane.rect.y + pane.input_top()),
             None => (self.width, self.height),
@@ -420,11 +469,13 @@ impl App {
         let Self { scene, ctx, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
+        scene.set_fade(fade);
         let w = text.measure(&message, UI, 12.0) + 24.0;
-        let rect = Rect::new(right - w - 14.0, bottom - 40.0, w, 28.0);
+        let rect = Rect::new(right - w - 14.0, bottom - 40.0 + short, w, 28.0);
         scene.shadow(rect, theme.shadow(0.5), 14.0, 8.0);
         scene.quad(Quad::new(rect, theme.raised).radius(14.0).border(1.0, theme.divider));
         text.draw_text(scene, &message, rect.x + 12.0, rect.y + 18.0, UI, 12.0, theme.text);
+        scene.set_fade(1.0);
         scene.set_layer(LAYER_CONTENT);
     }
 }

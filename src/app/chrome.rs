@@ -1,7 +1,8 @@
 use super::*;
 
 /// A tab's background, in the sidebar or the strip: a tab with a color is
-/// tinted with it all over; the current tab is raised and drawn round with
+/// tinted with it all over, lightly, with the color whole in a rail down
+/// its leading edge; the current tab is raised and drawn round with
 /// a clear border, in its color if it has one. Any other tab lifts a
 /// little under the pointer.
 pub(super) fn draw_tab_background(
@@ -14,8 +15,8 @@ pub(super) fn draw_tab_background(
     hovered: bool,
 ) {
     let (fill, border) = match (color, current) {
-        (Some(color), true) => (theme.raised.mix(color, 0.42), color.mix(theme.text, 0.25)),
-        (Some(color), false) => (color.alpha(if hovered { 0.3 } else { 0.22 }), color.alpha(0.0)),
+        (Some(color), true) => (theme.raised.mix(color, 0.12), color.mix(theme.text, 0.15)),
+        (Some(color), false) => (color.alpha(if hovered || dragged { 0.17 } else { 0.1 }), Color::TRANSPARENT),
         (None, true) => (theme.raised.mix(theme.text, 0.06), theme.text_dim),
         (None, false) if hovered || dragged => (theme.panel(HOVER_LIFT), Color::TRANSPARENT),
         (None, false) => return,
@@ -23,6 +24,12 @@ pub(super) fn draw_tab_background(
     let fill = if dragged { fill.mix(theme.text, 0.06) } else { fill };
     let width = if current { 1.5 } else { 1.0 };
     scene.quad(Quad::new(rect, fill).radius(6.0).border(width, border));
+    // The color itself, whole, in a rail down the leading edge: the tint
+    // alone turns muddy on a dark background.
+    if let Some(color) = color {
+        let inset = (rect.h * 0.22).round();
+        scene.quad(Quad::new(Rect::new(rect.x + 3.0, rect.y + inset, 3.0, rect.h - 2.0 * inset), color).radius(1.5));
+    }
 }
 
 /// The sidebar's show/hide button: a window with its side panel marked off,
@@ -280,22 +287,36 @@ pub(super) fn header_room(slot: Rect) -> f32 {
     (slot.h * 0.5).floor().min(slot.h - 4.0 * AGENT_HEADER).max(0.0)
 }
 
-/// A header's ground, tinted with the accent while its pane is focused.
-fn header_ground(theme: &Theme, ground: Color, focused: bool) -> Color {
-    if focused {
+/// How a pane's header shows that its pane is the focused one.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Lit {
+    /// Another pane is.
+    Off,
+    /// It is, and it's the tab's only pane: there's nothing to tell it
+    /// from, so it only keeps a thin line.
+    Soft,
+    /// It is, among several: a tinted ground over a bright line.
+    Full,
+}
+
+/// A header's ground, tinted with the accent while its pane is the focused
+/// one of several.
+fn header_ground(theme: &Theme, ground: Color, focus: Lit) -> Color {
+    if focus == Lit::Full {
         ground.mix(theme.accent, 0.14)
     } else {
         ground
     }
 }
 
-/// The edge under a header at `bottom`: a hairline, or while its pane is
-/// focused, a 2-point line in `lit`.
-fn draw_header_edge(scene: &mut Scene, theme: &Theme, bar: Rect, bottom: f32, focused: bool, lit: Color) {
-    if focused {
-        scene.fill(Rect::new(bar.x, bottom - 2.0, bar.w, 2.0), lit);
-    } else {
-        scene.fill(Rect::new(bar.x, bottom - 1.0, bar.w, 1.0), theme.divider);
+/// The edge under a header at `bottom`: a hairline; while its pane is
+/// focused, a line in `lit`, 2 points among several panes and a thin, dimmer
+/// one alone.
+fn draw_header_edge(scene: &mut Scene, theme: &Theme, bar: Rect, bottom: f32, focus: Lit, lit: Color) {
+    match focus {
+        Lit::Full => scene.fill(Rect::new(bar.x, bottom - 2.0, bar.w, 2.0), lit),
+        Lit::Soft => scene.fill(Rect::new(bar.x, bottom - 1.0, bar.w, 1.0), theme.divider.mix(lit, 0.55)),
+        Lit::Off => scene.fill(Rect::new(bar.x, bottom - 1.0, bar.w, 1.0), theme.divider),
     }
 }
 
@@ -311,13 +332,13 @@ pub(super) fn draw_agent_header(
     theme: &Theme,
     bar: Rect,
     info: &AgentInfo,
-    focused: bool,
+    focus: Lit,
     hover: bool,
     room: f32,
     t: f32,
 ) -> f32 {
     let color = agent_color(theme, info.state, t);
-    let ground = header_ground(theme, agent_ground(theme, info.state, t), focused);
+    let ground = header_ground(theme, agent_ground(theme, info.state, t), focus);
     scene.fill(bar, ground);
     if info.state == AgentState::Running {
         draw_running_sweep(scene, theme, bar, t);
@@ -326,7 +347,7 @@ pub(super) fn draw_agent_header(
     // The edge under it all, lit while the pane is focused: in the agent's
     // color while it's busy, else the accent.
     let lit = if info.state == AgentState::Idle { theme.accent } else { color };
-    draw_header_edge(scene, theme, bar, bar.bottom() + reach, focused, lit);
+    draw_header_edge(scene, theme, bar, bar.bottom() + reach, focus, lit);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
@@ -535,10 +556,10 @@ pub(super) fn draw_program_header(
     bar: Rect,
     name: &str,
     uptime: Duration,
-    focused: bool,
+    focus: Lit,
 ) {
-    scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focused));
-    draw_header_edge(scene, theme, bar, bar.bottom(), focused, theme.accent);
+    scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focus));
+    draw_header_edge(scene, theme, bar, bar.bottom(), focus, theme.accent);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
@@ -571,11 +592,11 @@ pub(super) fn draw_shell_header(
     theme: &Theme,
     bar: Rect,
     shell: &ShellHeader,
-    focused: bool,
+    focus: Lit,
 ) {
     let ShellHeader { busy, failed, .. } = *shell;
-    scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focused));
-    draw_header_edge(scene, theme, bar, bar.bottom(), focused, theme.accent);
+    scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focus));
+    draw_header_edge(scene, theme, bar, bar.bottom(), focus, theme.accent);
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;

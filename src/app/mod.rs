@@ -94,6 +94,12 @@ const MIDDLE_SNAP: f32 = 32.0;
 const DRAG_SLOP: f32 = 4.0;
 /// How long a reordered tab takes to slide into its new place.
 const TAB_SLIDE: Duration = Duration::from_millis(160);
+/// How long a menu or a toast takes to fade in, and how far it travels
+/// into place as it does.
+const APPEAR: Duration = Duration::from_millis(140);
+const APPEAR_TRAVEL: f32 = 5.0;
+/// How long a toast takes to fade away.
+const TOAST_FADE: Duration = Duration::from_millis(220);
 const MENU_WIDTH: f32 = 200.0;
 const MENU_ROW: f32 = 26.0;
 
@@ -231,6 +237,8 @@ struct TabMenu {
     x: f32,
     y: f32,
     kind: MenuKind,
+    /// When it opened: it fades in from there.
+    opened: Instant,
 }
 
 /// The release the update check found, and its card.
@@ -407,6 +415,8 @@ pub struct App {
     /// where their Allow and Deny buttons are.
     asks: Vec<(String, String, String)>,
     ask_hits: Vec<(Rect, String, bool)>,
+    /// The toast on screen and when it came up: it fades in from there.
+    toast_shown: Option<(String, Instant)>,
     /// Quitting to start the installed update.
     relaunch: bool,
     /// Whether this window keeps the tabs (and their output) for the next
@@ -541,6 +551,7 @@ impl App {
             update_card: Rect::default(),
             asks: Vec::new(),
             ask_hits: Vec::new(),
+            toast_shown: None,
             remote_at: Instant::now(),
             open_test: std::env::var("TEMINO_OPEN_TEST")
                 .ok()
@@ -760,7 +771,7 @@ impl App {
                 _ => None,
             };
             if let Some((kind, x, y)) = kind {
-                self.tab_menu = Some(TabMenu { tab: self.active, x, y, kind });
+                self.tab_menu = Some(TabMenu { tab: self.active, x, y, kind, opened: now });
                 self.dirty = true;
                 return;
             }

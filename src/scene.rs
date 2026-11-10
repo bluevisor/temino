@@ -70,6 +70,9 @@ pub struct Scene {
     pub scale: f32,
     origin: (f32, f32),
     layer: usize,
+    /// How opaque what's drawn next is, of its own opacity: under 1 while
+    /// a menu or a toast fades in or out.
+    fade: f32,
     /// In logical pixels, window-relative.
     clips: Vec<[f32; 4]>,
     /// Where the focused text cursor is (logical pixels, window-relative),
@@ -114,6 +117,7 @@ impl Scene {
             origin: (0.0, 0.0),
             caret: None,
             layer: 0,
+            fade: 1.0,
             clips: Vec::new(),
         }
     }
@@ -129,6 +133,7 @@ impl Scene {
         self.height = height;
         self.clear = clear;
         self.layer = LAYER_CONTENT;
+        self.fade = 1.0;
         self.clips.clear();
         self.caret = None;
     }
@@ -140,6 +145,12 @@ impl Scene {
     /// The frame's size in physical pixels.
     pub fn pixel_size(&self) -> (u32, u32) {
         (((self.width * self.scale).round() as u32).max(1), ((self.height * self.scale).round() as u32).max(1))
+    }
+
+    /// Draws what follows `fade` as opaque as its colors say (1 again to
+    /// stop), so a whole menu can fade as one.
+    pub fn set_fade(&mut self, fade: f32) {
+        self.fade = fade.clamp(0.0, 1.0);
     }
 
     pub fn set_layer(&mut self, layer: usize) {
@@ -215,9 +226,9 @@ impl Scene {
         let bounds = if plain { self.fill_pixels(rect) } else { self.pixels(rect) };
         self.layers[self.layer].rects.push(RectInstance {
             bounds,
-            color: quad.color.to_array(),
-            color2: quad.color2.unwrap_or(quad.color).to_array(),
-            border_color: quad.border_color.to_array(),
+            color: quad.color.alpha(self.fade).to_array(),
+            color2: quad.color2.unwrap_or(quad.color).alpha(self.fade).to_array(),
+            border_color: quad.border_color.alpha(self.fade).to_array(),
             radii: quad.radius.map(|r| r * s),
             params: [quad.border * s, 0.0, 0.0, 0.0],
             clip,
@@ -229,6 +240,7 @@ impl Scene {
         let rect = self.place(rect);
         let clip = self.pixel_clip();
         let s = self.scale;
+        let color = color.alpha(self.fade);
         self.layers[self.layer].rects.push(RectInstance {
             bounds: self.pixels(rect),
             color: color.to_array(),
@@ -252,7 +264,7 @@ impl Scene {
         self.layers[self.layer].glyphs.push(GlyphInstance {
             rect: [(rect.x * s).round(), (rect.y * s).round(), (rect.w * s).round(), (rect.h * s).round()],
             uv,
-            color: color.to_array(),
+            color: color.alpha(self.fade).to_array(),
             clip,
         });
     }
@@ -290,6 +302,23 @@ mod tests {
         let first = rects[0].bounds;
         let second = rects[1].bounds;
         assert_eq!(first[1] + first[3], second[1], "rows do not share an edge");
+    }
+
+    /// A faded group keeps its colors and loses only opacity, glyphs from
+    /// the color atlas (a negative red) included.
+    #[test]
+    fn fade_scales_opacity_only() {
+        let mut scene = Scene::new();
+        scene.reset(100.0, 100.0, 1.0, Color::TRANSPARENT);
+        scene.set_fade(0.5);
+        scene.quad(Quad::new(Rect::new(0.0, 0.0, 10.0, 10.0), Color::hex(0xffffff)).border(1.0, Color::hex(0xff0000)));
+        scene.color_glyph(Rect::new(0.0, 0.0, 10.0, 10.0), [0.0; 4], 1.0);
+        let rect = scene.layers[LAYER_CONTENT].rects[0];
+        assert_eq!((rect.color, rect.border_color[3]), ([1.0, 1.0, 1.0, 0.5], 0.5));
+        assert_eq!(scene.layers[LAYER_CONTENT].glyphs[0].color, [-1.0, 0.0, 0.0, 0.5]);
+        scene.reset(100.0, 100.0, 1.0, Color::TRANSPARENT);
+        scene.fill(Rect::new(0.0, 0.0, 10.0, 10.0), Color::hex(0xffffff));
+        assert_eq!(scene.layers[LAYER_CONTENT].rects[0].color[3], 1.0, "a new frame starts opaque");
     }
 
     /// Rounded or bordered quads keep their fractional bounds for the

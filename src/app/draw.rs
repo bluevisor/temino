@@ -94,7 +94,9 @@ impl App {
         let focus = self.focused_id();
         let sender = self.ctx.sender.clone();
         let mut moved = false;
-        for (id, slot) in self.tab_slots(self.active).0 {
+        let slots = self.tab_slots(self.active).0;
+        let alone = slots.len() == 1;
+        for (id, slot) in slots {
             let Some(index) = self.panes.iter().position(|pane| pane.id == id) else { continue };
             let pane = &mut self.panes[index];
             let info = pane.agent_info(now);
@@ -112,7 +114,11 @@ impl App {
             });
             let bar = Rect::new(slot.x, slot.y, slot.w, AGENT_HEADER.min(slot.h));
             let hover = self.header_hover == Some(id);
-            let focused = Some(id) == focus;
+            let focused = match (Some(id) == focus, alone) {
+                (false, _) => Lit::Off,
+                (true, true) => Lit::Soft,
+                (true, false) => Lit::Full,
+            };
             let Self { scene, ctx, pane_hits, header_hits, panes, .. } = self;
             let Ctx { text, theme, .. } = ctx;
             let reach = match (info, program, shell) {

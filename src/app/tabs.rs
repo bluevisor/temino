@@ -212,7 +212,7 @@ impl App {
     pub(super) fn open_tab_menu(&mut self, tab: usize, x: f32, y: f32) {
         self.finish_rename();
         self.switch_tab(tab);
-        self.tab_menu = Some(TabMenu { tab, x, y, kind: MenuKind::Tab });
+        self.tab_menu = Some(TabMenu { tab, x, y, kind: MenuKind::Tab, opened: Instant::now() });
     }
     pub(super) fn menu_action(&mut self, tab: usize, action: MenuAction) {
         self.tab_menu = None;
