@@ -222,6 +222,20 @@ package in `~/config/packages` when you quit, because swapping the package
 stops a running Temino. To turn off the daily check, switch it off in
 Settings (or put `updates=off` in the `settings` file). Updates need `curl`.
 
+## Analytics
+
+The first time you run a build with analytics, Temino asks whether it may
+share anonymous usage data to help improve the product. Nothing is counted
+or sent before you answer yes, and you can change your mind at any time in
+Settings ("Share anonymous usage data"). What a yes shares: a random
+install id (hashed on the server, and gone after 40 days), the Temino
+version, your OS, CPU architecture, default shell kind and GPU backend, and
+counts of how features get used — launches, minutes in use, commands
+finished, blocks, tabs and panes opened, AI questions, searches, viewer
+opens, remote-control sessions, updates, settings changes and crashes.
+Never commands, terminal content, file paths or file names, and nothing
+tied to an account.
+
 ## Credits
 
 - The rounded-rectangle and shadow shader math follows `rect_shader.wgsl`
