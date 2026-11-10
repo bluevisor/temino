@@ -27,7 +27,9 @@ pub(super) fn draw_tab_background(
     // The color itself, whole, in a rail down the leading edge: the tint
     // alone turns muddy on a dark background.
     if let Some(color) = color {
-        let inset = (rect.h * 0.22).round();
+        // Inset as on a one-line row, however tall: under a row grown by
+        // its pane lines the rail runs the whole height, not a short dash.
+        let inset = (rect.h * 0.22).round().min(9.0);
         scene.quad(Quad::new(Rect::new(rect.x + 3.0, rect.y + inset, 3.0, rect.h - 2.0 * inset), color).radius(1.5));
     }
 }
