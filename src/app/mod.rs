@@ -40,6 +40,7 @@ mod prefs;
 mod start;
 mod tabs;
 use chrome::*;
+use layout::*;
 pub use overlays::*;
 use prefs::*;
 pub use start::*;

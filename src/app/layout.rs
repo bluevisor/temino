@@ -108,6 +108,15 @@ pub(super) fn split_rect(rect: Rect, axis: Axis, ratio: f32) -> (Rect, Rect, Rec
     }
 }
 
+/// The sidebar width a drag to `x` asks for, between its minimum and the
+/// lesser of its maximum and half the window. The upper end never drops
+/// below the minimum: in a window narrower than twice the minimum, a
+/// plain `clamp(SIDEBAR_MIN, …)` gets inverted bounds and panics.
+pub(super) fn sidebar_drag_width(x: f32, window_width: f32) -> f32 {
+    let max = SIDEBAR_MAX.min(window_width / 2.0).max(SIDEBAR_MIN);
+    x.clamp(SIDEBAR_MIN, max)
+}
+
 impl Divider {
     pub(super) fn grab_area(&self) -> Rect {
         match self.axis {
@@ -453,6 +462,17 @@ mod tests {
         let (mut panes, mut dividers) = (Vec::new(), Vec::new());
         node.layout(rect, &mut Vec::new(), &mut panes, &mut dividers);
         (panes, dividers)
+    }
+
+    #[test]
+    fn sidebar_drag_width_holds_its_bounds_in_a_narrow_window() {
+        assert_eq!(sidebar_drag_width(200.0, 1200.0), 200.0);
+        assert_eq!(sidebar_drag_width(999.0, 1200.0), SIDEBAR_MAX);
+        assert_eq!(sidebar_drag_width(50.0, 1200.0), SIDEBAR_MIN);
+        // Half of a 250px window is under the minimum: the bounds must not
+        // invert (a plain clamp panics there), the minimum wins.
+        assert_eq!(sidebar_drag_width(200.0, 250.0), SIDEBAR_MIN);
+        assert_eq!(sidebar_drag_width(200.0, 0.0), SIDEBAR_MIN);
     }
 
     #[test]
