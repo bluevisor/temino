@@ -545,7 +545,7 @@ function rowHtml(runs, cursorAt) {
   return html;
 }
 
-const seconds = (s) => s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+const seconds = (s) => s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(Math.round(s) / 60)}m ${Math.round(s) % 60}s`;
 const home = (cwd) => (cwd || "").replace(/^\/Users\/[^/]+/, "~");
 const chips = (cwd, branch) => `<span class="chip">${esc(home(cwd))}</span>${branch ? `<span class="chip br">${esc(branch)}</span>` : ""}`;
 
