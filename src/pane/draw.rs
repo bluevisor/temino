@@ -690,9 +690,12 @@ pub(super) fn draw_menu(
     let rows = completion.candidates.len().min(MENU_ROWS);
     let row_height = cell.height + 6.0;
     let first = completion.selected.saturating_sub(rows - 1);
+    // Labels are drawn with draw_mono, which gives a wide character two
+    // cells; measure them in cells, not characters, or a CJK file name
+    // runs under the kind tag at the menu's right edge.
     let label_width = completion.candidates[first..first + rows]
         .iter()
-        .map(|c| c.label.chars().count().min(80) as f32 * cell.width)
+        .map(|c| c.label.chars().take(80).map(crate::editor::width).sum::<usize>() as f32 * cell.width)
         .fold(0.0, f32::max);
     let width = (label_width + 90.0).clamp(220.0, (pane_width - 2.0 * PAD_X).max(220.0));
     let footer = if completion.candidates.len() > rows { 18.0 } else { 0.0 };
@@ -814,6 +817,30 @@ mod tests {
         // Empty lines still take a row, flagged as ending their line.
         let rows = command_rows("a\n\nb", 5);
         assert_eq!(rows, vec![("a".into(), true), ("".into(), true), ("b".into(), true)]);
+    }
+
+    #[test]
+    fn the_completion_menu_fits_wide_labels() {
+        use crate::complete::{Candidate, Completion, Kind};
+        let mut scene = Scene::new();
+        let mut text = TextSystem::new(14.0);
+        let theme = Theme::dark();
+        // Ten wide characters: ten chars, twenty cells.
+        let completion = Completion {
+            start: 0,
+            end: 0,
+            selected: 0,
+            candidates: vec![Candidate {
+                replacement: String::new(),
+                label: "中文中文中文中文中文".into(),
+                kind: Kind::File,
+            }],
+        };
+        let mut layout = Layout::default();
+        draw_menu(&mut scene, &mut text, &theme, &mut layout, &completion, 800.0, 100.0, 400.0);
+        let (row, _) = layout.menu_rows[0];
+        // The row must leave room for the label's 20 cells plus the tag.
+        assert!(row.w + 8.0 >= 20.0 * text.cell.width + 90.0, "menu width {} for a 20-cell label", row.w + 8.0);
     }
 
     #[test]
