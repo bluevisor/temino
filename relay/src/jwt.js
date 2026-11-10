@@ -9,9 +9,22 @@ const part = (text) => JSON.parse(new TextDecoder().decode(fromB64url(text)));
 
 // The token's claims if it's signed by one of `jwks`'s keys, from one of
 // `issuers`, for `audience`, unexpired and with our `nonce`; else null.
-export async function verifyIdToken(token, { jwks, issuers, audience, nonce }) {
+// A token is untrusted text until its signature checks out: anything
+// malformed about it (or about the key set answering) is a null, never
+// a throw into the sign-in routes.
+export async function verifyIdToken(token, options) {
+  try {
+    return await verify(token, options);
+  } catch {
+    return null;
+  }
+}
+
+async function verify(token, { jwks, issuers, audience, nonce }) {
   if (typeof token !== "string") return null;
-  const [head, body, signature] = token.split(".");
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [head, body, signature] = parts;
   if (!signature) return null;
   const header = part(head);
   if (header.alg !== "RS256") return null;
