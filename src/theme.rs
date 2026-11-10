@@ -37,6 +37,20 @@ impl Color {
         Color { a: self.a * a, ..self }
     }
 
+    /// The WCAG contrast ratio against another color, 1.0 (none) to
+    /// 21.0 (black on white); alpha is ignored, both colors read as
+    /// opaque. Small text wants at least 4.5. Only the theme tests call
+    /// this — it exists to keep the built-in theme's text legible.
+    #[cfg(test)]
+    pub fn contrast(self, other: Color) -> f32 {
+        let luminance = |c: Color| {
+            let linear = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+        };
+        let (a, b) = (luminance(self), luminance(other));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
     pub fn mix(self, other: Color, t: f32) -> Color {
         Color {
             r: self.r + (other.r - self.r) * t,
@@ -203,7 +217,7 @@ impl Theme {
             divider: Color::hex(0x232a36),
             text: Color::hex(0xd8dee9),
             text_dim: Color::hex(0x8b95a7),
-            text_faint: Color::hex(0x566073),
+            text_faint: Color::hex(0x76879e),
             accent: Color::hex(0x6cb6ff),
             success: Color::hex(0x7bd88f),
             error: Color::hex(0xff6b6b),
@@ -570,6 +584,23 @@ mod tests {
         let palette = parse_palette("Test", text).unwrap();
         assert_eq!((palette.background, palette.foreground, palette.ansi[1]), (0x101010, 0xffffff, 0xff0000));
         assert!(parse_palette("Bad", "foreground = #ffffff").is_none());
+    }
+
+    #[test]
+    fn the_default_themes_small_text_meets_wcag_contrast() {
+        // text_faint carries real reading text — Settings section
+        // headings at 10.5px, timestamps, the sidebar's counts — so all
+        // three text colors must clear 4.5:1 on the surfaces they sit
+        // on. (The machine palettes are exempt: their colors are the
+        // machines' own, picked knowingly.)
+        let theme = Theme::dark();
+        for ink in [theme.text, theme.text_dim, theme.text_faint] {
+            assert!(ink.contrast(theme.background) >= 4.5, "on background: {:.2}", ink.contrast(theme.background));
+            assert!(ink.contrast(theme.surface) >= 4.5, "on surface: {:.2}", ink.contrast(theme.surface));
+        }
+        // The helper itself: black on white is the maximum, 21:1.
+        assert!((Color::hex(0x000000).contrast(Color::hex(0xffffff)) - 21.0).abs() < 0.1);
+        assert!((theme.text.contrast(theme.text) - 1.0).abs() < 0.01);
     }
 
     #[test]

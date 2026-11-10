@@ -332,7 +332,12 @@ impl App {
         draw_tab_number(scene, text, theme, index, center, number, tab.agent, tab.done_for, t);
         x += number + 8.0;
         let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
-        let closable = hovered && tab.editing.is_none();
+        // Under 48px a top-strip tab can't hold both its number and the
+        // ×: the two overlap, the × spilling onto the tab before it at
+        // the smallest widths, and since close hits are checked first a
+        // click meant to switch tabs closes one instead. No × there —
+        // middle-click and the tab menu still close it.
+        let closable = hovered && tab.editing.is_none() && rect.w >= 48.0;
         let mut right = if closable { close.x - 4.0 } else { rect.right() - 8.0 };
         if let Some(label) = badge {
             // A small badge with the pane count.
@@ -355,7 +360,10 @@ impl App {
             // Just taller than the text, centered on it.
             let h = (font + 6.0).round();
             let top = (baseline - ascent * 0.36 - h / 2.0).round();
-            let field = Rect::new(x - 3.0, top, (close.x - x - 1.0).max(0.0), h);
+            // To `right`, not to the close button: no × is drawn while
+            // editing (closable is false), and `right` already stops
+            // short of any badge or mark chip on the row.
+            let field = Rect::new(x - 3.0, top, (right - x + 3.0).max(0.0), h);
             scene.quad(Quad::new(field, theme.background).radius(3.0).border(1.0, theme.accent));
             scene.push_clip(field.inset(1.0, 0.0));
             let w = text.measure(name, UI, font);
@@ -653,7 +661,12 @@ impl App {
         let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
         let w = (text.measure(&title, UI, 12.0) + 20.0).min(TAB_MAX_WIDTH * 1.5);
-        let label = Rect::new(row.right() + 8.0, row.y + 2.0, w, row.h - 4.0);
+        let title = text.elide(&title, UI, 12.0, (w - 20.0).max(0.0));
+        // Beside the row, but kept in the window the way the menus are:
+        // a tab at the right edge (the top strip's last ones) would
+        // otherwise push the hint off-screen.
+        let x = (row.right() + 8.0).min((self.width - w - 4.0).max(4.0));
+        let label = Rect::new(x, row.y + 2.0, w, row.h - 4.0);
         scene.shadow(label, theme.shadow(0.5), 8.0, 6.0);
         scene.quad(Quad::new(label, theme.raised).radius(6.0).border(1.0, theme.divider));
         scene.push_clip(label.inset(8.0, 0.0));

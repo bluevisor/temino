@@ -12,7 +12,7 @@
 <style>
   :root {
     --bg: #111317; --panel: #1a1d23; --raised: #22262e; --line: #2c313a;
-    --text: #e6e8ec; --dim: #9aa1ad; --faint: #6b7280; --accent: #67b0e8;
+    --text: #e6e8ec; --dim: #9aa1ad; --faint: #868e9c; --accent: #67b0e8;
     --waiting: #f0a35e; --done: #8ccf7e; --error: #e06c75; --string: #98c379; --variable: #c678dd; --cursor: #e6e8ec;
     color-scheme: dark;
   }
@@ -29,7 +29,7 @@
   #crumbs { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
   #crumbs b { color: var(--text); font-weight: 600; }
   button { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line);
-    border-radius: 8px; padding: 6px 10px; }
+    border-radius: 8px; padding: 6px 10px; min-height: 40px; }
   button:active { background: var(--line); }
   #out svg { display: block; }
   header, main, footer { min-width: 0; }
@@ -99,7 +99,7 @@
     border-top: 0; overflow-x: hidden; overflow-y: auto; max-height: 45dvh; scrollbar-width: none;
     overscroll-behavior: contain; touch-action: pan-y; }
   /* Its grip: drag up for more lines of output, down for fewer. */
-  #maggrip { height: 18px; display: flex; align-items: center; justify-content: center; touch-action: none; cursor: ns-resize;
+  #maggrip { height: 26px; display: flex; align-items: center; justify-content: center; touch-action: none; cursor: ns-resize;
     background: var(--bg); border: 1px solid var(--line); border-bottom: 0; border-radius: 8px 8px 0 0; color: var(--faint); font-size: 12px; }
   #maggrip::before { content: ""; width: 36px; height: 4px; border-radius: 2px; background: var(--line); }
   #maggrip.on::before { content: attr(data-n); width: auto; height: auto; background: none; color: var(--dim); }
@@ -131,13 +131,13 @@
   #tabs { display: flex; gap: 6px; overflow-x: auto; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); scrollbar-width: none; }
   #tabs[hidden] { display: none; }
   #tabs::-webkit-scrollbar { display: none; }
-  .tab { display: flex; align-items: center; gap: 6px; flex: none; max-width: 46vw; padding: 6px 10px; border-radius: 8px;
+  .tab { display: flex; align-items: center; gap: 6px; flex: none; max-width: 46vw; padding: 6px 10px; min-height: 40px; border-radius: 8px;
     background: var(--raised); color: var(--dim); font-size: 13px; border: 1px solid transparent; position: relative; overflow: hidden; }
   .tab.current { color: var(--text); border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); background: color-mix(in srgb, var(--raised) 70%, var(--text) 6%); }
   .tab .n { color: var(--faint); }
   .tab .tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tab .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
-  .tab .x { color: var(--faint); padding: 0 0 0 4px; }
+  .tab .x { color: var(--faint); padding: 9px 2px 9px 8px; margin: -9px -2px -9px -4px; }
   .tab.add { color: var(--accent); }
   .tab.shell { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
   /* iPad and other wide screens: the pane keeps a list of the window's

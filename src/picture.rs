@@ -19,10 +19,15 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Picture {
     pub fn new(width: usize, height: usize, mut rgba: Vec<u8>) -> Option<Arc<Picture>> {
-        if width == 0 || height == 0 || rgba.len() < width * height * 4 {
+        // The dimensions can come from a program's output (a Kitty s=/v=):
+        // absurd ones must refuse, not overflow the byte count (a panic
+        // in debug builds, a wrapped count — and a bogus picture whose
+        // scaling then reads out of bounds — in release).
+        let pixels = width.checked_mul(height).and_then(|n| n.checked_mul(4))?;
+        if width == 0 || height == 0 || rgba.len() < pixels {
             return None;
         }
-        rgba.truncate(width * height * 4);
+        rgba.truncate(pixels);
         for px in rgba.as_chunks_mut::<4>().0 {
             let a = px[3] as u32;
             for c in &mut px[..3] {
@@ -114,6 +119,12 @@ pub fn iterm(body: &str) -> Outcome {
     Outcome { show, reply: None }
 }
 
+/// The most base64 one chunked image may add up to before it is dropped:
+/// the scanner's own cap on a single image sequence (Scanner::MAX_IMAGE),
+/// applied across chunks, so a transmission that never ends can't grow
+/// memory without bound.
+const MAX_PENDING: usize = 64 << 20;
+
 /// Kitty graphics: images transmitted (in chunks) and put by id.
 #[derive(Default)]
 pub struct Kitty {
@@ -147,6 +158,12 @@ impl Kitty {
             None => Vec::new(),
         };
         data.extend_from_slice(payload.trim().as_bytes());
+        if data.len() > MAX_PENDING {
+            // Too much, over too many chunks: drop it whole. The next
+            // command starts a new image, as if this one never began.
+            self.pending = None;
+            return Outcome::default();
+        }
         if more {
             self.pending = Some((keys, data));
             return Outcome::default();
@@ -265,8 +282,35 @@ mod tests {
     }
 
     #[test]
+    fn an_endless_chunked_image_is_dropped_and_the_next_one_still_works() {
+        let mut kitty = Kitty::default();
+        let chunk = "A".repeat(40 << 20);
+        assert!(kitty.command(&format!("a=T,f=32,s=1,v=1,i=9,m=1;{chunk}")).show.is_none());
+        // A second 40 MB chunk passes the 64 MB cap: the image is dropped.
+        assert!(kitty.command(&format!("m=1;{chunk}")).show.is_none());
+        // So the next, complete image is read as its own, not as the tail
+        // of the dropped one.
+        let outcome = kitty.command("a=T,f=24,s=1,v=2,i=7;/wAAAP8A");
+        let shown = outcome.show.unwrap();
+        assert_eq!((shown.picture.width, shown.picture.height), (1, 2));
+    }
+
+    #[test]
     fn iterm_needs_inline() {
         assert!(iterm("File=name=eA==;inline=0:AAAA").show.is_none());
+    }
+
+    #[test]
+    fn absurd_dimensions_are_refused_not_overflowed() {
+        assert!(Picture::new(1 << 33, 1 << 33, vec![0; 16]).is_none());
+        assert!(Picture::new(usize::MAX, 2, vec![0; 16]).is_none());
+        // Through the Kitty path too: huge s=/v= keys, a tiny payload.
+        let keys =
+            HashMap::from([('f', "32".to_owned()), ('s', "9999999999".to_owned()), ('v', "9999999999".to_owned())]);
+        assert!(decode_kitty(&keys, b"AAAA").is_none());
+        // Ordinary pictures are untouched.
+        assert!(Picture::new(2, 1, vec![0; 8]).is_some());
+        assert!(Picture::new(2, 2, vec![0; 8]).is_none());
     }
 
     #[test]

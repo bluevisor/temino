@@ -352,10 +352,12 @@ pub fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs_f32();
     if seconds < 1.0 {
         format!("{}ms", duration.as_millis())
-    } else if seconds < 60.0 {
+    } else if seconds < 59.95 {
         format!("{seconds:.1}s")
     } else {
-        let total = duration.as_secs();
+        // From 59.95 the tenths round up to 60.0: say "1m 00s" rather
+        // than "60.0s".
+        let total = duration.as_secs() + (seconds.fract() >= 0.5) as u64;
         format!("{}m {:02}s", total / 60, total % 60)
     }
 }
@@ -415,5 +417,20 @@ pub fn short_duration(d: std::time::Duration) -> String {
         0..60 => format!("{s}s"),
         60..3600 => format!("{}m {:02}s", s / 60, s % 60),
         _ => format!("{}h {:02}m", s / 3600, s / 60 % 60),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations_round_into_minutes_instead_of_showing_sixty_seconds() {
+        assert_eq!(format_duration(Duration::from_millis(250)), "250ms");
+        assert_eq!(format_duration(Duration::from_secs_f32(3.26)), "3.3s");
+        assert_eq!(format_duration(Duration::from_secs_f32(59.94)), "59.9s");
+        assert_eq!(format_duration(Duration::from_secs_f32(59.97)), "1m 00s");
+        assert_eq!(format_duration(Duration::from_secs(75)), "1m 15s");
+        assert_eq!(format_duration(Duration::from_secs_f32(119.9)), "2m 00s");
     }
 }

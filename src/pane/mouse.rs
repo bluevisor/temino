@@ -35,9 +35,10 @@ impl Pane {
             let rows = command_rows(&block.command, self.session.size.columns.max(1));
             for (index, (row, ends_line)) in rows.iter().enumerate().take(l1 + 1).skip(l0) {
                 let chars: Vec<char> = row.chars().collect();
-                let from = if index == l0 { c0.min(chars.len()) } else { 0 };
-                let to = if index == l1 { (c1 + 1).min(chars.len()) } else { chars.len() };
-                text.extend(&chars[from..to.max(from)]);
+                let from = if index == l0 { c0 } else { 0 };
+                let to = if index == l1 { c1 } else { usize::MAX };
+                let (from, to) = row_char_range(row, from, to);
+                text.extend(&chars[from..to]);
                 if *ends_line && index < l1 {
                     text.push('\n');
                 }

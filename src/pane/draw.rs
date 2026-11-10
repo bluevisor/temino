@@ -88,16 +88,24 @@ impl Pane {
             }
             SelectMode::Word => {
                 let rows = command_rows(&block.command, columns);
-                let row = |line: usize| rows.get(line).map(|(s, _)| s.chars().collect::<Vec<_>>()).unwrap_or_default();
-                let is_word = |chars: &[char], column: usize| {
-                    chars.get(column).is_some_and(|&c| !c.is_whitespace() && !"()[]{}<>'\"`|;,".contains(c))
-                };
+                let row = |line: usize| rows.get(line).map(|(s, _)| s.as_str()).unwrap_or("");
+                let is_word = |c: char| !c.is_whitespace() && !"()[]{}<>'\"`|;,".contains(c);
+                // The span's columns are cells; expand over whole words by
+                // going through the rows' characters and back.
                 let (first, last) = (row(start.0), row(end.0));
-                while start.1 > 0 && is_word(&first, start.1 - 1) {
-                    start.1 -= 1;
+                let first_chars: Vec<char> = first.chars().collect();
+                let (mut at, _) = row_char_range(first, start.1, start.1);
+                while at > 0 && first_chars.get(at - 1).is_some_and(|&c| is_word(c)) {
+                    at -= 1;
                 }
-                while end.1 + 1 < columns && is_word(&last, end.1 + 1) {
-                    end.1 += 1;
+                start.1 = row_cell_of_char(first, at);
+                let last_chars: Vec<char> = last.chars().collect();
+                let (_, mut at) = row_char_range(last, end.1, end.1);
+                while last_chars.get(at).is_some_and(|&c| is_word(c)) {
+                    at += 1;
+                }
+                if at > 0 {
+                    end.1 = row_cell_of_char(last, at - 1) + crate::editor::width(last_chars[at - 1]) - 1;
                 }
             }
         }
@@ -131,11 +139,8 @@ impl Pane {
         let cell = text.cell;
         let columns = self.session.size.columns.max(1);
         let block = &mut self.session.blocks[index];
-        let command_lines = if block.kind != BlockKind::Background {
-            block.command.split('\n').map(|line| crate::editor::columns(line).div_ceil(columns).max(1)).sum()
-        } else {
-            0
-        };
+        let command_lines =
+            if block.kind != BlockKind::Background { command_rows(&block.command, columns).len() } else { 0 };
         let output = if block.alt_screen() { 0 } else { block.output_lines() };
         let mut height = BLOCK_PAD_TOP + META_HEIGHT + command_lines as f32 * cell.height + BLOCK_PAD_BOTTOM;
         if output > 0 {
@@ -292,6 +297,9 @@ impl Pane {
         let width = text.draw_text(scene, tagline, x, y + 22.0, UI, 13.0, theme.text_dim);
         let api = if cfg!(target_os = "macos") { "Metal" } else { "Vulkan" };
         let device = format!("  ·  {api} on {device_name}  ·  v{}", env!("CARGO_PKG_VERSION"));
+        // The hints below reflow when the pane is narrow; this line just
+        // ran off the edge, clipping the version mid-word in a split.
+        let device = text.elide(&device, UI, 13.0, (self.rect.w - PAD_X - x - width).max(0.0));
         text.draw_text(scene, &device, x + width, y + 22.0, UI, 13.0, theme.text_faint);
         let y = y + 36.0;
         let cmd = platform::shortcut;
@@ -375,26 +383,10 @@ impl Pane {
         if block.kind == BlockKind::Background {
             text.draw_text(scene, "Background output", x, baseline, UI, 12.0, theme.text_faint);
         } else {
-            if block.kind == BlockKind::Ai {
-                let label = if text.has_glyph('✦', UI_BOLD) { "✦ AI  " } else { "AI  " };
-                x += text.draw_text(scene, label, x, baseline, UI_BOLD, 12.0, theme.variable);
-            }
-            x += text.draw_text(scene, &ui::short_path(&block.cwd), x, baseline, UI, 12.0, theme.text_dim);
-            if let Some(branch) = &block.branch {
-                x += 10.0;
-                x += text.draw_text(scene, "⎇ ", x, baseline, UI, 12.0, theme.variable.alpha(0.9));
-                x += text.draw_text(scene, branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
-            }
-            // Who answered, in what room the time at the far end leaves.
-            if let Some(source) = &block.source {
-                x += 12.0;
-                let room = (width - PAD_X - 110.0 - x).max(0.0);
-                let shown = text.elide(source, UI, 12.0, room);
-                text.draw_text(scene, &shown, x, baseline, UI, 12.0, theme.text_faint);
-            }
-            // How long it took, then how it went. A command that went well
-            // says so quietly (a faint time, a green check); one still
-            // running or failed is in color all through.
+            // How long it took, then how it went — worked out first,
+            // because the left side has to stop short of it. A command
+            // that went well says so quietly (a faint time, a green
+            // check); one still running or failed is in color all through.
             let took = ui::format_duration(block.duration());
             let (lead, lead_ink, tail, tail_ink) = if block.running() {
                 let frame = (block.started.elapsed().as_millis() / 80) as usize % SPINNER.len();
@@ -408,8 +400,29 @@ impl Pane {
             };
             let gap = text.measure("  ", UI, 12.0);
             let tail_x = width - PAD_X - text.measure(&tail, UI, 12.0);
-            text.draw_text(scene, &tail, tail_x, baseline, UI, 12.0, tail_ink);
             let lead_x = tail_x - gap - text.measure(&lead, UI, 12.0);
+            // A deep path or a long branch name elides at this limit
+            // instead of running under the duration and exit text.
+            let limit = lead_x - gap;
+            if block.kind == BlockKind::Ai {
+                let label = if text.has_glyph('✦', UI_BOLD) { "✦ AI  " } else { "AI  " };
+                x += text.draw_text(scene, label, x, baseline, UI_BOLD, 12.0, theme.variable);
+            }
+            let path = text.elide(&ui::short_path(&block.cwd), UI, 12.0, (limit - x).max(0.0));
+            x += text.draw_text(scene, &path, x, baseline, UI, 12.0, theme.text_dim);
+            if let Some(branch) = &block.branch {
+                x += 10.0;
+                x += text.draw_text(scene, "⎇ ", x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+                let branch = text.elide(branch, UI, 12.0, (limit - x).max(0.0));
+                x += text.draw_text(scene, &branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+            }
+            // Who answered, in what room is left before the time.
+            if let Some(source) = &block.source {
+                x += 12.0;
+                let shown = text.elide(source, UI, 12.0, (limit - x).max(0.0));
+                text.draw_text(scene, &shown, x, baseline, UI, 12.0, theme.text_faint);
+            }
+            text.draw_text(scene, &tail, tail_x, baseline, UI, 12.0, tail_ink);
             text.draw_text(scene, &lead, lead_x, baseline, UI, 12.0, lead_ink);
         }
 
@@ -422,12 +435,13 @@ impl Pane {
                 if let Some(((l0, c0), (l1, c1))) =
                     command_selection.filter(|((l0, _), (l1, _))| (*l0..=*l1).contains(&index))
                 {
-                    let len = row.chars().count();
-                    let from = if index == l0 { c0.min(len) } else { 0 };
-                    let to = if index == l1 { (c1 + 1).min(len) } else { len };
-                    if to > from {
-                        let x = PAD_X + from as f32 * cell.width;
-                        scene.fill(Rect::new(x, line_y, (to - from) as f32 * cell.width, cell.height), theme.selection);
+                    let from = if index == l0 { c0 } else { 0 };
+                    let to = if index == l1 { c1 } else { usize::MAX };
+                    let (start, end) = row_char_range(row, from, to);
+                    if end > start {
+                        let x = PAD_X + row_cell_of_char(row, start) as f32 * cell.width;
+                        let w = (row_cell_of_char(row, end) - row_cell_of_char(row, start)) as f32 * cell.width;
+                        scene.fill(Rect::new(x, line_y, w, cell.height), theme.selection);
                     }
                 }
                 text.draw_mono(scene, row, PAD_X, line_y, Style::BOLD, theme.text);
@@ -635,7 +649,10 @@ impl Pane {
                 }
                 if let Some(rest) = hint.as_deref() {
                     let (sl, sc) = editor.position(editor.text.len());
-                    if sl >= first_line {
+                    // The text loop above stops at the window's last line;
+                    // the suggestion is on the text's last line, which a
+                    // long paste with the caret moved up leaves below it.
+                    if sl >= first_line && sl < first_line + MAX_EDITOR_LINES {
                         let sy = editor_y + (sl - first_line) as f32 * cell.height;
                         text.draw_mono(
                             scene,
@@ -691,9 +708,12 @@ pub(super) fn draw_menu(
     let rows = completion.candidates.len().min(MENU_ROWS);
     let row_height = cell.height + 6.0;
     let first = completion.selected.saturating_sub(rows - 1);
+    // Labels are drawn with draw_mono, which gives a wide character two
+    // cells; measure them in cells, not characters, or a CJK file name
+    // runs under the kind tag at the menu's right edge.
     let label_width = completion.candidates[first..first + rows]
         .iter()
-        .map(|c| c.label.chars().count().min(80) as f32 * cell.width)
+        .map(|c| c.label.chars().take(80).map(crate::editor::width).sum::<usize>() as f32 * cell.width)
         .fold(0.0, f32::max);
     let width = (label_width + 90.0).clamp(220.0, (pane_width - 2.0 * PAD_X).max(220.0));
     let footer = if completion.candidates.len() > rows { 18.0 } else { 0.0 };
@@ -756,10 +776,101 @@ pub(super) fn waiting_on_ai(block: &Block, output: usize) -> bool {
 pub(super) fn command_rows(command: &str, columns: usize) -> Vec<(String, bool)> {
     let mut rows = Vec::new();
     for line in command.split('\n') {
-        let chars: Vec<char> = line.chars().collect();
-        let chunks: Vec<&[char]> = chars.chunks(columns).chain(chars.is_empty().then_some(&[][..])).collect();
-        let last = chunks.len() - 1;
-        rows.extend(chunks.into_iter().enumerate().map(|(i, chunk)| (chunk.iter().collect(), i == last)));
+        let mut row = String::new();
+        let mut used = 0;
+        for c in line.chars() {
+            let w = crate::editor::width(c);
+            // Wrap on cells, the grid's own measure: a wide character that
+            // would straddle the edge starts the next row instead.
+            if w > 0 && used > 0 && used + w > columns {
+                rows.push((std::mem::take(&mut row), false));
+                used = 0;
+            }
+            row.push(c);
+            used += w;
+        }
+        rows.push((row, true));
     }
     rows
+}
+
+/// The char range of a wrapped command row covering cells `from..=to`
+/// (clamped to the row): selection spots are in cells, the row's text is
+/// in chars, and a wide character covers two cells.
+pub(super) fn row_char_range(row: &str, from: usize, to: usize) -> (usize, usize) {
+    let (mut start, mut end, mut used) = (None, 0, 0);
+    for (index, c) in row.chars().enumerate() {
+        let w = crate::editor::width(c);
+        if start.is_none() && used + w > from {
+            start = Some(index);
+        }
+        if used <= to {
+            end = index + 1;
+        }
+        used += w;
+    }
+    (start.unwrap_or(end), end)
+}
+
+/// The cell a char index starts at in a wrapped command row.
+pub(super) fn row_cell_of_char(row: &str, char_index: usize) -> usize {
+    row.chars().take(char_index).map(crate::editor::width).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_rows_wrap_on_cells_not_chars() {
+        // ASCII is unchanged: chunks of `columns` characters.
+        let rows = command_rows("abcdefg", 3);
+        assert_eq!(rows, vec![("abc".into(), false), ("def".into(), false), ("g".into(), true)]);
+        // Wide characters take two cells each, so fewer fit a row.
+        let rows = command_rows("ab中文cd", 4);
+        assert_eq!(rows, vec![("ab中".into(), false), ("文cd".into(), true)]);
+        // A wide character that would straddle the edge wraps whole.
+        let rows = command_rows("abc中", 4);
+        assert_eq!(rows, vec![("abc".into(), false), ("中".into(), true)]);
+        // Empty lines still take a row, flagged as ending their line.
+        let rows = command_rows("a\n\nb", 5);
+        assert_eq!(rows, vec![("a".into(), true), ("".into(), true), ("b".into(), true)]);
+    }
+
+    #[test]
+    fn the_completion_menu_fits_wide_labels() {
+        use crate::complete::{Candidate, Completion, Kind};
+        let mut scene = Scene::new();
+        let mut text = TextSystem::new(14.0);
+        let theme = Theme::dark();
+        // Ten wide characters: ten chars, twenty cells.
+        let completion = Completion {
+            start: 0,
+            end: 0,
+            selected: 0,
+            candidates: vec![Candidate {
+                replacement: String::new(),
+                label: "中文中文中文中文中文".into(),
+                kind: Kind::File,
+            }],
+        };
+        let mut layout = Layout::default();
+        draw_menu(&mut scene, &mut text, &theme, &mut layout, &completion, 800.0, 100.0, 400.0);
+        let (row, _) = layout.menu_rows[0];
+        // The row must leave room for the label's 20 cells plus the tag.
+        assert!(row.w + 8.0 >= 20.0 * text.cell.width + 90.0, "menu width {} for a 20-cell label", row.w + 8.0);
+    }
+
+    #[test]
+    fn row_char_range_maps_cells_to_chars() {
+        // Cells: a = 0, 中 = 1..=2, b = 3.
+        let row = "a中b";
+        assert_eq!(row_char_range(row, 0, 0), (0, 1));
+        assert_eq!(row_char_range(row, 1, 2), (1, 2));
+        assert_eq!(row_char_range(row, 2, 2), (1, 2), "a cell inside a wide char is that char");
+        assert_eq!(row_char_range(row, 3, 3), (2, 3));
+        assert_eq!(row_char_range(row, 0, 99), (0, 3), "past the end clamps");
+        assert_eq!(row_cell_of_char(row, 2), 3);
+        assert_eq!(row_cell_of_char(row, 0), 0);
+    }
 }

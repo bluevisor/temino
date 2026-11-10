@@ -419,10 +419,15 @@ function strip(w) {
     if (t) switchTab(w, +t.dataset.tab);
   };
   const cur = el.querySelector(".current");
-  if (cur && !strip.scrolled) { cur.scrollIntoView({ inline: "center", block: "nearest" }); }
+  // Center the current tab when it changes, not on every render: renders
+  // arrive with every screen update, and re-centering each time snaps
+  // the strip back whenever it's been scrolled sideways by hand.
+  const centered = `${at.window}:${at.tab}`;
+  if (cur && stripCentered !== centered) { stripCentered = centered; cur.scrollIntoView({ inline: "center", block: "nearest" }); }
 }
 
 let choosing = false;
+let stripCentered = "";
 function newTab(w, shell) {
   follow = w.tabs.length;
   send({ type: "new_tab", window: w.no, ...(shell ? { shell } : {}) });
@@ -524,11 +529,33 @@ function side(w) {
 const cells = (chars, wide) => chars.map((c) => /^[\x20-\x7e]$/.test(c) ? esc(c)
   : `<span class="c${wide ? " w" : ""}">${esc(c)}</span>`).join("");
 
+// A run's characters as the grid counts them: a letter with its combining
+// marks, an emoji ZWJ sequence, a flag pair — one character each. Split by
+// code point instead, a combining mark gets a cell of its own (and never
+// combines), a family emoji falls into separate people, and the cursor
+// lands a cell off past them. The command line is the exception: the Mac
+// counts its cursor in code points, so its rows keep Array.from.
+const EXTENDS = /[\p{Mn}\p{Me}\p{Mc}\p{Emoji_Modifier}]/u;
+const RI = /^[\u{1f1e6}-\u{1f1ff}]$/u;
+const clustersOf = (text) => {
+  const grouped = [];
+  for (const ch of text) {
+    if (grouped.length && (EXTENDS.test(ch) || ch === "\u200d" || grouped[grouped.length - 1].endsWith("\u200d"))) grouped[grouped.length - 1] += ch;
+    else grouped.push(ch);
+  }
+  const out = [];
+  for (const g of grouped) {
+    if (out.length && RI.test(out[out.length - 1]) && RI.test(g)) out[out.length - 1] += g;
+    else out.push(g);
+  }
+  return out;
+};
+
 // One output line: [text, fg, bg, flags] runs. `cursorAt` is a column.
-function rowHtml(runs, cursorAt) {
+function rowHtml(runs, cursorAt, clustered) {
   let html = "", col = 0;
   for (const [text, fg, bg, flags] of runs || []) {
-    const chars = Array.from(text), wide = flags & 16, span = wide ? 2 : 1;
+    const chars = clustered ? clustersOf(text) : Array.from(text), wide = flags & 16, span = wide ? 2 : 1;
     const style = `color:${fg}${bg ? `;background:${bg}` : ""}${flags & 1 ? ";font-weight:700" : ""}${flags & 2 ? ";font-style:italic" : ""}`
       + (flags & 12 ? `;text-decoration:${flags & 4 ? "underline" : ""} ${flags & 8 ? "line-through" : ""}` : "");
     const width = chars.length * span;
@@ -545,7 +572,7 @@ function rowHtml(runs, cursorAt) {
   return html;
 }
 
-const seconds = (s) => s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+const seconds = (s) => s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(Math.round(s) / 60)}m ${Math.round(s) % 60}s`;
 const home = (cwd) => (cwd || "").replace(/^\/Users\/[^/]+/, "~");
 const chips = (cwd, branch) => `<span class="chip">${esc(home(cwd))}</span>${branch ? `<span class="chip br">${esc(branch)}</span>` : ""}`;
 
@@ -554,7 +581,7 @@ function screenHtml(p, live) {
   if (!sc) return `<div class="wait">…</div>`;
   if (sc.mode === "grid") {
     const [cr, cc] = sc.cursor || [-1, -1];
-    return `<pre class="term">${sc.lines.map((r, i) => rowHtml(r, live && i === cr ? cc : null)).join("\n")}</pre>`;
+    return `<pre class="term">${sc.lines.map((r, i) => rowHtml(r, live && i === cr ? cc : null, true)).join("\n")}</pre>`;
   }
   const blocks = sc.blocks.map((b) => {
     const status = b.running ? `<span class="st run">● ${seconds(b.secs)}</span>`
@@ -564,7 +591,7 @@ function screenHtml(p, live) {
       : b.kind === "command" && b.command
       ? `<div class="bh">${chips(b.cwd, b.branch)}${status}</div><div class="cmd"><span class="pr">❯</span> ${esc(b.command)}</div>` : "";
     const [cr, cc] = (live && b.cursor) || [-1, -1];
-    const out = b.lines.length ? `<pre class="term">${b.lines.map((r, i) => rowHtml(r, i === cr ? cc : null)).join("\n")}</pre>` : "";
+    const out = b.lines.length ? `<pre class="term">${b.lines.map((r, i) => rowHtml(r, i === cr ? cc : null, true)).join("\n")}</pre>` : "";
     return `<div class="block ${b.exit && b.exit !== 0 ? "failed" : ""} ${b.running ? "running" : ""}">${head}${out}</div>`;
   }).join("");
   const ed = sc.editor && (live ? shown(p.id, sc.editor) : sc.editor);
@@ -591,7 +618,7 @@ let magOn = store.get("temino-mag") != null ? store.get("temino-mag") === "1" : 
 let magLines = store.get("temino-mag-lines") != null ? clampLines(Number(store.get("temino-mag-lines")) || 0) : MAG_DEFAULT;
 const termRows = (rows, cursor) => {
   const m = magRows(rows, cursor);
-  return m.rows.length ? `<pre class="term">${m.rows.map((r, i) => rowHtml(r, i === m.cursor?.[0] ? m.cursor[1] : null)).join("\n")}</pre>` : "";
+  return m.rows.length ? `<pre class="term">${m.rows.map((r, i) => rowHtml(r, i === m.cursor?.[0] ? m.cursor[1] : null, true)).join("\n")}</pre>` : "";
 };
 // The lines shown are the bottom of the panel; what came before them is kept
 // above, so dragging inside the panel scrolls back through it. Scrolled

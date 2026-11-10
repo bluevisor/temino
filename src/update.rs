@@ -163,10 +163,19 @@ fn asset_size(json: &str, url: &str) -> Option<u64> {
     after[..after.find(|c: char| !c.is_ascii_digit())?].parse().ok()
 }
 
-/// Whether dotted version `a` is past `b`.
+/// Whether dotted version `a` is past `b`. A missing part counts as 0,
+/// so the answer doesn't depend on how many parts each side spells out:
+/// `1.0.0` is not past `1.0`, however the vectors compare.
 fn newer(a: &str, b: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
-    parts(a) > parts(b)
+    let (a, b) = (parts(a), parts(b));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
 }
 
 fn curl_text(url: &str) -> Result<String, String> {
@@ -391,6 +400,15 @@ mod tests {
         assert!(!newer("0.3.0-rc1", "0.3.0"));
         assert!(!newer("x.y.z", "0.0.1"));
         assert!(!newer("", "0.2.10"));
+        // A missing part counts as 0 on either side: the same version
+        // spelled with fewer parts is not an update, and a real extra
+        // part still is.
+        assert!(!newer("1.0.0", "1.0"));
+        assert!(!newer("1.0", "1.0.0"));
+        assert!(!newer("0.3.0", "0.3.0.0"));
+        assert!(newer("1.0.1", "1.0"));
+        assert!(newer("0.3.0.1", "0.3.0"));
+        assert!(newer("1.1", "1.0.9"));
     }
 
     #[test]

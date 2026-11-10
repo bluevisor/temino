@@ -288,15 +288,11 @@ impl App {
             } else {
                 scene.push_clip(pill.inset(10.0, 0.0));
                 text.draw_text(scene, "↑", pill.x + 12.0, baseline, UI_BOLD, 12.0, Color::hex(0xffffff));
-                text.draw_text(
-                    scene,
-                    "Update Available…",
-                    pill.x + 26.0,
-                    baseline,
-                    UI_BOLD,
-                    12.0,
-                    Color::hex(0xffffff),
-                );
+                // Elided, not just clipped: at the sidebar's minimum
+                // width the pill is ~58px and the label was sawn off
+                // mid-word ("Upda") with no hint of more.
+                let label = text.elide("Update Available…", UI_BOLD, 12.0, (pill.w - 36.0).max(0.0));
+                text.draw_text(scene, &label, pill.x + 26.0, baseline, UI_BOLD, 12.0, Color::hex(0xffffff));
                 scene.pop_clip();
             }
             update_hits.push((pill, UpdateAction::Toggle));
@@ -470,7 +466,12 @@ impl App {
         let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
         scene.set_fade(fade);
-        let w = text.measure(&message, UI, 12.0) + 24.0;
+        // Capped at the room from the window's left margin to the anchor:
+        // toasts carry error strings (a failed save names its whole path),
+        // and an uncapped pill would start off-screen, hiding the start
+        // of the very message it exists to show.
+        let w = (text.measure(&message, UI, 12.0) + 24.0).min((right - 28.0).max(0.0));
+        let message = text.elide(&message, UI, 12.0, (w - 24.0).max(0.0));
         let rect = Rect::new(right - w - 14.0, bottom - 40.0 + short, w, 28.0);
         scene.shadow(rect, theme.shadow(0.5), 14.0, 8.0);
         scene.quad(Quad::new(rect, theme.raised).radius(14.0).border(1.0, theme.divider));

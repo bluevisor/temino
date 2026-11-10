@@ -588,7 +588,7 @@ impl App {
             Pointer::Sidebar if pressed != 0 => {
                 self.compact = x < SIDEBAR_SNAP;
                 if !self.compact {
-                    self.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX.min(self.width / 2.0));
+                    self.sidebar_width = sidebar_drag_width(x, self.width);
                 }
                 self.set_cursor(Cursor::ResizeColumn);
                 self.relayout();
