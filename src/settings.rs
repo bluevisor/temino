@@ -817,12 +817,9 @@ impl Ui<'_> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_control_can_be_clicked() {
-        let mut scene = Scene::new();
-        let mut text = TextSystem::new(14.0);
-        let theme = Theme::dark();
-        let values = Values {
+    /// Every row showing: Custom shows every AI field.
+    fn sample() -> Values {
+        Values {
             background: Some(0),
             theme: "Temino".into(),
             themes: 12,
@@ -849,11 +846,18 @@ mod tests {
             remote_account: String::new(),
             remote_url: String::new(),
             remote_phones: Vec::new(),
-            // Custom shows every AI field.
             provider: PROVIDERS.len() - 1,
             fields: Default::default(),
             editing: None,
-        };
+        }
+    }
+
+    #[test]
+    fn every_control_can_be_clicked() {
+        let mut scene = Scene::new();
+        let mut text = TextSystem::new(14.0);
+        let theme = Theme::dark();
+        let values = sample();
         let mut page = Page::default();
         let rect = Rect::new(200.0, 0.0, 900.0, 2000.0);
         scene.reset(1100.0, 2000.0, 1.0, theme.background);
@@ -907,35 +911,7 @@ mod tests {
         let mut scene = Scene::new();
         let mut text = TextSystem::new(14.0);
         let theme = Theme::dark();
-        let values = Values {
-            background: Some(0),
-            theme: "Temino".into(),
-            themes: 12,
-            palettes: Vec::new(),
-            palette: 0,
-            bindings: 0,
-            ligatures: true,
-            quick_terminal: Some(None),
-            opacity: 0,
-            blur: false,
-            shell: Some(0),
-            installed: [true, true, false],
-            fetch: 1,
-            fetches_installed: [true, false, true],
-            tabs_top: false,
-            extended: false,
-            zoom: 100.0,
-            updates: true,
-            analytics: true,
-            see_through: true,
-            remote: None,
-            remote_account: String::new(),
-            remote_url: String::new(),
-            remote_phones: Vec::new(),
-            provider: PROVIDERS.len() - 1,
-            fields: Default::default(),
-            editing: None,
-        };
+        let values = sample();
         // Scrolled to the end of 900px of content in a 600px view, then
         // the window grows past the whole content: nothing to scroll.
         let mut page = Page { content_height: 900.0, view_height: 600.0, ..Page::default() };
