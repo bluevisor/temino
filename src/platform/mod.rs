@@ -33,6 +33,16 @@ pub const COMMAND_NAME: &str = if cfg!(target_os = "haiku") {
     "Ctrl+Shift"
 };
 
+/// A shortcut with the command modifier, as the OS writes it: "⌘T" on
+/// macOS, "Alt+T" on Haiku, "Ctrl+Shift+T" on Linux.
+pub fn shortcut(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("{COMMAND_NAME}{key}")
+    } else {
+        format!("{COMMAND_NAME}+{key}")
+    }
+}
+
 /// The OS's name: told to the model, and the host name when there's none.
 pub const OS_NAME: &str = if cfg!(target_os = "haiku") {
     "Haiku"

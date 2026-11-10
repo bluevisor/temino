@@ -184,6 +184,12 @@ impl Theme {
         0.2126 * b.r + 0.7152 * b.g + 0.0722 * b.b > 0.5
     }
 
+    /// A drop shadow's color, `strength` dark under a menu or card on a dark
+    /// background; under half that on a light one, where black shows far more.
+    pub fn shadow(&self, strength: f32) -> Color {
+        Color::hex(0x000000).alpha(strength * if self.light() { 0.4 } else { 1.0 })
+    }
+
     /// What panels are lifted toward: white, or black on a light background.
     pub fn lift(&self) -> Color {
         Color::hex(if self.light() { 0x000000 } else { 0xffffff })

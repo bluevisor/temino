@@ -78,7 +78,7 @@ pub fn selftest(path: &str, width: u32, height: u32, frames: usize) -> i32 {
         let frame = Instant::now();
         scene.reset(width as f32, height as f32, 1.0, theme.background);
         let card = Rect::new(16.0, 16.0, 448.0, 128.0);
-        scene.shadow(card, Color::hex(0x000000).alpha(0.6), 10.0, 8.0);
+        scene.shadow(card, theme.shadow(0.6), 10.0, 8.0);
         scene.quad(Quad::new(card, theme.surface).radius(10.0).border(1.0, theme.divider));
         text.draw_text(&mut scene, "Temino self-test", 32.0, 52.0, UI_BOLD, 20.0, theme.text);
         text.draw_mono(

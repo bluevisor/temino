@@ -294,7 +294,7 @@ impl Pane {
         let device = format!("  ·  {api} on {device_name}  ·  v{}", env!("CARGO_PKG_VERSION"));
         text.draw_text(scene, &device, x + width, y + 22.0, UI, 13.0, theme.text_faint);
         let y = y + 36.0;
-        let cmd = |key: &str| format!("{}+{key}", platform::COMMAND_NAME);
+        let cmd = platform::shortcut;
         let rows: [Vec<(String, &str)>; 3] = [
             vec![
                 ("Enter".into(), "run"),
@@ -318,11 +318,22 @@ impl Pane {
                 (cmd("+ −"), "font size"),
             ],
         ];
+        // In columns, each as wide as its widest hint, where the pane has
+        // the room; else each row runs on by itself.
+        let mut columns = [0.0f32; 5];
+        for hints in &rows {
+            for (column, (key, label)) in hints.iter().enumerate() {
+                columns[column] = columns[column].max(ui::hint_width(text, key, label));
+            }
+        }
+        const GAP: f32 = 22.0;
+        let grid = x + columns.iter().sum::<f32>() + 4.0 * GAP <= self.rect.w - PAD_X;
         for (row, hints) in rows.iter().enumerate() {
             let mut hx = x;
             let hy = y + row as f32 * 28.0;
-            for (key, label) in hints.iter() {
-                hx += ui::hint(scene, text, theme, key, label, hx, hy) + 18.0;
+            for (column, (key, label)) in hints.iter().enumerate() {
+                let w = ui::hint(scene, text, theme, key, label, hx, hy);
+                hx += if grid { columns[column] + GAP } else { w + 18.0 };
             }
         }
     }
@@ -374,20 +385,25 @@ impl Pane {
                 x += text.draw_text(scene, "⎇ ", x, baseline, UI, 12.0, theme.variable.alpha(0.9));
                 text.draw_text(scene, branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
             }
-            let (status, color) = if block.running() {
+            // How long it took, then how it went. A command that went well
+            // says so quietly (a faint time, a green check); one still
+            // running or failed is in color all through.
+            let took = ui::format_duration(block.duration());
+            let (lead, lead_ink, tail, tail_ink) = if block.running() {
                 let frame = (block.started.elapsed().as_millis() / 80) as usize % SPINNER.len();
-                (format!("{}  {}", SPINNER[frame], ui::format_duration(block.duration())), theme.accent)
+                (SPINNER[frame].to_string(), theme.accent, took, theme.accent)
             } else {
                 match block.exit {
-                    Some(0) | None => (format!("{}  ✓", ui::format_duration(block.duration())), theme.success),
-                    Some(_) if block.kind == BlockKind::Ai => {
-                        (format!("{}  failed", ui::format_duration(block.duration())), theme.error)
-                    }
-                    Some(code) => (format!("{}  exit {code}", ui::format_duration(block.duration())), theme.error),
+                    Some(0) | None => (took, theme.text_faint, "✓".to_owned(), theme.success),
+                    Some(_) if block.kind == BlockKind::Ai => (took, theme.error, "failed".to_owned(), theme.error),
+                    Some(code) => (took, theme.error, format!("exit {code}"), theme.error),
                 }
             };
-            let status_width = text.measure(&status, UI, 12.0);
-            text.draw_text(scene, &status, width - PAD_X - status_width, baseline, UI, 12.0, color);
+            let gap = text.measure("  ", UI, 12.0);
+            let tail_x = width - PAD_X - text.measure(&tail, UI, 12.0);
+            text.draw_text(scene, &tail, tail_x, baseline, UI, 12.0, tail_ink);
+            let lead_x = tail_x - gap - text.measure(&lead, UI, 12.0);
+            text.draw_text(scene, &lead, lead_x, baseline, UI, 12.0, lead_ink);
         }
 
         // The command, wrapped to the grid width.
@@ -480,6 +496,10 @@ impl Pane {
         layout.input = panel;
         scene.fill(panel, theme.panel(SURFACE_LIFT));
         scene.fill(Rect::new(0.0, y, width, 1.0), theme.divider);
+        // With room left under it, an edge there too: a band, not a step.
+        if panel.bottom() < self.rect.h - 1.0 {
+            scene.fill(Rect::new(0.0, panel.bottom() - 1.0, width, 1.0), theme.divider);
+        }
 
         // Context chips.
         let chip_y = y + INPUT_PAD;
@@ -536,8 +556,8 @@ impl Pane {
                 Some(recap) => status(scene, text, recap, theme.text_dim),
                 None => {
                     let message = format!(
-                        "Running · keystrokes go to the program · Ctrl+C interrupts · {}+C copies",
-                        platform::COMMAND_NAME
+                        "Running · keystrokes go to the program · Ctrl+C interrupts · {} copies",
+                        platform::shortcut("C")
                     );
                     status(scene, text, &message, theme.text_faint)
                 }
@@ -674,7 +694,7 @@ pub(super) fn draw_menu(
     let x = (x - 10.0).min(pane_width - width - PAD_X).max(PAD_X);
     let y = (editor_y - height - 10.0).max(4.0);
     let rect = Rect::new(x, y, width, height);
-    scene.shadow(rect, Color::hex(0x000000).alpha(0.55), 8.0, 10.0);
+    scene.shadow(rect, theme.shadow(0.55), 8.0, 10.0);
     scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
     scene.push_clip(rect.inset(4.0, 4.0));
     for row in 0..rows {

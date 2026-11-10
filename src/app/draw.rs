@@ -200,7 +200,7 @@ impl App {
             }
             return;
         }
-        let font = 18.0 / self.zoom;
+        let font = 13.0 / self.zoom;
         let room = (bar.w - 2.0 * lights).max(0.0);
         let shown = text.elide(title, UI_BOLD, font, room);
         let w = text.measure(&shown, UI_BOLD, font);
@@ -416,7 +416,16 @@ impl App {
         for (index, tab) in tabs.iter().enumerate() {
             let place = Rect::new(6.0 + index as f32 * tab_width, top + 5.0, tab_width - 4.0, TAB_BAR_HEIGHT - 9.0);
             let rect = self.slid(index, place);
-            draw_tab_background(&mut self.scene, &self.ctx.theme, rect, tab.color, index == self.active, false);
+            let hovered = self.hover_tab == Some(index);
+            draw_tab_background(
+                &mut self.scene,
+                &self.ctx.theme,
+                rect,
+                tab.color,
+                index == self.active,
+                false,
+                hovered,
+            );
             let badge = (tab.panes > 1).then(|| format!("{}", tab.panes));
             self.draw_tab(index, tab, rect, badge);
             // Hits go by where it belongs, so a drag doesn't chase it.
@@ -428,9 +437,15 @@ impl App {
         let Ctx { text, theme, .. } = ctx;
         let px = 6.0 + tabs.len() as f32 * tab_width;
         let plus_rect = Rect::new(px, top + 5.0, 26.0, TAB_BAR_HEIGHT - 9.0);
+        let over = plus_rect.contains(self.mouse.0, self.mouse.1);
+        if over {
+            scene.quad(Quad::new(plus_rect, theme.panel(HOVER_LIFT)).radius(6.0));
+        }
         let ascent = text.ui_ascent(12.0);
         let baseline = (plus_rect.y + (plus_rect.h + ascent) / 2.0).round();
-        text.draw_text(scene, "+", px + 8.0, baseline, UI, 15.0, theme.text_dim);
+        let w = text.measure("+", UI, 15.0);
+        let ink = if over { theme.text } else { theme.text_dim };
+        text.draw_text(scene, "+", px + (plus_rect.w - w) / 2.0, baseline, UI, 15.0, ink);
         *new_tab_hit = plus_rect;
     }
     /// The tabs as a list down the left side.
@@ -472,6 +487,7 @@ impl App {
                 tab.color,
                 index == self.active,
                 dragged == Some(index),
+                self.hover_tab == Some(index) && dragged.is_none(),
             );
             self.draw_tab(index, tab, rect, None);
             if let Some(hit) = self.tab_hits.last_mut() {
@@ -490,12 +506,27 @@ impl App {
         let plus = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
         let ascent = text.ui_ascent(SIDEBAR_FONT);
         let baseline = (plus.y + (plus.h + ascent * 0.72) / 2.0).round();
+        // Lit under the pointer, like the rows above it. The plus sits where
+        // their numbers do, the label where their titles do, and the
+        // shortcut at the far end.
+        let over = plus.contains(self.mouse.0, self.mouse.1) && matches!(self.pointer, Pointer::Idle);
+        if over {
+            scene.quad(Quad::new(plus, theme.panel(HOVER_LIFT)).radius(6.0));
+        }
+        let ink = if over { theme.text_dim } else { theme.text_faint };
+        let w = text.measure("+", UI, 15.0);
         if self.compact {
-            let w = text.measure("+", UI, 15.0);
-            text.draw_text(scene, "+", plus.x + (plus.w - w) / 2.0, baseline, UI, 15.0, theme.text_faint);
+            text.draw_text(scene, "+", plus.x + (plus.w - w) / 2.0, baseline, UI, 15.0, ink);
         } else {
-            let label = format!("+  New tab   {}+T", platform::COMMAND_NAME);
-            text.draw_text(scene, &label, plus.x + 16.0, baseline, UI, SIDEBAR_FONT, theme.text_faint);
+            text.draw_text(scene, "+", plus.x + 10.0 + (22.0 - w) / 2.0, baseline, UI, 15.0, ink);
+            let label_x = plus.x + 10.0 + 22.0 + 8.0;
+            let label_w = text.draw_text(scene, "New tab", label_x, baseline, UI, SIDEBAR_FONT, ink);
+            let keys = platform::shortcut("T");
+            let keys_w = text.measure(&keys, UI, 11.5);
+            let keys_x = plus.right() - 10.0 - keys_w;
+            if keys_x > label_x + label_w + 12.0 {
+                text.draw_text(scene, &keys, keys_x, baseline, UI, 11.5, theme.text_faint);
+            }
         }
         *new_tab_hit = plus;
         // The foot: the account button in the corner, and the button
@@ -509,18 +540,16 @@ impl App {
             (Rect::new(6.0, foot, 28.0, 26.0), Rect::new(area.w - 1.0 - 6.0 - 28.0, foot, 28.0, 26.0))
         };
         if account.contains(self.mouse.0, self.mouse.1) || menu_open {
-            scene.quad(Quad::new(account, theme.raised).radius(5.0));
+            scene.quad(Quad::new(account, theme.panel(HOVER_LIFT)).radius(6.0));
         }
         let face = Rect::new(account.x + 4.0, account.y + 3.0, 20.0, 20.0);
         draw_account_face(scene, text, theme, face, account_info().as_ref());
         self.account_hit = account;
-        if collapse.contains(self.mouse.0, self.mouse.1) {
-            scene.quad(Quad::new(collapse, theme.raised).radius(5.0));
+        let over = collapse.contains(self.mouse.0, self.mouse.1);
+        if over {
+            scene.quad(Quad::new(collapse, theme.panel(HOVER_LIFT)).radius(6.0));
         }
-        let glyph = if self.compact { "»" } else { "«" };
-        let w = text.measure(glyph, UI, 14.0);
-        let baseline = (collapse.y + (collapse.h + ascent * 0.72) / 2.0).round();
-        text.draw_text(scene, glyph, collapse.x + (collapse.w - w) / 2.0, baseline, UI, 14.0, theme.text_faint);
+        draw_sidebar_icon(scene, collapse, if over { theme.text_dim } else { theme.text_faint });
         self.collapse_hit = collapse;
         scene.pop_clip();
         self.draw_tab_hint(tabs);
@@ -581,7 +610,7 @@ impl App {
         let Self { scene, ctx, tab_hits, .. } = self;
         let Ctx { text, theme, blink_epoch, .. } = ctx;
         let current = index == self.active;
-        draw_tab_background(scene, theme, rect, tab.color, current, dragged);
+        draw_tab_background(scene, theme, rect, tab.color, current, dragged, self.hover_tab == Some(index));
         let center = (rect.x + rect.w / 2.0 + 1.0, rect.y + rect.h / 2.0);
         let t = blink_epoch.elapsed().as_secs_f32();
         draw_tab_number(scene, text, theme, index, center, 24.0, tab.agent, tab.done_for, t);
@@ -622,7 +651,7 @@ impl App {
         scene.set_layer(LAYER_OVERLAY);
         let w = (text.measure(&title, UI, 12.0) + 20.0).min(TAB_MAX_WIDTH * 1.5);
         let label = Rect::new(row.right() + 8.0, row.y + 2.0, w, row.h - 4.0);
-        scene.shadow(label, Color::hex(0x000000).alpha(0.5), 8.0, 6.0);
+        scene.shadow(label, theme.shadow(0.5), 8.0, 6.0);
         scene.quad(Quad::new(label, theme.raised).radius(6.0).border(1.0, theme.divider));
         scene.push_clip(label.inset(8.0, 0.0));
         let baseline = (label.y + (label.h + text.ui_ascent(12.0) * 0.72) / 2.0).round();

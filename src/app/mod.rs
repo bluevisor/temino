@@ -60,6 +60,8 @@ const SIDEBAR_SNAP: f32 = 100.0;
 /// The compact sidebar: tab numbers only.
 const SIDEBAR_COMPACT: f32 = 54.0;
 const SIDEBAR_ROW: f32 = 40.0;
+/// How far a row or button under the pointer is lifted from its ground.
+const HOVER_LIFT: f32 = 0.055;
 /// Sidebar rows read a little larger than the strip's tabs.
 const SIDEBAR_FONT: f32 = 13.5;
 /// An agent waiting on you, and one that finished a turn you haven't seen.
@@ -420,6 +422,11 @@ pub struct App {
     /// `TEMINO_ASK_TEST=<request>`: ask it in AI mode from the focused pane
     /// two seconds after launch, as typing it and Enter would, for screenshots.
     ask_test: Option<(Instant, String)>,
+    /// `TEMINO_TYPE_TEST=<command>|<command>…`: type each into the focused
+    /// pane and press Enter, the first two seconds after launch and the rest
+    /// a second apart, for screenshots. A last one left without `|` after it
+    /// stays in the input, unsent.
+    type_test: Option<(Instant, Vec<String>)>,
     /// When the state for remotes is next built, while any watch.
     remote_at: Instant,
 }
@@ -541,6 +548,9 @@ impl App {
             ask_test: std::env::var("TEMINO_ASK_TEST")
                 .ok()
                 .map(|request| (Instant::now() + Duration::from_secs(2), request)),
+            type_test: std::env::var("TEMINO_TYPE_TEST").ok().map(|commands| {
+                (Instant::now() + Duration::from_secs(2), commands.split('|').rev().map(str::to_owned).collect())
+            }),
             recap_test: std::env::var("TEMINO_RECAP_TEST")
                 .ok()
                 .and_then(|seconds| seconds.parse::<f32>().ok())
@@ -717,6 +727,17 @@ impl App {
             }
             self.dirty = true;
         }
+        if self.type_test.as_ref().is_some_and(|(at, _)| now >= *at) {
+            let (_, mut commands) = self.type_test.take().unwrap();
+            if let Some(command) = commands.pop() {
+                self.type_text(command.as_bytes());
+                if !commands.is_empty() {
+                    self.type_text(b"\r");
+                    self.type_test = Some((now + Duration::from_secs(1), commands));
+                }
+            }
+            self.dirty = true;
+        }
         if self.ask_test.as_ref().is_some_and(|(at, _)| now >= *at) {
             let (_, request) = self.ask_test.take().unwrap();
             let id = self.focused_id();
@@ -727,10 +748,24 @@ impl App {
         }
         if self.recap_test.is_some_and(|at| now >= at) {
             self.recap_test = None;
-            // With TEMINO_MENU_TEST=account, the account menu instead.
-            if std::env::var("TEMINO_MENU_TEST").is_ok_and(|menu| menu == "account") && self.account_hit.w > 0.0 {
-                let hit = self.account_hit;
-                self.tab_menu = Some(TabMenu { tab: self.active, x: hit.x, y: hit.y - 6.0, kind: MenuKind::Account });
+            // With TEMINO_MENU_TEST=account, the account menu instead; with
+            // tab or pane, that menu; with settings, the Settings tab.
+            let menu = std::env::var("TEMINO_MENU_TEST").unwrap_or_default();
+            let kind = match menu.as_str() {
+                "account" if self.account_hit.w > 0.0 => {
+                    Some((MenuKind::Account, self.account_hit.x, self.account_hit.y - 6.0))
+                }
+                "tab" => self.tab_hits.first().map(|(row, _)| (MenuKind::Tab, row.x + 40.0, row.bottom() - 6.0)),
+                "pane" => Some((MenuKind::Pane, self.width * 0.5, self.height * 0.3)),
+                _ => None,
+            };
+            if let Some((kind, x, y)) = kind {
+                self.tab_menu = Some(TabMenu { tab: self.active, x, y, kind });
+                self.dirty = true;
+                return;
+            }
+            if menu == "settings" {
+                self.open_settings();
                 self.dirty = true;
                 return;
             }
@@ -755,6 +790,7 @@ impl App {
         times.push(self.recap_test);
         times.push(self.open_test.as_ref().map(|(at, _)| *at));
         times.push(self.ask_test.as_ref().map(|(at, _)| *at));
+        times.push(self.type_test.as_ref().map(|(at, _)| *at));
         times.push(self.ctx.toast.as_ref().map(|(_, at)| *at));
         times.push(remote::watched().then_some(self.remote_at));
         times.into_iter().flatten().min()
