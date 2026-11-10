@@ -198,6 +198,12 @@ impl Page {
     ) {
         self.hits.clear();
         self.view_height = rect.h;
+        // The stored scroll was bounded by an older frame: content that
+        // shrank (a section closed) or a window that grew can leave it
+        // past the end, and the page would draw shifted and half-blank
+        // until the next wheel. Clamp it before anything is placed.
+        let most = (self.content_height - rect.h).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, most);
         let width = (rect.w - 2.0 * PAD).min(COLUMN);
         let x = rect.x + ((rect.w - width) / 2.0).max(PAD);
         let top = rect.y + PAD - self.scroll;
@@ -852,6 +858,57 @@ mod tests {
         assert_eq!(page.scroll, 300.0);
         page.wheel(-100.0, 0.0, 0.0);
         assert_eq!(page.scroll, 0.0);
+    }
+
+    #[test]
+    fn drawing_clamps_a_scroll_the_content_no_longer_reaches() {
+        let mut scene = Scene::new();
+        let mut text = TextSystem::new(14.0);
+        let theme = Theme::dark();
+        let values = Values {
+            background: Some(0),
+            theme: "Temino".into(),
+            themes: 12,
+            palettes: Vec::new(),
+            palette: 0,
+            bindings: 0,
+            ligatures: true,
+            quick_terminal: Some(None),
+            opacity: 0,
+            blur: false,
+            shell: Some(0),
+            installed: [true, true, false],
+            fetch: 1,
+            fetches_installed: [true, false, true],
+            tabs_top: false,
+            extended: false,
+            zoom: 100.0,
+            updates: true,
+            see_through: true,
+            remote: None,
+            remote_account: String::new(),
+            remote_url: String::new(),
+            remote_phones: Vec::new(),
+            provider: PROVIDERS.len() - 1,
+            fields: Default::default(),
+            editing: None,
+        };
+        // Scrolled to the end of 900px of content in a 600px view, then
+        // the window grows past the whole content: nothing to scroll.
+        let mut page = Page { content_height: 900.0, view_height: 600.0, ..Page::default() };
+        page.scroll = 300.0;
+        let rect = Rect::new(0.0, 0.0, 900.0, 2000.0);
+        scene.reset(900.0, 2000.0, 1.0, theme.background);
+        page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
+        assert_eq!(page.scroll, 0.0);
+        // Content still taller than the view: the scroll is capped at
+        // the new end, not zeroed.
+        page.content_height = 900.0;
+        page.scroll = 500.0;
+        let rect = Rect::new(0.0, 0.0, 900.0, 600.0);
+        scene.reset(900.0, 600.0, 1.0, theme.background);
+        page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
+        assert_eq!(page.scroll, 300.0);
     }
 
     #[test]
