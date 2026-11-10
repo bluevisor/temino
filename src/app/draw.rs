@@ -334,7 +334,12 @@ impl App {
             x += number + 8.0;
         }
         let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
-        let closable = hovered && tab.editing.is_none();
+        // Under 48px a top-strip tab can't hold both its number and the
+        // ×: the two overlap, the × spilling onto the tab before it at
+        // the smallest widths, and since close hits are checked first a
+        // click meant to switch tabs closes one instead. No × there —
+        // middle-click and the tab menu still close it.
+        let closable = hovered && tab.editing.is_none() && rect.w >= 48.0;
         let mut right = if closable { close.x - 4.0 } else { rect.right() - 8.0 };
         if let Some(label) = badge {
             // A small badge with the pane count.
