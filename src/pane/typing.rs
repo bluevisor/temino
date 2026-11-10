@@ -101,7 +101,10 @@ impl Pane {
     pub fn open_find(&mut self) {
         match &mut self.find {
             Some(find) => find.selected = !find.query.is_empty(),
-            None => self.find = Some(Find::new(self.last_query.clone())),
+            None => {
+                self.find = Some(Find::new(self.last_query.clone()));
+                crate::analytics::bump(crate::analytics::Counter::FindUses);
+            }
         }
     }
     /// TEMINO_FIND_TEST: the search bar open on `query`, for screenshots.
@@ -440,6 +443,7 @@ impl Pane {
         }
         self.editor.take();
         let id = self.session.ask(&request);
+        crate::analytics::bump(crate::analytics::Counter::AiQueries);
         self.selected = None;
         self.selection = None;
         self.pin_to_bottom();

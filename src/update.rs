@@ -119,8 +119,14 @@ pub fn skip(version: &str) {
 pub fn install(sender: Sender<Msg>, release: Release) {
     let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
         let event = match download(&release) {
-            Ok(()) => Event::Installed,
-            Err(error) => Event::Failed(error),
+            Ok(()) => {
+                crate::analytics::bump(crate::analytics::Counter::UpdateInstalls);
+                Event::Installed
+            }
+            Err(error) => {
+                crate::analytics::bump(crate::analytics::Counter::UpdateFailures);
+                Event::Failed(error)
+            }
         };
         let _ = sender.send(Msg::Update(event));
     });
