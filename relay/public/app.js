@@ -419,10 +419,15 @@ function strip(w) {
     if (t) switchTab(w, +t.dataset.tab);
   };
   const cur = el.querySelector(".current");
-  if (cur && !strip.scrolled) { cur.scrollIntoView({ inline: "center", block: "nearest" }); }
+  // Center the current tab when it changes, not on every render: renders
+  // arrive with every screen update, and re-centering each time snaps
+  // the strip back whenever it's been scrolled sideways by hand.
+  const centered = `${at.window}:${at.tab}`;
+  if (cur && stripCentered !== centered) { stripCentered = centered; cur.scrollIntoView({ inline: "center", block: "nearest" }); }
 }
 
 let choosing = false;
+let stripCentered = "";
 function newTab(w, shell) {
   follow = w.tabs.length;
   send({ type: "new_tab", window: w.no, ...(shell ? { shell } : {}) });
