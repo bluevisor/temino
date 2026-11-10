@@ -96,6 +96,10 @@ impl Style {
     }
 }
 
+/// Settings ▸ Text ▸ Line spacing: its choices, as multiples of the
+/// font's own line height. The second, a little extra, is the default.
+pub const LINE_SPACINGS: [(&str, f32); 4] = [("Tight", 1.0), ("Default", 1.12), ("Roomy", 1.25), ("Airy", 1.4)];
+
 #[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
     pub width: f32,
@@ -218,6 +222,8 @@ pub struct TextSystem {
     /// already: the glyph each character becomes.
     shapers: Vec<rustybuzz::Face<'static>>,
     pub ligatures: bool,
+    /// How tall a line is, as a multiple of the font's own line height.
+    leading: f32,
     shaped: HashMap<(String, FontId), Option<Vec<u16>>>,
     /// Inline images in the color atlas, by picture and physical size
     /// (macOS); elsewhere their mosaics, averaged down.
@@ -319,6 +325,7 @@ impl TextSystem {
             emoji: HashMap::new(),
             shapers: MONO_FONTS.iter().filter_map(|data| rustybuzz::Face::from_slice(data, 0)).collect(),
             ligatures: true,
+            leading: LINE_SPACINGS[1].1,
             shaped: HashMap::new(),
             pictures: HashMap::new(),
             mosaics: HashMap::new(),
@@ -354,6 +361,19 @@ impl TextSystem {
         Ok(())
     }
 
+    /// Settings ▸ Text ▸ Line spacing: lines this many times the font's own
+    /// height.
+    pub fn set_leading(&mut self, leading: f32) {
+        if leading > 0.0 && leading != self.leading {
+            self.leading = leading;
+            self.set_size(self.cell.size);
+        }
+    }
+
+    pub fn leading(&self) -> f32 {
+        self.leading
+    }
+
     pub fn set_scale(&mut self, scale: f32) {
         if scale > 0.0 && scale != self.scale {
             self.scale = scale;
@@ -374,7 +394,7 @@ impl TextSystem {
         let line = font.horizontal_line_metrics(physical).expect("mono font has horizontal metrics");
         let width = font.metrics('M', physical).advance_width.round().max(1.0);
         // A little extra leading reads better than the font's tight default.
-        let height = (line.new_line_size * 1.12).round();
+        let height = (line.new_line_size * self.leading).round();
         let extra = height - (line.ascent - line.descent);
         let baseline = (extra / 2.0 + line.ascent).round();
         self.cell = CellMetrics {

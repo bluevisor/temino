@@ -117,7 +117,11 @@ impl Ctx {
         self.toast = Some((message.to_owned(), Instant::now() + Duration::from_millis(1600)));
     }
 
+    /// The cursor's blink phase: always on when Settings ▸ Cursor ▸ Blink is off.
     pub fn blink_on(&self) -> bool {
+        if !crate::cursor::blinks() {
+            return true;
+        }
         let elapsed = Instant::now().duration_since(self.blink_epoch);
         (elapsed.as_millis() / BLINK.as_millis()).is_multiple_of(2)
     }
@@ -492,7 +496,8 @@ impl Pane {
         let now = Instant::now();
         let mut next: Option<Instant> = None;
         let mut want = |at: Instant| next = Some(next.map_or(at, |n| n.min(at)));
-        if focused && (self.session.editor_active() || self.session.active().is_some()) {
+        // A steady cursor (Settings ▸ Cursor ▸ Blink off) needs no timer.
+        if focused && crate::cursor::blinks() && (self.session.editor_active() || self.session.active().is_some()) {
             let elapsed = now.duration_since(ctx.blink_epoch).as_millis() as u64;
             let period = BLINK.as_millis() as u64;
             want(ctx.blink_epoch + Duration::from_millis((elapsed / period + 1) * period));

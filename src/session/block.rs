@@ -11,7 +11,13 @@ impl Block {
         listener: Listener,
     ) -> Block {
         // Programs may ask for the Kitty keyboard protocol (keys::encode).
-        let config = Config { scrolling_history: HISTORY_LINES, kitty_keyboard: true, ..Config::default() };
+        // Its cursor is Settings ▸ Cursor's until the program picks another.
+        let config = Config {
+            scrolling_history: HISTORY_LINES,
+            kitty_keyboard: true,
+            default_cursor_style: crate::cursor::term_style(),
+            ..Config::default()
+        };
         let clears = kind == BlockKind::Command && matches!(command.trim(), "clear" | "reset" | "cls");
         Block {
             id,

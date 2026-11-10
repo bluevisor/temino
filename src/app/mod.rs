@@ -40,6 +40,7 @@ mod persist;
 mod prefs;
 mod start;
 mod tabs;
+mod theme_edit;
 use chrome::*;
 use layout::*;
 pub use overlays::*;
@@ -421,6 +422,9 @@ pub struct App {
     /// The theme the pointer is over in Settings' theme list, shown for now
     /// in place of `palette`.
     previewing: Option<usize>,
+    /// The theme editor, open on a theme of your own: the color it's
+    /// changing, and whether Delete was clicked once already.
+    theme_edit: Option<(theme::Slot, bool)>,
     background: Option<usize>,
     opacity: usize,
     blur: bool,
@@ -484,6 +488,8 @@ impl App {
         let gpu = Gpu::new()?;
         let mut text = TextSystem::new(BASE_FONT_SIZE);
         text.ligatures = crate::setting("ligatures").as_deref() != Some("off");
+        text.set_leading(load_line_spacing());
+        crate::cursor::load();
         if let Some(family) = crate::setting("font").filter(|f| !f.is_empty()) {
             if let Err(error) = text.set_mono(Some(&family)) {
                 crate::store::log(&format!("font {family}: {error}; JetBrains Mono instead"));
@@ -575,6 +581,7 @@ impl App {
             bindings: Bindings::default(),
             palette,
             previewing: None,
+            theme_edit: None,
             background,
             opacity,
             blur: crate::setting("blur").as_deref() == Some("on"),

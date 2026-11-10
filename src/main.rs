@@ -15,6 +15,7 @@ mod avatar;
 mod bindings;
 mod cli;
 mod complete;
+mod cursor;
 mod e2e;
 mod editor;
 mod fetch;

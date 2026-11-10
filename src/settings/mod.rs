@@ -2,12 +2,16 @@
 //! rest of the window. The page only draws and says what a click asks for;
 //! app.rs applies it and remembers it in the settings file.
 
+use crate::cursor::Shape;
 use crate::fetch::FETCHES;
 use crate::llm::{self, PROVIDERS};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::shells::KINDS;
-use crate::text::{TextSystem, UI, UI_BOLD};
-use crate::theme::{Color, Palette, Theme, BACKGROUNDS, OPACITIES};
+use crate::text::{TextSystem, LINE_SPACINGS, UI, UI_BOLD};
+use crate::theme::{Channel, Color, Palette, Slot, Theme, BACKGROUNDS, OPACITIES};
+
+mod editor;
+pub use editor::ThemeEdit;
 
 /// The page's column, at most this wide, centered in the tab.
 const COLUMN: f32 = 640.0;
@@ -23,6 +27,8 @@ const LIST_ROW: f32 = 28.0;
 const LIST_HEIGHT: f32 = 340.0;
 /// The Remote Control row that tells the phone's side, QR code and all.
 const PHONE_ROW: f32 = 170.0;
+/// The theme editor's rows of color dots, each named under it.
+const COLORS_ROW: f32 = 74.0;
 const QR_SIZE: f32 = 138.0;
 
 /// What the settings are now, for drawing them.
@@ -35,6 +41,10 @@ pub struct Values {
     /// The whole library, and which of it is in use, for the theme list.
     pub palettes: Vec<Palette>,
     pub palette: usize,
+    /// The theme in use is one of your own (a file), not a preset.
+    pub custom: bool,
+    /// The theme editor, while it's open on a theme of your own.
+    pub editor: Option<ThemeEdit>,
     /// How many key bindings the keys file holds.
     pub bindings: usize,
     pub ligatures: bool,
@@ -58,8 +68,14 @@ pub struct Values {
     pub extended: bool,
     /// Desktop notifications for panes out of sight.
     pub notifications: bool,
-    /// As a percentage of the default size.
+    /// As a percentage of the default size, and the terminal font's points.
     pub zoom: f32,
+    pub points: f32,
+    /// An index into LINE_SPACINGS.
+    pub line_spacing: usize,
+    /// An index into cursor::Shape::ALL, and whether it blinks.
+    pub cursor: usize,
+    pub blink: bool,
     pub updates: bool,
     /// Anonymous usage data is shared, with the user's yes (Settings ▸
     /// Share anonymous usage data; the permission card's answer too).
@@ -90,6 +106,9 @@ pub enum Field {
     LlmKey,
     LlmModel,
     TypesafeKey,
+    /// The theme editor's: the theme's name, and the picked color as hex.
+    ThemeName,
+    ThemeHex,
 }
 
 impl Field {
@@ -103,6 +122,8 @@ impl Field {
             Field::LlmKey => llm::chosen().key_setting().to_owned(),
             Field::LlmModel => llm::chosen().model_setting(),
             Field::TypesafeKey => "typesafe_key".to_owned(),
+            // Kept in the theme's file, not the settings file.
+            Field::ThemeName | Field::ThemeHex => String::new(),
         }
     }
 
@@ -111,8 +132,10 @@ impl Field {
         matches!(self, Field::LlmKey | Field::TypesafeKey)
     }
 
-    fn index(self) -> usize {
-        Field::ALL.iter().position(|&f| f == self).unwrap()
+    /// Where it is in Field::ALL (and Values::fields): the theme editor's
+    /// two aren't there.
+    fn index(self) -> Option<usize> {
+        Field::ALL.iter().position(|&f| f == self)
     }
 }
 
@@ -155,6 +178,21 @@ pub enum Action {
     Edit(Field),
     /// The model from the provider at this place in llm::PROVIDERS.
     Provider(usize),
+    /// Open the theme editor (true) or close it.
+    ThemeEditor(bool),
+    /// A theme of your own, copied from the one in use, to edit.
+    DuplicateTheme,
+    /// Delete the theme of your own in use: asks again first.
+    DeleteTheme,
+    /// The color the editor's hex field and nudges change.
+    Slot(Slot),
+    /// Turn the picked color this many notches along a channel.
+    Nudge(Channel, i32),
+    /// An index into cursor::Shape::ALL.
+    Cursor(usize),
+    Blink(bool),
+    /// An index into LINE_SPACINGS.
+    LineSpacing(usize),
 }
 
 #[derive(Default)]
@@ -225,12 +263,18 @@ impl Page {
         ui.text.draw_text(ui.scene, "Settings", x, y + 24.0, UI_BOLD, 22.0, theme.text);
         y += 52.0;
 
-        let mut rows = vec![Row::Theme, Row::ThemeFolder, Row::Background];
+        let mut rows = vec![Row::Theme, Row::Customize, Row::ThemeFolder, Row::Background];
         if values.see_through {
             rows.extend([Row::Opacity, Row::Blur]);
         }
         y = ui.section(x, y, width, "Appearance", &rows, values);
-        y = ui.section(x, y, width, "Text", &[Row::Font, Row::Zoom, Row::Ligatures], values);
+        if let Some(edit) = &values.editor {
+            let title = format!("Theme Editor · {}", edit.palette.name);
+            y = ui.section(x, y, width, &title, &Row::EDITOR, values);
+        }
+        let text_rows = [Row::Font, Row::Zoom, Row::LineSpacing, Row::Ligatures];
+        y = ui.section(x, y, width, "Text", &text_rows, values);
+        y = ui.section(x, y, width, "Cursor", &[Row::CursorShape, Row::Blink], values);
         let mut shell = vec![Row::Shell, Row::Fetch];
         if values.fetch > 0 {
             shell.push(Row::FetchConfig);
@@ -316,12 +360,42 @@ enum Row {
     Phone,
     Provider,
     Field(Field),
+    /// Duplicate the theme, or edit it if it's yours.
+    Customize,
+    /// The theme editor's rows.
+    ThemeName,
+    Colors(Group),
+    SlotHex,
+    Nudge,
+    DeleteTheme,
+    LineSpacing,
+    CursorShape,
+    Blink,
+}
+
+/// A row of color dots in the theme editor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Group {
+    Base,
+    Normal,
+    Bright,
 }
 
 impl Row {
+    const EDITOR: [Row; 7] = [
+        Row::ThemeName,
+        Row::Colors(Group::Base),
+        Row::Colors(Group::Normal),
+        Row::Colors(Group::Bright),
+        Row::SlotHex,
+        Row::Nudge,
+        Row::DeleteTheme,
+    ];
+
     fn height(self) -> f32 {
         match self {
             Row::Phone => PHONE_ROW,
+            Row::Colors(_) => COLORS_ROW,
             _ => ROW,
         }
     }
@@ -369,6 +443,9 @@ impl Ui<'_> {
         if let Row::Phone = row {
             return self.phone(rect, values);
         }
+        if let Row::Colors(group) = row {
+            return self.colors(rect, group, values);
+        }
         let (label, detail) = match row {
             Row::Theme => {
                 ("Theme", format!("{} of {} · colors for the terminal and the window", values.theme, values.themes))
@@ -401,7 +478,8 @@ impl Ui<'_> {
             Row::Zoom => (
                 "Size",
                 format!(
-                    "{:.0}% · {} and {} too",
+                    "{:.1} pt · {:.0}% · {} and {} too",
+                    values.points,
                     values.zoom,
                     crate::platform::shortcut("+"),
                     crate::platform::shortcut("−")
@@ -463,6 +541,19 @@ impl Ui<'_> {
             }
             Row::Field(Field::LlmModel) => ("Model name", "As the provider names it".to_owned()),
             Row::Field(Field::TypesafeKey) => ("TypeSafe key", "Lets Jev decide: command or answer".to_owned()),
+            Row::Field(Field::ThemeName | Field::ThemeHex) | Row::Colors(_) => return,
+            Row::Customize | Row::ThemeName | Row::SlotHex | Row::Nudge | Row::DeleteTheme => {
+                self.editor_label(row, values)
+            }
+            Row::LineSpacing => ("Line spacing", "Room between the terminal's lines".to_owned()),
+            Row::CursorShape => (
+                "Shape",
+                match Shape::ALL[values.cursor] {
+                    Shape::Auto => "A bar at the prompt, a block in programs".to_owned(),
+                    shape => format!("{} at the prompt; programs that pick their own still do", shape.name()),
+                },
+            ),
+            Row::Blink => ("Blink", "Steady when off".to_owned()),
         };
         let left = rect.x + 16.0;
         self.text.draw_text(self.scene, label, left, rect.y + 25.0, UI, 13.0, theme.text);
@@ -545,437 +636,26 @@ impl Ui<'_> {
                 let labels = PROVIDERS.map(|p| p.name.to_owned());
                 self.segments(right, control_y, &labels, Some(values.provider), Action::Provider);
             }
-            Row::Field(field) => self.field(right, control_y, field, values),
+            Row::Field(field) => self.field(right, control_y, FIELD_WIDTH, field, values),
             Row::Connected(index) => self.button(right, control_y, "Disconnect", Action::Disconnect(index)),
-            Row::Phone => {}
+            Row::Phone | Row::Colors(_) => {}
+            Row::Customize | Row::ThemeName | Row::SlotHex | Row::Nudge | Row::DeleteTheme => {
+                self.editor_control(right, control_y, row, values)
+            }
+            Row::LineSpacing => {
+                let labels = LINE_SPACINGS.map(|(name, _)| name.to_owned());
+                self.segments(right, control_y, &labels, Some(values.line_spacing), Action::LineSpacing);
+            }
+            Row::CursorShape => {
+                let labels = Shape::ALL.map(|shape| shape.name().to_owned());
+                self.segments(right, control_y, &labels, Some(values.cursor), Action::Cursor);
+            }
+            Row::Blink => self.toggle(right, rect.y, values.blink, Action::Blink(!values.blink)),
         }
-    }
-
-    /// Remote Control's other end, step by step, beside a QR code that
-    /// opens the phone's web app.
-    fn phone(&mut self, rect: Rect, values: &Values) {
-        let theme = self.theme;
-        let left = rect.x + 16.0;
-        self.text.draw_text(self.scene, "On your iPhone or iPad", left, rect.y + 25.0, UI, 13.0, theme.text);
-        let address = values.remote_url.trim_start_matches("https://");
-        let open = format!("Scan the code, or open {address}");
-        let mut steps = Vec::new();
-        if values.remote != Some(true) {
-            steps.push("Sign in here first, with Sign In… above");
-        }
-        steps.extend([
-            open.as_str(),
-            "Sign in with the same Apple or Google account",
-            "Allow it here: Temino shows the code the phone shows",
-            "For agent alerts: Share ▸ Add to Home Screen",
-        ]);
-        let mut y = rect.y + 48.0;
-        for (number, step) in steps.iter().enumerate() {
-            let number = format!("{}", number + 1);
-            self.text.draw_text(self.scene, &number, left + 2.0, y, UI_BOLD, 11.5, theme.accent);
-            self.text.draw_text(self.scene, step, left + 18.0, y, UI, 11.5, theme.text_dim);
-            y += 22.0;
-        }
-        let code = Rect::new(rect.right() - 16.0 - QR_SIZE, rect.y + (rect.h - QR_SIZE) / 2.0, QR_SIZE, QR_SIZE);
-        self.qr(code, &values.remote_url);
-    }
-
-    /// `text` as a QR code filling `rect`, dark on white with its quiet zone.
-    fn qr(&mut self, rect: Rect, text: &str) {
-        let Ok(qr) = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Medium) else { return };
-        self.scene.quad(Quad::new(rect, Color::hex(0xffffff)).radius(8.0));
-        let size = qr.size();
-        // Two modules of quiet zone each side (the white card's edge adds more).
-        let module = (rect.w / (size + 4) as f32).floor();
-        let origin = rect.x + ((rect.w - module * size as f32) / 2.0).round();
-        let top = rect.y + ((rect.h - module * size as f32) / 2.0).round();
-        let ink = Color::hex(0x000000);
-        for row in 0..size {
-            // Each run of dark modules in a row as one rectangle.
-            let mut column = 0;
-            while column < size {
-                if !qr.get_module(column, row) {
-                    column += 1;
-                    continue;
-                }
-                let start = column;
-                while column < size && qr.get_module(column, row) {
-                    column += 1;
-                }
-                let x = origin + start as f32 * module;
-                let y = top + row as f32 * module;
-                self.scene.fill(Rect::new(x, y, (column - start) as f32 * module, module), ink);
-            }
-        }
-    }
-
-    /// A text field, right-aligned at `right`: the setting's value (keys as
-    /// dots), or what's being typed with a caret.
-    fn field(&mut self, right: f32, y: f32, field: Field, values: &Values) {
-        let theme = self.theme;
-        let size = 12.0;
-        let rect = Rect::new(right - FIELD_WIDTH, y, FIELD_WIDTH, CONTROL_HEIGHT);
-        let editing = values.editing.as_ref().filter(|(f, _, _)| *f == field);
-        let border = if editing.is_some() {
-            theme.accent
-        } else if self.hovered(rect) {
-            theme.text_faint
-        } else {
-            theme.divider
-        };
-        self.scene.quad(Quad::new(rect, Color::hex(0x000000).alpha(0.22)).radius(7.0).border(1.0, border));
-        let shown = |text: &str| {
-            if field.secret() && !text.is_empty() {
-                "•".repeat(text.chars().count().min(24))
-            } else {
-                text.to_owned()
-            }
-        };
-        let baseline = (rect.y + (rect.h + self.text.ui_ascent(size) * 0.72) / 2.0).round();
-        let x = rect.x + 10.0;
-        self.scene.push_clip(rect.inset(8.0, 0.0));
-        match editing {
-            Some((_, text, selected)) => {
-                let text = shown(text);
-                let w = self.text.measure(&text, UI, size);
-                // Long text scrolls so the caret stays in view.
-                let x = x - (w - (rect.w - 24.0)).max(0.0);
-                if *selected && !text.is_empty() {
-                    let mark = Rect::new(x - 1.0, rect.y + 5.0, w + 2.0, rect.h - 10.0);
-                    self.scene.quad(Quad::new(mark, theme.selection).radius(2.0));
-                }
-                self.text.draw_text(self.scene, &text, x, baseline, UI, size, theme.text);
-                self.scene.fill(Rect::new(x + w + 1.0, rect.y + 6.0, 1.0, rect.h - 12.0), theme.cursor);
-            }
-            None => {
-                let value = &values.fields[field.index()];
-                let provider = PROVIDERS[values.provider];
-                let (text, color) = match (value.is_empty(), field) {
-                    (true, Field::LlmUrl) => ("http://host:8080/v1".to_owned(), theme.text_faint),
-                    (true, Field::LlmModel) if provider.model.is_empty() => {
-                        ("The first it lists".to_owned(), theme.text_faint)
-                    }
-                    (true, Field::LlmModel) => (provider.model.to_owned(), theme.text_faint),
-                    (true, _) => ("Not set".to_owned(), theme.text_faint),
-                    (false, _) => (shown(value), theme.text),
-                };
-                self.text.draw_text(self.scene, &text, x, baseline, UI, size, color);
-            }
-        }
-        self.scene.pop_clip();
-        self.hit(rect, Action::Edit(field));
-    }
-
-    /// Every theme in a list dropped under `anchor` (the theme's name), the
-    /// one in use lit, each with its background and a few of its colors.
-    /// `scroll` NaN starts it on the one in use; returns where the list is
-    /// and the scroll kept in range.
-    fn theme_list(&mut self, anchor: Rect, values: &Values, scroll: f32) -> (Rect, f32) {
-        let theme = self.theme;
-        let size = 12.5;
-        let widest = values.palettes.iter().map(|p| self.text.measure(&p.name, UI, size)).fold(0.0, f32::max);
-        let w = (widest + 96.0).max(220.0);
-        let content = LIST_ROW * values.palettes.len() as f32;
-        let h = content.min(LIST_HEIGHT) + 8.0;
-        let below = self.clip.bottom() - anchor.bottom() - 12.0;
-        let y = if below >= h || below >= anchor.y - self.clip.y { anchor.bottom() + 6.0 } else { anchor.y - 6.0 - h };
-        let x = (anchor.x + anchor.w / 2.0 - w / 2.0).min(self.clip.right() - w - 12.0).max(self.clip.x + 12.0);
-        let list = Rect::new(x, y, w, h);
-        let most = (content - (h - 8.0)).max(0.0);
-        let scroll =
-            if scroll.is_nan() { LIST_ROW * values.palette as f32 - (h - 8.0 - LIST_ROW) / 2.0 } else { scroll };
-        let scroll = scroll.clamp(0.0, most);
-
-        self.scene.set_layer(LAYER_OVERLAY);
-        let shadow = Rect::new(list.x - 1.0, list.y + 5.0, list.w + 2.0, list.h + 2.0);
-        self.scene.quad(Quad::new(shadow, Color::hex(0x000000).alpha(0.28)).radius(12.0));
-        self.scene.quad(Quad::new(list, theme.raised).radius(10.0).border(1.0, theme.divider));
-        // The list's padding takes clicks too, rather than the rows under it.
-        self.hit(list, Action::PickTheme(values.palette));
-        let inner = list.inset(4.0, 4.0);
-        self.scene.push_clip(inner);
-        let ascent = self.text.ui_ascent(size);
-        for (index, palette) in values.palettes.iter().enumerate() {
-            let line = Rect::new(inner.x, inner.y + index as f32 * LIST_ROW - scroll, inner.w, LIST_ROW);
-            if line.bottom() < inner.y || line.y > inner.bottom() {
-                continue;
-            }
-            let on = index == values.palette;
-            if on {
-                self.scene.quad(Quad::new(line, theme.accent.alpha(0.85)).radius(6.0));
-            } else if self.hovered(line) && inner.contains(self.mouse.0, self.mouse.1) {
-                self.scene.quad(Quad::new(line, Color::hex(0xffffff).alpha(0.07)).radius(6.0));
-            }
-            let chip = Rect::new(line.x + 8.0, line.y + 6.0, 44.0, LIST_ROW - 12.0);
-            let chip_quad = Quad::new(chip, Color::hex(palette.background)).radius(4.0);
-            self.scene.quad(chip_quad.border(1.0, Color::hex(0xffffff).alpha(0.18)));
-            for (i, &ansi) in [1, 2, 4, 5].iter().enumerate() {
-                let dot = Rect::new(chip.x + 5.0 + i as f32 * 9.0, chip.y + chip.h / 2.0 - 3.0, 6.0, 6.0);
-                self.scene.quad(Quad::new(dot, Color::hex(palette.ansi[ansi])).radius(3.0));
-            }
-            let baseline = (line.y + (line.h + ascent * 0.72) / 2.0).round();
-            let color = if on { Color::hex(0x0b0d12) } else { theme.text };
-            self.text.draw_text(self.scene, &palette.name, chip.right() + 12.0, baseline, UI, size, color);
-            let (top, bottom) = (line.y.max(inner.y), line.bottom().min(inner.bottom()));
-            self.hit(Rect::new(line.x, top, line.w, bottom - top), Action::PickTheme(index));
-        }
-        self.scene.pop_clip();
-        self.scene.set_layer(LAYER_CONTENT);
-        (list, scroll)
-    }
-
-    /// The backgrounds as color dots, right-aligned at `right`.
-    fn swatches(&mut self, right: f32, y: f32, selected: Option<usize>) {
-        let theme = self.theme;
-        let step = SWATCH + 10.0;
-        let mut x = right - step * BACKGROUNDS.len() as f32 + 10.0;
-        for (index, &(_, rgb)) in BACKGROUNDS.iter().enumerate() {
-            let dot = Rect::new(x, y, SWATCH, SWATCH);
-            let hit = dot.inset(-4.0, -4.0);
-            let ring = if Some(index) == selected {
-                theme.accent
-            } else if self.hovered(hit) {
-                theme.text_dim
-            } else {
-                Color::hex(0xffffff).alpha(0.18)
-            };
-            if Some(index) == selected {
-                self.scene.quad(Quad::new(dot.inset(-3.0, -3.0), Color::TRANSPARENT).radius(SWATCH).border(2.0, ring));
-                self.scene.quad(
-                    Quad::new(dot, Color::hex(rgb)).radius(SWATCH / 2.0).border(1.0, Color::hex(0xffffff).alpha(0.18)),
-                );
-            } else {
-                self.scene.quad(Quad::new(dot, Color::hex(rgb)).radius(SWATCH / 2.0).border(1.0, ring));
-            }
-            self.hit(hit, Action::Background(index));
-            x += step;
-        }
-    }
-
-    /// A row of joined buttons, right-aligned at `right`, `selected` lit.
-    fn segments(
-        &mut self,
-        right: f32,
-        y: f32,
-        labels: &[String],
-        selected: Option<usize>,
-        action: impl Fn(usize) -> Action,
-    ) {
-        let theme = self.theme;
-        let size = 12.0;
-        let widths: Vec<f32> = labels.iter().map(|l| (self.text.measure(l, UI, size) + 20.0).max(34.0)).collect();
-        let total: f32 = widths.iter().sum();
-        let outer = Rect::new(right - total - 4.0, y, total + 4.0, CONTROL_HEIGHT);
-        self.scene.quad(Quad::new(outer, Color::hex(0x000000).alpha(0.22)).radius(7.0).border(1.0, theme.divider));
-        let ascent = self.text.ui_ascent(size);
-        let mut x = outer.x + 2.0;
-        for (index, (label, w)) in labels.iter().zip(widths).enumerate() {
-            let segment = Rect::new(x, y + 2.0, w, CONTROL_HEIGHT - 4.0);
-            let on = selected == Some(index);
-            if on {
-                self.scene.quad(Quad::new(segment, theme.accent.alpha(0.85)).radius(5.0));
-            } else if self.hovered(segment) {
-                self.scene.quad(Quad::new(segment, Color::hex(0xffffff).alpha(0.07)).radius(5.0));
-            }
-            let label_width = self.text.measure(label, UI, size);
-            let baseline = (segment.y + (segment.h + ascent * 0.72) / 2.0).round();
-            let color = if on { Color::hex(0x0b0d12) } else { theme.text };
-            self.text.draw_text(self.scene, label, segment.x + (w - label_width) / 2.0, baseline, UI, size, color);
-            self.hit(segment, action(index));
-            x += w;
-        }
-    }
-
-    /// An on/off switch, right-aligned at `right` and centered in the row at `row_y`.
-    fn toggle(&mut self, right: f32, row_y: f32, on: bool, action: Action) {
-        let theme = self.theme;
-        let (w, h) = (38.0, 22.0);
-        let track = Rect::new(right - w, row_y + (ROW - h) / 2.0, w, h);
-        let fill =
-            if on { theme.accent } else { Color::hex(0xffffff).alpha(if self.hovered(track) { 0.18 } else { 0.12 }) };
-        self.scene.quad(Quad::new(track, fill).radius(h / 2.0));
-        let knob = h - 4.0;
-        let kx = if on { track.right() - knob - 2.0 } else { track.x + 2.0 };
-        self.scene.quad(Quad::new(Rect::new(kx, track.y + 2.0, knob, knob), Color::hex(0xf4f6fa)).radius(knob / 2.0));
-        self.hit(track.inset(-6.0, -6.0), action);
-    }
-
-    fn button(&mut self, right: f32, y: f32, label: &str, action: Action) {
-        let theme = self.theme;
-        let size = 12.0;
-        let w = self.text.measure(label, UI, size) + 24.0;
-        let rect = Rect::new(right - w, y, w, CONTROL_HEIGHT);
-        let fill = if self.hovered(rect) { theme.raised.mix(Color::hex(0xffffff), 0.06) } else { theme.raised };
-        self.scene.quad(Quad::new(rect, fill).radius(7.0).border(1.0, theme.divider));
-        let baseline = (rect.y + (rect.h + self.text.ui_ascent(size) * 0.72) / 2.0).round();
-        self.text.draw_text(self.scene, label, rect.x + 12.0, baseline, UI, size, theme.text);
-        self.hit(rect, action);
     }
 }
+
+mod widgets;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every row showing: Custom shows every AI field.
-    fn sample() -> Values {
-        Values {
-            background: Some(0),
-            theme: "Temino".into(),
-            themes: 12,
-            palettes: Vec::new(),
-            palette: 0,
-            bindings: 0,
-            ligatures: true,
-            font: "JetBrains Mono".into(),
-            quick_terminal: Some(None),
-            opacity: 0,
-            blur: false,
-            shell: Some(0),
-            installed: [true, true, false],
-            fetch: 1,
-            fetches_installed: [true, false, true],
-            tabs_top: false,
-            extended: false,
-            notifications: true,
-            zoom: 100.0,
-            updates: true,
-            analytics: true,
-            see_through: true,
-            remote: None,
-            remote_account: String::new(),
-            remote_url: String::new(),
-            remote_phones: Vec::new(),
-            provider: PROVIDERS.len() - 1,
-            fields: Default::default(),
-            editing: None,
-        }
-    }
-
-    #[test]
-    fn every_control_can_be_clicked() {
-        let mut scene = Scene::new();
-        let mut text = TextSystem::new(14.0);
-        let theme = Theme::dark();
-        let values = sample();
-        let mut page = Page::default();
-        let rect = Rect::new(200.0, 0.0, 900.0, 2000.0);
-        scene.reset(1100.0, 2000.0, 1.0, theme.background);
-        page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
-        let actions: Vec<Action> = page.hits.iter().map(|&(_, a)| a).collect();
-        let mut expected = vec![Action::Theme(-1), Action::ThemeList, Action::Theme(1), Action::OpenThemes];
-        expected.extend((0..BACKGROUNDS.len()).map(Action::Background));
-        expected.extend((0..OPACITIES.len()).map(Action::Opacity));
-        expected.extend([
-            Action::Blur(true),
-            Action::Font(-1),
-            Action::Font(1),
-            Action::Font(1),
-            Action::Zoom(-1),
-            Action::Zoom(0),
-            Action::Zoom(1),
-            Action::Ligatures(false),
-        ]);
-        expected.extend((0..KINDS.len()).map(Action::Shell));
-        expected.extend((0..=FETCHES.len()).map(Action::Fetch));
-        expected.push(Action::FetchConfig);
-        expected.extend([Action::EditKeys, Action::QuickTerminal(true)]);
-        expected.extend([
-            Action::TabsTop(false),
-            Action::TabsTop(true),
-            Action::Extended(true),
-            Action::Notifications(false),
-        ]);
-        expected.extend((0..PROVIDERS.len()).map(Action::Provider));
-        expected.extend(Field::ALL.map(Action::Edit));
-        expected.extend([Action::Updates(false), Action::Analytics(false), Action::CheckForUpdates]);
-        assert_eq!(actions, expected);
-        // A click lands on what's under it, and nothing overlaps.
-        for (rect, action) in &page.hits {
-            let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-            assert_eq!(page.action_at(x, y), Some(*action));
-        }
-    }
-
-    #[test]
-    fn the_page_scrolls_only_as_far_as_it_goes() {
-        let mut page = Page { content_height: 900.0, view_height: 600.0, ..Page::default() };
-        page.wheel(100.0, 0.0, 0.0);
-        assert_eq!(page.scroll, 300.0);
-        page.wheel(-100.0, 0.0, 0.0);
-        assert_eq!(page.scroll, 0.0);
-    }
-
-    #[test]
-    fn drawing_clamps_a_scroll_the_content_no_longer_reaches() {
-        let mut scene = Scene::new();
-        let mut text = TextSystem::new(14.0);
-        let theme = Theme::dark();
-        let values = sample();
-        // Scrolled to the end of 900px of content in a 600px view, then
-        // the window grows past the whole content: nothing to scroll.
-        let mut page = Page { content_height: 900.0, view_height: 600.0, ..Page::default() };
-        page.scroll = 300.0;
-        let rect = Rect::new(0.0, 0.0, 900.0, 2000.0);
-        scene.reset(900.0, 2000.0, 1.0, theme.background);
-        page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
-        assert_eq!(page.scroll, 0.0);
-        // Content still taller than the view: the scroll is capped at
-        // the new end, not zeroed.
-        page.content_height = 900.0;
-        page.scroll = 500.0;
-        let rect = Rect::new(0.0, 0.0, 900.0, 600.0);
-        scene.reset(900.0, 600.0, 1.0, theme.background);
-        page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
-        assert_eq!(page.scroll, 300.0);
-    }
-
-    #[test]
-    fn keys_show_as_dots_and_nothing_else_does() {
-        let secret: Vec<_> = Field::ALL.iter().filter(|f| f.secret()).copied().collect();
-        assert_eq!(secret, [Field::LlmKey, Field::TypesafeKey]);
-        // Each field reads its own slot in `Values::fields`.
-        for (i, field) in Field::ALL.into_iter().enumerate() {
-            assert_eq!(field.index(), i);
-        }
-    }
-
-    #[test]
-    fn a_page_that_fits_never_scrolls() {
-        let mut page = Page { content_height: 400.0, view_height: 600.0, ..Page::default() };
-        page.wheel(5.0, 0.0, 0.0);
-        assert_eq!(page.scroll, 0.0);
-        page.wheel(-5.0, 0.0, 0.0);
-        assert_eq!(page.scroll, 0.0);
-    }
-
-    #[test]
-    fn the_wheel_scrolls_the_theme_list_only_while_over_it() {
-        let list = Rect::new(100.0, 100.0, 200.0, 300.0);
-        let mut page = Page { content_height: 2000.0, view_height: 600.0, list, ..Page::default() };
-        page.toggle_themes();
-        assert!(page.themes_open);
-        page.list_scroll = 0.0;
-        page.wheel(2.0, 150.0, 200.0);
-        assert_eq!((page.list_scroll, page.scroll), (2.0 * LIST_ROW, 0.0));
-        page.wheel(1.0, 50.0, 200.0);
-        assert_eq!((page.list_scroll, page.scroll), (2.0 * LIST_ROW, WHEEL_STEP));
-        // Closed, the list's old place scrolls the page.
-        page.toggle_themes();
-        assert!(!page.themes_open);
-        page.wheel(1.0, 150.0, 200.0);
-        assert_eq!(page.scroll, 2.0 * WHEEL_STEP);
-    }
-
-    #[test]
-    fn a_click_goes_to_what_was_drawn_last_under_it() {
-        let row = Rect::new(0.0, 0.0, 400.0, 60.0);
-        let list = Rect::new(100.0, 30.0, 200.0, 200.0);
-        let page = Page { hits: vec![(row, Action::Ligatures(true)), (list, Action::PickTheme(3))], ..Page::default() };
-        assert_eq!(page.action_at(10.0, 10.0), Some(Action::Ligatures(true)));
-        assert_eq!(page.action_at(150.0, 40.0), Some(Action::PickTheme(3)));
-        assert_eq!(page.action_at(150.0, 250.0), None);
-        // Rectangles take their top-left edge, not their bottom-right one.
-        assert_eq!(page.action_at(400.0, 10.0), None);
-    }
-}
+mod tests;
