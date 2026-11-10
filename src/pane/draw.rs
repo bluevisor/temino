@@ -380,19 +380,10 @@ impl Pane {
         if block.kind == BlockKind::Background {
             text.draw_text(scene, "Background output", x, baseline, UI, 12.0, theme.text_faint);
         } else {
-            if block.kind == BlockKind::Ai {
-                let label = if text.has_glyph('✦', UI_BOLD) { "✦ AI  " } else { "AI  " };
-                x += text.draw_text(scene, label, x, baseline, UI_BOLD, 12.0, theme.variable);
-            }
-            x += text.draw_text(scene, &ui::short_path(&block.cwd), x, baseline, UI, 12.0, theme.text_dim);
-            if let Some(branch) = &block.branch {
-                x += 10.0;
-                x += text.draw_text(scene, "⎇ ", x, baseline, UI, 12.0, theme.variable.alpha(0.9));
-                text.draw_text(scene, branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
-            }
-            // How long it took, then how it went. A command that went well
-            // says so quietly (a faint time, a green check); one still
-            // running or failed is in color all through.
+            // How long it took, then how it went — worked out first,
+            // because the left side has to stop short of it. A command
+            // that went well says so quietly (a faint time, a green
+            // check); one still running or failed is in color all through.
             let took = ui::format_duration(block.duration());
             let (lead, lead_ink, tail, tail_ink) = if block.running() {
                 let frame = (block.started.elapsed().as_millis() / 80) as usize % SPINNER.len();
@@ -406,8 +397,23 @@ impl Pane {
             };
             let gap = text.measure("  ", UI, 12.0);
             let tail_x = width - PAD_X - text.measure(&tail, UI, 12.0);
-            text.draw_text(scene, &tail, tail_x, baseline, UI, 12.0, tail_ink);
             let lead_x = tail_x - gap - text.measure(&lead, UI, 12.0);
+            // A deep path or a long branch name elides at this limit
+            // instead of running under the duration and exit text.
+            let limit = lead_x - gap;
+            if block.kind == BlockKind::Ai {
+                let label = if text.has_glyph('✦', UI_BOLD) { "✦ AI  " } else { "AI  " };
+                x += text.draw_text(scene, label, x, baseline, UI_BOLD, 12.0, theme.variable);
+            }
+            let path = text.elide(&ui::short_path(&block.cwd), UI, 12.0, (limit - x).max(0.0));
+            x += text.draw_text(scene, &path, x, baseline, UI, 12.0, theme.text_dim);
+            if let Some(branch) = &block.branch {
+                x += 10.0;
+                x += text.draw_text(scene, "⎇ ", x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+                let branch = text.elide(branch, UI, 12.0, (limit - x).max(0.0));
+                text.draw_text(scene, &branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+            }
+            text.draw_text(scene, &tail, tail_x, baseline, UI, 12.0, tail_ink);
             text.draw_text(scene, &lead, lead_x, baseline, UI, 12.0, lead_ink);
         }
 
