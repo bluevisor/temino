@@ -640,7 +640,10 @@ impl Pane {
                 }
                 if let Some(rest) = hint.as_deref() {
                     let (sl, sc) = editor.position(editor.text.len());
-                    if sl >= first_line {
+                    // The text loop above stops at the window's last line;
+                    // the suggestion is on the text's last line, which a
+                    // long paste with the caret moved up leaves below it.
+                    if sl >= first_line && sl < first_line + MAX_EDITOR_LINES {
                         let sy = editor_y + (sl - first_line) as f32 * cell.height;
                         text.draw_mono(
                             scene,
