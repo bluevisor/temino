@@ -28,6 +28,7 @@ use crate::Msg;
 
 mod block;
 mod links;
+mod prose;
 mod scan;
 pub use links::*;
 pub use scan::*;
@@ -120,6 +121,10 @@ pub struct Block {
     pub generation: u64,
     /// Images printed into the output, on the lines they cover.
     pub pictures: Vec<Placement>,
+    /// An AI answer's text as it came, broken between words to fit.
+    prose: Option<String>,
+    /// Who gave an AI answer: the provider and its model.
+    pub source: Option<String>,
 }
 
 /// An image in a block's output: from output line `line`, column
@@ -544,7 +549,7 @@ impl Session {
         let Some(block) = self.blocks.iter_mut().find(|b| b.id == id) else { return };
         // The model's text, not a program's: no escape sequences.
         let text: String = text.chars().filter(|&c| c == '\n' || c == '\t' || !c.is_control()).collect();
-        block.feed(text.replace('\n', "\r\n").as_bytes());
+        block.set_prose(text);
         block.finished = Some(Instant::now());
         block.exit = Some(if ok { 0 } else { 1 });
     }

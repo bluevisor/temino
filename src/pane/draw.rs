@@ -383,7 +383,14 @@ impl Pane {
             if let Some(branch) = &block.branch {
                 x += 10.0;
                 x += text.draw_text(scene, "⎇ ", x, baseline, UI, 12.0, theme.variable.alpha(0.9));
-                text.draw_text(scene, branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+                x += text.draw_text(scene, branch, x, baseline, UI, 12.0, theme.variable.alpha(0.9));
+            }
+            // Who answered, in what room the time at the far end leaves.
+            if let Some(source) = &block.source {
+                x += 12.0;
+                let room = (width - PAD_X - 110.0 - x).max(0.0);
+                let shown = text.elide(source, UI, 12.0, room);
+                text.draw_text(scene, &shown, x, baseline, UI, 12.0, theme.text_faint);
             }
             // How long it took, then how it went. A command that went well
             // says so quietly (a faint time, a green check); one still

@@ -474,6 +474,10 @@ impl Pane {
         let Some(reply) = reply.locked().take() else { return false };
         let id = *id;
         self.asking = None;
+        // Asked after the reply: the call is what finds a server's model.
+        if let Some(block) = self.session.blocks.iter_mut().find(|block| block.id == id) {
+            block.source = Some(llm::source());
+        }
         match reply {
             Ok(Reply::Command(command)) => {
                 let placed = self.editor.text.is_empty();
