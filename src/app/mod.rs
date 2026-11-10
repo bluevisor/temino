@@ -112,9 +112,12 @@ const TITLE_EVERY: Duration = Duration::from_secs(20);
 const TITLE_SYSTEM: &str = "You see what is going on in the panes of one terminal tab: their folders, \
 the coding agents and what they were asked, the commands run and the end of their output. Answer with \
 exactly two lines. Line 1: a title for the tab in 2 to 5 words, the way a person would label it \
-(for example: Temino tab colors, API deploy logs, Haiku VM build). Line 2: at most 16 words on what \
-is being done in this tab and where it stands, starting with a verb and naming no one (for example: \
-Fixing the login redirect bug; tests passing, PR not opened yet). Plain text, no labels, no quotes.";
+(for example: Temino tab colors, API deploy logs, Haiku VM build). Line 2: at most 18 words: the \
+project being worked on, then a colon, then what is being done in this tab and where it stands, naming \
+no person (for example: Temino: fixing the login redirect bug; tests passing, PR not opened yet). The \
+project is the repository or project folder's name, written the way a person would say it; leave it and \
+the colon out only when the work belongs to no project, as in a home folder. Plain text, no labels, no \
+quotes.";
 /// How much of each pane's history a tab's summary is written from, in
 /// all.
 const TITLE_CHARS: usize = 8000;

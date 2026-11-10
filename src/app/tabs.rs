@@ -306,7 +306,7 @@ impl App {
         parts.join("\n")
     }
     /// What the model writes a tab's title and summary from: the summary
-    /// before, then each pane's folder, agent and prompt, and its last few
+    /// before, the tab's folder, then each pane's folder, agent and prompt, and its last few
     /// commands with the end of their output.
     pub(super) fn summary_context(&mut self, index: usize, now: Instant) -> String {
         let mut leaves = Vec::new();
@@ -314,6 +314,12 @@ impl App {
         let mut parts = Vec::new();
         if let Some(before) = &self.tabs[index].ai_title.summary {
             parts.push(format!("Before, the summary was: {before}"));
+        }
+        // Said apart from the panes: a long history is cut from its start,
+        // which is where a pane says its folder.
+        let focus = self.tabs[index].focus;
+        if let Some(pane) = self.panes.iter().find(|pane| pane.id == focus) {
+            parts.push(format!("The tab's folder: {}", pane.session.cwd));
         }
         let panes: Vec<&mut Pane> = self.panes.iter_mut().filter(|p| leaves.contains(&p.id)).collect();
         let each = TITLE_CHARS / panes.len().max(1);
