@@ -1,6 +1,6 @@
 # Temino: ADHD-Friendly Terminal PRD
 
-2026-10-28 · John Zheng
+2026-10-28 · John Zheng · Analytics added 2026-11-10
 
 ## Summary
 
@@ -34,6 +34,46 @@ A terminal with many tabs and AI agents running in parallel is hard on ADHD atte
 2. **Interrupt by severity.** *Needs input* may interrupt; *done* is visible but silent; *working* is ambient.
 3. **Every feature is optional** and has a setting in the ⌘, Settings tab.
 4. **Glanceable over readable.** Prefer a color, icon or one dim line to a panel the user has to read.
+
+## P0 enabler: Anonymous usage analytics
+
+Temino has no idea whether anyone uses it, or which of its features earn their place. This adds the smallest honest answer: with the user's permission, Temino counts how its features get used and sends the counts once a day, so reach and adoption are measured instead of guessed — without watching anyone work.
+
+**Consent first.** The first launch of a build with analytics shows a card ("Help improve Temino") asking permission. Nothing is counted and nothing is sent before the user answers yes — there is no backfill of pre-consent usage. "No thanks" saves the no; closing the card without answering asks again next launch. Settings ▸ Share anonymous usage data shows the answer and changes it any time: turning it on starts counting from that moment; turning it off stops counting and sending, and clears pending counts and the install id.
+
+**What a yes sends** (one ping a day, accumulated locally between sends; counters reset only after a send the relay accepts):
+
+- Environment: a random install id (made only after the yes), the Temino version, the OS, the CPU architecture, the default shell kind (`bash` / `zsh` / `fish`, omitted when unknown), and the GPU backend (`vulkan` / `metal`).
+- Counters, accumulated since the last accepted ping:
+
+| Counter | What it counts | Why |
+| --- | --- | --- |
+| `launches` | App launches | Is anyone opening it at all |
+| `active_minutes` | Whole minutes the window was in use | Depth of use, not just opens |
+| `commands_completed` | Shell commands that ran to their end (OSC 133 done) | The core terminal workload |
+| `blocks_created` | Command blocks started | Commands begun vs finished |
+| `tabs_opened` | New tabs opened | How people organize work across tabs |
+| `panes_opened` | New panes (splits) | How people organize work within a tab |
+| `ai_queries` | Ask/Jev and AI-mode submissions | AI adoption |
+| `remote_sessions` | Phone remote-control connections established | Remote-control adoption |
+| `viewer_opens` | Built-in viewer (web/image) opens | Whether the viewer earns its place |
+| `find_uses` | In-terminal search invocations | Whether search gets used |
+| `update_installs` | Successful self-updates | Update funnel health |
+| `settings_changes` | Settings actions taken (count only) | Whether people tune Temino |
+| `crashes` | Fatal crashes (where crash.log is written) | Stability |
+| `update_failures` | Failed self-update installs | Update funnel health |
+
+**Privacy contract (hard invariants)**
+
+- A fixed allowlist of counter names in code; the client API takes an enum key, so free text is impossible — no call site can invent a field.
+- Numeric counts and coarse buckets only. Never commands, terminal content, file paths or file names. No timestamps finer than a day.
+- The install id is random and made only after the yes; the server stores only its HMAC-SHA256 hash (keyed with the relay secret), and per-day records expire after 40 days.
+- No account linkage: a ping never carries, and is never joined to, a relay sign-in.
+- The relay validates strictly — unknown counters, extra fields and out-of-range values are rejected whole — and keeps one aggregate of counter totals per day across installs.
+
+**Non-goals:** no event firehose, no per-user timelines, no third-party analytics SDK, and no feature-usage hooks for features that don't exist yet (the attention states below get counters when they land, as their own change).
+
+Reading the numbers: `GET /analytics/summary` on the relay, with the relay secret as a Bearer token, returns per-day active installs for the last 30 days, per-day counter totals, and for today the OS and version splits, averages per active install, AI and remote-control adoption, and how many of today's installs are returning.
 
 ## P0: Agent attention states
 
@@ -110,7 +150,16 @@ These follow the P0s. Most reuse the same signals: OSC 133 marks, agent status a
 
 ## Success metrics, rollout, open questions
 
-**Success metrics** (self-reported, since Temino has no telemetry)
+**Success metrics**
+
+Reach and adoption come from the analytics ping (above), for installs that said yes:
+
+- Daily and weekly active installs, and how many are returning.
+- Version adoption after a release, and the platform split (OS, shell kind, GPU).
+- Commands finished per active install per day; tabs and panes per launch.
+- AI-mode adoption: the share of active installs with `ai_queries` > 0. Remote-control adoption, the same way.
+
+The attention metrics stay self-reported until the P0 features land (they get counters of their own then):
 
 - Agents rarely sit in *needs input* unnoticed for over a minute.
 - Fewer manual tab sweeps to check on agents.
@@ -118,10 +167,11 @@ These follow the P0s. Most reuse the same signals: OSC 133 marks, agent status a
 
 **Rollout**
 
-1. Agent attention states: one PR, macOS first, then Haiku without notifications.
-2. Tab recap: one PR; needs an idle timer and last-command record per pane.
-3. Focus mode: one PR; reuses layout save/restore.
-4. P1 backlog items as small separate PRs.
+1. Anonymous usage analytics: one PR (consent card, counters, relay endpoint, this section) — it measures everything after it.
+2. Agent attention states: one PR, macOS first, then Haiku without notifications.
+3. Tab recap: one PR; needs an idle timer and last-command record per pane.
+4. Focus mode: one PR; reuses layout save/restore.
+5. P1 backlog items as small separate PRs.
 
 **Open questions**
 
