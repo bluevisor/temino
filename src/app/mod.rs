@@ -585,6 +585,7 @@ impl App {
         }
         if app.primary {
             crate::update::check(app.ctx.sender.clone(), false);
+            crate::analytics::ping();
         }
         crate::trace("app: shell started");
         Ok(app)

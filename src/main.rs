@@ -6,6 +6,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod agent;
+mod analytics;
 mod app;
 mod ask;
 #[cfg(not(target_os = "haiku"))]
