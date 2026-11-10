@@ -397,7 +397,7 @@ impl App {
             Some(Named::Escape) => self.field = None,
             Some(Named::Backspace | Named::Delete) if *selected => text.clear(),
             Some(Named::Backspace) => {
-                text.pop();
+                crate::editor::pop_grapheme(text);
             }
             Some(_) => {}
             None if !key.ctrl() => {

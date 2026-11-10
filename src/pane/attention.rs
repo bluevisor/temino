@@ -347,7 +347,7 @@ impl Pane {
                     self.typed.clear();
                 }
                 '\u{7f}' | '\u{8}' => {
-                    self.typed.pop();
+                    crate::editor::pop_grapheme(&mut self.typed);
                 }
                 // Control+C or Control+U: the line is gone.
                 '\u{3}' | '\u{15}' => self.typed.clear(),

@@ -59,6 +59,17 @@ fn prev_boundary_char(text: &str, at: usize) -> usize {
     text[..at].char_indices().next_back().map_or(0, |(i, _)| i)
 }
 
+/// Removes the last whole character — an emoji sequence, a flag, an
+/// accented letter — from the end of `text`. The small one-line inputs
+/// outside the editor (find, tab rename, Settings fields, the agent
+/// typing tracker) delete with this, so their Backspace never leaves
+/// half a character behind the way `String::pop` would.
+pub fn pop_grapheme(text: &mut String) {
+    if !text.is_empty() {
+        text.truncate(prev_boundary(text, text.len()));
+    }
+}
+
 /// The end of the character the caret is before (see `prev_boundary`).
 fn next_boundary(text: &str, at: usize) -> usize {
     let mut chars = text[at..].chars();
@@ -487,6 +498,25 @@ pub fn columns(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pop_grapheme_takes_whole_characters() {
+        let mut text = String::from("a👨\u{200d}👩\u{200d}👧");
+        pop_grapheme(&mut text);
+        assert_eq!(text, "a", "a ZWJ sequence goes at once");
+        let mut text = String::from("x🇺🇸");
+        pop_grapheme(&mut text);
+        assert_eq!(text, "x", "a flag is a pair, taken together");
+        let mut text = String::from("e\u{301}");
+        pop_grapheme(&mut text);
+        assert_eq!(text, "", "a combining mark goes with its letter");
+        let mut text = String::from("ab");
+        pop_grapheme(&mut text);
+        assert_eq!(text, "a");
+        let mut text = String::new();
+        pop_grapheme(&mut text);
+        assert_eq!(text, "");
+    }
 
     #[test]
     fn double_click_selects_the_word_or_run_under_the_caret() {

@@ -189,7 +189,7 @@ impl App {
             Some(Named::Escape) => self.renaming = None,
             Some(Named::Backspace | Named::Delete) if rename.selected => rename.name.clear(),
             Some(Named::Backspace) => {
-                rename.name.pop();
+                crate::editor::pop_grapheme(&mut rename.name);
             }
             Some(_) => {}
             None if !key.ctrl() => {

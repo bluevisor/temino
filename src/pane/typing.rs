@@ -151,7 +151,7 @@ impl Pane {
                 find.selected = false;
             }
             Some(Named::Backspace) => {
-                find.query.pop();
+                crate::editor::pop_grapheme(&mut find.query);
             }
             Some(Named::PageUp | Named::PageDown) => return false,
             Some(_) => {}
