@@ -11,6 +11,12 @@
 //   GET  /auth/dev         local `wrangler dev` only (DEV_LOGIN=1)
 //   GET  /connect          WebSocket, ?token=… : the account's hub
 //   GET  /app              the web client (public/)
+//   POST /analytics        anonymous usage data per install (with its
+//                          permission): a random id (hashed before
+//                          storage), version, OS, arch, shell kind, GPU,
+//                          and feature-use counters from a fixed list
+//   GET  /analytics/summary the last 30 days of pings; needs the relay
+//                          secret as a Bearer token
 //
 // A sign-in ends with a device token, sent back to the device's own
 // loopback port, its app's URL scheme, or this origin's /app: nowhere
@@ -18,6 +24,7 @@
 
 import { Hub } from "./hub.js";
 import { verifyIdToken, appleClientSecret } from "./jwt.js";
+import { RETENTION_DAYS, dayKey, hashId, summarize, validPing } from "./analytics.js";
 export { Hub };
 
 const enc = new TextEncoder();
@@ -248,6 +255,74 @@ async function connect(request, env, url) {
   return hub(env, token.a).fetch(new Request("https://hub/connect", { headers }));
 }
 
+// One ping a day per install, stored under the day and the hashed id —
+// so one install counts once a day however often it pings, and the raw
+// id is never stored. Its counters also add into the day's aggregate.
+// Entries expire after RETENTION_DAYS.
+async function analytics(request, env) {
+  const body = await request.text();
+  if (body.length > 4096) return new Response("too large", { status: 400 });
+  let value;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return new Response("bad json", { status: 400 });
+  }
+  const ping = validPing(value);
+  if (!ping) return new Response("bad ping", { status: 400 });
+  const day = dayKey(new Date());
+  const ttl = { expirationTtl: RETENTION_DAYS * 24 * 60 * 60 };
+  const key = `analytics:${day}:${await hashId(env.RELAY_SECRET, ping.id)}`;
+  const stored = JSON.stringify({ version: ping.version, os: ping.os, arch: ping.arch, shell: ping.shell, gpu: ping.gpu, counters: ping.counters });
+  await env.ACCOUNTS.put(key, stored, ttl);
+  // The day's totals across installs (a read-modify-write; at this
+  // scale a lost race just undercounts a ping).
+  const aggKey = `analytics:agg:${day}`;
+  let totals = {};
+  try {
+    totals = JSON.parse(await env.ACCOUNTS.get(aggKey)) || {};
+  } catch {}
+  for (const [name, n] of Object.entries(ping.counters)) totals[name] = (totals[name] || 0) + n;
+  await env.ACCOUNTS.put(aggKey, JSON.stringify(totals), ttl);
+  return new Response(null, { status: 204 });
+}
+
+// The last 30 days of pings, for the one person with the relay secret.
+async function analyticsSummary(request, env) {
+  if (request.headers.get("authorization") !== `Bearer ${env.RELAY_SECRET}`) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  const today = dayKey(new Date());
+  const records = [];
+  const aggregates = {};
+  let cursor;
+  do {
+    const page = await env.ACCOUNTS.list({ prefix: "analytics:", cursor, limit: 1000 });
+    for (const key of page.keys) {
+      const [, day, hash] = key.name.split(":");
+      if (day === "agg") {
+        try {
+          aggregates[hash] = JSON.parse(await env.ACCOUNTS.get(key.name)) || {};
+        } catch {}
+        continue;
+      }
+      const record = { day, hash, os: null, version: null, counters: {} };
+      if (day === today) {
+        try {
+          const value = JSON.parse(await env.ACCOUNTS.get(key.name));
+          record.os = value.os;
+          record.version = value.version;
+          record.counters = value.counters || {};
+        } catch {}
+      }
+      records.push(record);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  const body = JSON.stringify(summarize(records, aggregates, today), null, 2);
+  return new Response(body, { headers: { "content-type": "application/json" } });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -261,6 +336,8 @@ export default {
       case "GET /auth/dev": return dev(env, url);
       case "GET /connect": return connect(request, env, url);
       case "GET /vapid": return new Response(env.VAPID_PUBLIC || "", { headers: { "content-type": "text/plain" } });
+      case "POST /analytics": return analytics(request, env);
+      case "GET /analytics/summary": return analyticsSummary(request, env);
     }
     return env.ASSETS.fetch(request);
   },

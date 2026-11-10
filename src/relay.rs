@@ -178,8 +178,14 @@ pub fn disconnect(device: &str) {
 fn set_connected(now: Vec<(String, String)>) {
     let mut connected = CONNECTED.locked();
     if *connected != now {
+        // Phones that weren't there before are new remote sessions
+        // (a count only — never which phone).
+        let added = now.iter().filter(|device| !connected.contains(device)).count();
         *connected = now;
         drop(connected);
+        for _ in 0..added {
+            crate::analytics::bump(crate::analytics::Counter::RemoteSessions);
+        }
         remote::ask(Command::Refresh);
     }
 }

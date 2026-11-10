@@ -24,6 +24,7 @@ impl App {
         self.next_id += 1;
         platform::viewer_open(id, kind, &target, style);
         self.viewers.push(Viewer::new(id, kind, target));
+        crate::analytics::bump(crate::analytics::Counter::ViewerOpens);
         let tab = &mut self.tabs[self.active];
         tab.root.split(from, id, Axis::Row, false);
         tab.zoomed = false;
@@ -42,6 +43,7 @@ impl App {
         self.next_id += 1;
         platform::viewer_open(id, viewer::Kind::Web, viewer::BLANK, style);
         self.viewers.push(Viewer::new(id, viewer::Kind::Web, viewer::BLANK.to_owned()));
+        crate::analytics::bump(crate::analytics::Counter::ViewerOpens);
         match from {
             Some(from) if !new_tab => {
                 let tab = &mut self.tabs[self.active];

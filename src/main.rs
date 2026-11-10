@@ -6,6 +6,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod agent;
+mod analytics;
 mod app;
 mod ask;
 #[cfg(not(target_os = "haiku"))]
@@ -123,6 +124,8 @@ pub fn write_private(path: &str, contents: impl AsRef<[u8]>) {
 pub fn fatal(message: &str) {
     eprintln!("temino: {message}");
     create_private_dir(&settings_dir());
+    // A crash, counted (a count only, and only with analytics consent).
+    analytics::bump(analytics::Counter::Crashes);
     store::log(message);
     // crash.log keeps the latest crash on its own, for a bug report.
     let line = format!("{} {} {message}\n", store::timestamp_now(), env!("CARGO_PKG_VERSION"));

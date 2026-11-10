@@ -263,6 +263,22 @@ enum UpdateAction {
     Notes,
 }
 
+/// The analytics permission ask, and its card. It stands until the
+/// user answers; closing the card without answering asks again on the
+/// next launch (the answer is what's saved, not the card).
+struct ConsentOffer {
+    /// The card is showing; the pill alone leaves it closed.
+    open: bool,
+}
+
+/// What a click on the consent pill or card does.
+#[derive(Clone, Copy)]
+enum ConsentAction {
+    Toggle,
+    Share,
+    NoThanks,
+}
+
 /// A tab being renamed in place.
 struct Rename {
     tab: usize,
@@ -415,6 +431,13 @@ pub struct App {
     /// Per frame: the update pill and card's hit areas, and the card.
     update_hits: Vec<(Rect, UpdateAction)>,
     update_card: Rect,
+    /// The analytics permission ask, until it's answered.
+    consent: Option<ConsentOffer>,
+    /// Per frame: the consent pill and card's hit areas, and the card.
+    consent_hits: Vec<(Rect, ConsentAction)>,
+    consent_card: Rect,
+    /// When the current foreground minute began (analytics' gauge).
+    active_at: Instant,
     /// Phones asking to control this machine (device, name, code), and
     /// where their Allow and Deny buttons are.
     asks: Vec<(String, String, String)>,
@@ -553,6 +576,10 @@ impl App {
             update: None,
             update_hits: Vec::new(),
             update_card: Rect::default(),
+            consent: None,
+            consent_hits: Vec::new(),
+            consent_card: Rect::default(),
+            active_at: Instant::now(),
             asks: Vec::new(),
             ask_hits: Vec::new(),
             toast_shown: None,
@@ -586,6 +613,12 @@ impl App {
         }
         if app.primary {
             crate::update::check(app.ctx.sender.clone(), false);
+            crate::analytics::ping();
+            // Unanswered, the permission card comes up; an answer (the
+            // Settings switch included) is the only thing that ends it.
+            if crate::analytics::consent() == crate::analytics::Consent::Undecided {
+                app.consent = Some(ConsentOffer { open: true });
+            }
         }
         crate::trace("app: shell started");
         Ok(app)
@@ -617,7 +650,11 @@ impl App {
     }
 
     fn make_pane(&mut self) -> Result<u64, String> {
-        self.make_pane_in(None)
+        // The split / new-pane path (tabs and restores go through
+        // make_pane_in directly and aren't counted here).
+        let id = self.make_pane_in(None)?;
+        crate::analytics::bump(crate::analytics::Counter::PanesOpened);
+        Ok(id)
     }
 
     fn new_tab(&mut self) -> Result<(), String> {
@@ -645,6 +682,7 @@ impl App {
             marked_at: None,
             ai_title: AiTitle::default(),
         });
+        crate::analytics::bump(crate::analytics::Counter::TabsOpened);
         self.switch_tab(self.tabs.len() - 1);
         self.save_tabs();
         Ok(())
@@ -718,6 +756,12 @@ impl App {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        // A whole minute of the window in use (analytics' gauge; the
+        // primary window only, and bump itself checks consent).
+        if self.primary && now.duration_since(self.active_at) >= Duration::from_secs(60) {
+            self.active_at = now;
+            crate::analytics::bump(crate::analytics::Counter::ActiveMinutes);
+        }
         for pane in &mut self.panes {
             if pane.tick(now) {
                 self.dirty = true;

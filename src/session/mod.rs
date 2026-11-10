@@ -523,6 +523,7 @@ impl Session {
         } else {
             self.flush_idle_output();
             self.new_block(BlockKind::Command, command.to_owned());
+            crate::analytics::bump(crate::analytics::Counter::BlocksCreated);
         }
         self.phase = Phase::Submitted;
         self.continuation_since = None;
@@ -590,6 +591,7 @@ impl Session {
                         // its echo is the best name we have.
                         let command = last_visible_line(&echo);
                         self.new_block(BlockKind::Command, command);
+                        crate::analytics::bump(crate::analytics::Counter::BlocksCreated);
                     }
                     if let Some(block) =
                         self.blocks.iter_mut().rev().find(|b| b.kind == BlockKind::Command && b.running())
@@ -719,6 +721,7 @@ impl Session {
         let Some(index) = self.blocks.iter().rposition(|b| b.kind == BlockKind::Command && b.running()) else {
             return;
         };
+        crate::analytics::bump(crate::analytics::Counter::CommandsCompleted);
         let block = &mut self.blocks[index];
         block.finished = Some(now);
         block.exit = code;
