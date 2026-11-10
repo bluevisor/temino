@@ -151,6 +151,13 @@ impl Parser<'_> {
                 while self.bytes.get(self.at).is_some_and(|b| b"+-.eE0123456789".contains(b)) {
                     self.at += 1;
                 }
+                // Rust's float parser also takes what JSON forbids (`+1`,
+                // `01`, `1.`, `.5`): hold the token to JSON's grammar, so
+                // a record with a broken number is refused whole, as the
+                // other malformed inputs are.
+                if !json_number(&self.bytes[start..self.at]) {
+                    return None;
+                }
                 std::str::from_utf8(&self.bytes[start..self.at]).ok()?.parse().ok().map(Value::Number)
             }
         }
@@ -210,6 +217,44 @@ impl Parser<'_> {
         self.at += 4;
         u32::from_str_radix(digits, 16).ok()
     }
+}
+
+/// JSON's number grammar: `-?(0 | [1-9] digits) (. digits)? ([eE] [+-]? digits)?`.
+fn json_number(bytes: &[u8]) -> bool {
+    let digits = |at: &mut usize| {
+        let start = *at;
+        while bytes.get(*at).is_some_and(|b| b.is_ascii_digit()) {
+            *at += 1;
+        }
+        *at > start
+    };
+    let mut at = 0;
+    if bytes.get(at) == Some(&b'-') {
+        at += 1;
+    }
+    match bytes.get(at) {
+        Some(b'0') => at += 1,
+        Some(b'1'..=b'9') => {
+            digits(&mut at);
+        }
+        _ => return false,
+    }
+    if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        if !digits(&mut at) {
+            return false;
+        }
+    }
+    if matches!(bytes.get(at), Some(b'e' | b'E')) {
+        at += 1;
+        if matches!(bytes.get(at), Some(b'+' | b'-')) {
+            at += 1;
+        }
+        if !digits(&mut at) {
+            return false;
+        }
+    }
+    at == bytes.len()
 }
 
 #[cfg(test)]
@@ -294,7 +339,13 @@ mod tests {
         assert_eq!(num("1e+2"), Some(100.0));
         assert_eq!(num(" 7 "), Some(7.0));
         assert_eq!(num("12345678901234567890"), Some(1.2345678901234567e19));
-        for bad in ["-", "1e", "1.2.3", "--1", "1-", "e5", ".", "0x10", "NaN", "Infinity", "1 2"] {
+        assert_eq!(num("0.5"), Some(0.5));
+        assert_eq!(num("-0"), Some(-0.0));
+        assert_eq!(num("0e0"), Some(0.0));
+        for bad in [
+            "-", "1e", "1.2.3", "--1", "1-", "e5", ".", "0x10", "NaN", "Infinity", "1 2", "+1", "01", "007", "1.",
+            ".5", "-.5", "1.e5", "00",
+        ] {
             assert_eq!(parse(bad), None, "{bad}");
         }
     }
