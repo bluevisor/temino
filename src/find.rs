@@ -147,17 +147,31 @@ fn search_block(block: &Block, needle: &[char], fold: bool) -> Vec<Match> {
 }
 
 /// Where `needle` occurs in `row`, as [start, end) indices into it, not
-/// overlapping.
+/// overlapping. Folding compares whole lowercases: a character whose
+/// lowercase is longer than one character (İ folds to `i` + a combining
+/// dot) still matches the needle spelling that lowercase out, and a
+/// needle that would match only half of such a character doesn't match.
 fn find_in(row: &[(char, usize)], needle: &[char], fold: bool) -> Vec<(usize, usize)> {
-    let same = |a: char, b: char| if fold { a.to_lowercase().eq(b.to_lowercase()) } else { a == b };
+    // The row and the needle, folded, each folded character tagged with
+    // the index of the row character it came from.
+    let mut hay: Vec<(char, usize)> = Vec::with_capacity(row.len());
+    for (index, &(c, _)) in row.iter().enumerate() {
+        if fold {
+            hay.extend(c.to_lowercase().map(|lower| (lower, index)));
+        } else {
+            hay.push((c, index));
+        }
+    }
+    let needle: Vec<char> = if fold { needle.iter().flat_map(|c| c.to_lowercase()).collect() } else { needle.to_vec() };
     let mut found = Vec::new();
-    if needle.is_empty() || row.len() < needle.len() {
+    if needle.is_empty() || hay.len() < needle.len() {
         return found;
     }
+    let boundary = |at: usize| at == 0 || at == hay.len() || hay[at].1 != hay[at - 1].1;
     let mut i = 0;
-    while i + needle.len() <= row.len() {
-        if needle.iter().enumerate().all(|(k, &c)| same(row[i + k].0, c)) {
-            found.push((i, i + needle.len()));
+    while i + needle.len() <= hay.len() {
+        if boundary(i) && boundary(i + needle.len()) && needle.iter().enumerate().all(|(k, &c)| hay[i + k].0 == c) {
+            found.push((hay[i].1, hay[i + needle.len() - 1].1 + 1));
             i += needle.len();
         } else {
             i += 1;
@@ -329,6 +343,21 @@ mod tests {
         assert_eq!(find.marks(id, 0, 1), [(0, 0, 1, false)]);
         assert_eq!(find.marks(id, 3, 9), []);
         assert_eq!(find.marks(id + 100, 0, 9), []);
+    }
+
+    #[test]
+    fn folding_matches_a_character_by_its_whole_lowercase() {
+        // İ (U+0130) folds to two characters, `i` and a combining dot:
+        // a needle spelling that lowercase matches the whole character.
+        let dotted: Vec<char> = "i\u{307}".chars().collect();
+        assert_eq!(find_in(&row("İstanbul"), &dotted, true), vec![(0, 1)]);
+        assert_eq!(find_in(&row("İstanbul"), &dotted, false), vec![]);
+        // And the other way: the needle holds İ, the row its lowercase.
+        let capital: Vec<char> = "İ".chars().collect();
+        assert_eq!(find_in(&row("i\u{307}stanbul"), &capital, true), vec![(0, 2)]);
+        // Half of a folded character is not a match.
+        let dot: Vec<char> = "\u{307}".chars().collect();
+        assert_eq!(find_in(&row("İ"), &dot, true), vec![]);
     }
 
     #[test]
