@@ -57,7 +57,8 @@ pub struct Values {
     /// As a percentage of the default size.
     pub zoom: f32,
     pub updates: bool,
-    /// The daily anonymous usage ping is on (Settings ▸ Share anonymous usage).
+    /// Anonymous usage data is shared, with the user's yes (Settings ▸
+    /// Share anonymous usage data; the permission card's answer too).
     pub analytics: bool,
     /// The window can be see-through (macOS).
     pub see_through: bool,
@@ -410,8 +411,8 @@ impl Ui<'_> {
             }),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::Analytics => (
-                "Share anonymous usage",
-                "One daily ping: version and system only — never commands or content".to_owned(),
+                "Share anonymous usage data",
+                "Helps us improve Temino — never private information, or anything you type in the terminal".to_owned(),
             ),
             Row::CheckForUpdates => ("Check now", "Offers a newer version if there is one".to_owned()),
             Row::Remote => (

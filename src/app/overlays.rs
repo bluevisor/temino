@@ -389,6 +389,121 @@ impl App {
         scene.set_layer(LAYER_CONTENT);
         *update_card = card;
     }
+    /// The analytics permission ask: a pill at the foot of the sidebar,
+    /// and above it the card, drawn the way the update card is. It
+    /// stands until the user answers (Share or No thanks); closing it
+    /// without answering brings it back on the next launch.
+    pub(super) fn draw_consent(&mut self) {
+        self.consent_hits.clear();
+        self.consent_card = Rect::default();
+        let Some(offer) = &self.consent else { return };
+        let sidebar = self.tab_list_visible() && self.strip == TabStrip::Left;
+        let area = self.tab_area();
+        let (mx, my) = self.mouse;
+        let height = self.height;
+        let Self { scene, ctx, consent_hits, consent_card, compact, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        let ascent = text.ui_ascent(12.0);
+        let centered = |rect: Rect, size: f32| (rect.y + (rect.h + ascent * size / 12.0 * 0.72) / 2.0).round();
+        let blue = theme.accent.mix(Color::hex(0x0a4fd6), 0.65);
+        let blue_hover = |rect: Rect| if rect.contains(mx, my) { blue.mix(Color::hex(0xffffff), 0.12) } else { blue };
+
+        // The pill, where the update pill sits (the consent ask wins the
+        // spot while it's unanswered).
+        let pill = if !sidebar {
+            None
+        } else if *compact {
+            Some(Rect::new((area.w - 1.0 - 28.0) / 2.0, area.bottom() - 94.0, 28.0, 26.0))
+        } else {
+            let label = "Help Improve Temino…";
+            let w = (text.measure(label, UI_BOLD, 12.0) + 38.0).min(area.w - 48.0 - 34.0);
+            Some(Rect::new(40.0, area.bottom() - 34.0, w, 26.0))
+        };
+        if let Some(pill) = pill {
+            scene.quad(Quad::new(pill, blue_hover(pill)).radius(pill.h / 2.0));
+            let baseline = centered(pill, 12.0);
+            if *compact {
+                let w = text.measure("?", UI_BOLD, 13.0);
+                text.draw_text(scene, "?", pill.x + (pill.w - w) / 2.0, baseline, UI_BOLD, 13.0, Color::hex(0xffffff));
+            } else {
+                scene.push_clip(pill.inset(10.0, 0.0));
+                text.draw_text(
+                    scene,
+                    "Help Improve Temino…",
+                    pill.x + 14.0,
+                    baseline,
+                    UI_BOLD,
+                    12.0,
+                    Color::hex(0xffffff),
+                );
+                scene.pop_clip();
+            }
+            consent_hits.push((pill, ConsentAction::Toggle));
+        }
+        if !offer.open {
+            return;
+        }
+
+        const W: f32 = 290.0;
+        const PAD: f32 = 14.0;
+        const BUTTON: f32 = 24.0;
+        // Title, four lines of body, then the buttons.
+        let h = 40.0 + 4.0 * 17.0 + 12.0 + BUTTON + 14.0;
+        let (x, bottom) = match pill {
+            Some(pill) if *compact => (pill.right() + 10.0, pill.bottom() + 8.0),
+            Some(pill) => (8.0, pill.y - 9.0),
+            None => (12.0, height - 12.0),
+        };
+        let card = Rect::new(x, bottom - h, W, h);
+        scene.set_layer(LAYER_OVERLAY);
+        scene.shadow(card, theme.shadow(0.55), 10.0, 14.0);
+        scene.quad(Quad::new(card, theme.raised).radius(10.0).border(1.0, theme.divider));
+        if let Some(pill) = pill.filter(|_| !*compact) {
+            let cx = pill.x + pill.w / 2.0;
+            for i in 0..7 {
+                let half = 7.0 - i as f32;
+                scene.fill(Rect::new(cx - half, card.bottom() - 1.0 + i as f32, half * 2.0, 1.0), theme.raised);
+            }
+        }
+
+        text.draw_text(scene, "Help improve Temino", card.x + PAD, card.y + 26.0, UI_BOLD, 13.0, theme.text);
+        let body = [
+            "Share anonymous usage data to help us",
+            "improve our product. We never collect",
+            "any private information, or anything",
+            "you type in the terminal.",
+        ];
+        let mut y = card.y + 40.0;
+        for line in body {
+            text.draw_text(scene, line, card.x + PAD, y + 13.0, UI, 11.5, theme.text_dim);
+            y += 17.0;
+        }
+
+        // No thanks on the left, Share on the right.
+        y += 12.0;
+        let mut button = |scene: &mut Scene, x: f32, label: &str, action: ConsentAction| -> f32 {
+            let w = text.measure(label, UI, 11.5) + 22.0;
+            let rect = Rect::new(x, y, w, BUTTON);
+            let fill = if rect.contains(mx, my) {
+                theme.raised.mix(Color::hex(0xffffff), 0.1)
+            } else {
+                theme.raised.mix(Color::hex(0xffffff), 0.05)
+            };
+            scene.quad(Quad::new(rect, fill).radius(6.0).border(1.0, theme.divider));
+            text.draw_text(scene, label, rect.x + 11.0, centered(rect, 11.5), UI, 11.5, theme.text);
+            consent_hits.push((rect, action));
+            w
+        };
+        button(scene, card.x + PAD, "No thanks", ConsentAction::NoThanks);
+        let label = "Share";
+        let w = text.measure(label, UI_BOLD, 11.5) + 24.0;
+        let share = Rect::new(card.right() - PAD - w, y, w, BUTTON);
+        scene.quad(Quad::new(share, blue_hover(share)).radius(6.0));
+        text.draw_text(scene, label, share.x + 12.0, centered(share, 11.5), UI_BOLD, 11.5, Color::hex(0xffffff));
+        consent_hits.push((share, ConsentAction::Share));
+        scene.set_layer(LAYER_CONTENT);
+        *consent_card = card;
+    }
     /// A card at the top for each phone asking to control this machine:
     /// its name, the code to compare with what it shows, Deny and Allow.
     pub(super) fn draw_asks(&mut self) {

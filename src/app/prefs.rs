@@ -244,7 +244,7 @@ impl App {
             extended: self.extended,
             zoom: self.zoom_percent(),
             updates: crate::setting("updates").as_deref() != Some("off"),
-            analytics: crate::setting("analytics").as_deref() != Some("off"),
+            analytics: crate::analytics::enabled(),
             see_through: cfg!(target_os = "macos"),
             provider: crate::llm::PROVIDERS.iter().position(|&p| p == crate::llm::chosen()).unwrap_or(0),
             fields: Field::ALL.map(|field| crate::setting(&field.key()).unwrap_or_default()),
@@ -269,6 +269,12 @@ impl App {
     }
     pub(super) fn settings_action(&mut self, action: Action) {
         self.dirty = true;
+        // A settings change, counted as one — never which setting or
+        // what it became. Opening the theme list, starting to type in
+        // a field and checking for updates aren't changes.
+        if !matches!(action, Action::Edit(_) | Action::ThemeList | Action::CheckForUpdates) {
+            crate::analytics::bump(crate::analytics::Counter::SettingsChanges);
+        }
         match action {
             Action::Background(index) => self.set_background(index),
             Action::Theme(step) => self.step_theme(step),
@@ -329,7 +335,7 @@ impl App {
             Action::Zoom(0) => self.change_font_size(DEFAULT_FONT_SIZE),
             Action::Zoom(step) => self.step_font_size(step as f32),
             Action::Updates(on) => crate::save_setting("updates", if on { "on" } else { "off" }),
-            Action::Analytics(on) => crate::save_setting("analytics", if on { "on" } else { "off" }),
+            Action::Analytics(on) => crate::analytics::set_enabled(on),
             Action::CheckForUpdates => {
                 self.check_for_updates();
             }
@@ -428,6 +434,25 @@ impl App {
         }
         self.ctx.show_toast("Checking for updates…");
         update::check(self.ctx.sender.clone(), true);
+    }
+    pub(super) fn consent_action(&mut self, action: ConsentAction) {
+        match action {
+            ConsentAction::Toggle => {
+                if let Some(offer) = &mut self.consent {
+                    offer.open = !offer.open;
+                }
+            }
+            ConsentAction::Share => {
+                crate::analytics::grant();
+                self.consent = None;
+                self.ctx.show_toast("Thanks — anonymous usage data is shared; change it any time in Settings");
+            }
+            ConsentAction::NoThanks => {
+                crate::analytics::deny();
+                self.consent = None;
+            }
+        }
+        self.dirty = true;
     }
     pub(super) fn update_action(&mut self, action: UpdateAction) {
         let Some(offer) = &mut self.update else { return };

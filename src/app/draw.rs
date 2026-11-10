@@ -52,6 +52,7 @@ impl App {
         self.draw_tab_bar(&agents);
         self.draw_titlebar();
         self.draw_update();
+        self.draw_consent();
         self.draw_asks();
         self.draw_tab_menu();
         self.draw_toast();
