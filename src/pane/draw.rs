@@ -297,6 +297,9 @@ impl Pane {
         let width = text.draw_text(scene, tagline, x, y + 22.0, UI, 13.0, theme.text_dim);
         let api = if cfg!(target_os = "macos") { "Metal" } else { "Vulkan" };
         let device = format!("  ·  {api} on {device_name}  ·  v{}", env!("CARGO_PKG_VERSION"));
+        // The hints below reflow when the pane is narrow; this line just
+        // ran off the edge, clipping the version mid-word in a split.
+        let device = text.elide(&device, UI, 13.0, (self.rect.w - PAD_X - x - width).max(0.0));
         text.draw_text(scene, &device, x + width, y + 22.0, UI, 13.0, theme.text_faint);
         let y = y + 36.0;
         let cmd = platform::shortcut;
