@@ -470,7 +470,12 @@ impl App {
         let Ctx { text, theme, .. } = ctx;
         scene.set_layer(LAYER_OVERLAY);
         scene.set_fade(fade);
-        let w = text.measure(&message, UI, 12.0) + 24.0;
+        // Capped at the room from the window's left margin to the anchor:
+        // toasts carry error strings (a failed save names its whole path),
+        // and an uncapped pill would start off-screen, hiding the start
+        // of the very message it exists to show.
+        let w = (text.measure(&message, UI, 12.0) + 24.0).min((right - 28.0).max(0.0));
+        let message = text.elide(&message, UI, 12.0, (w - 24.0).max(0.0));
         let rect = Rect::new(right - w - 14.0, bottom - 40.0 + short, w, 28.0);
         scene.shadow(rect, theme.shadow(0.5), 14.0, 8.0);
         scene.quad(Quad::new(rect, theme.raised).radius(14.0).border(1.0, theme.divider));
