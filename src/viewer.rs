@@ -56,8 +56,15 @@ pub fn address(typed: &str) -> String {
         return format!("file://{path}");
     }
     let host = typed.split(['/', '?', '#']).next().unwrap_or("");
+    // A bare IPv6 address needs its brackets in a URL.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_ipv6() {
+            return format!("http://[{host}]{}", &typed[host.len()..]);
+        }
+    }
     let name = host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map_or(host, |(name, _)| name);
-    let local = name == "localhost" || name.ends_with(".local") || name.parse::<std::net::Ipv4Addr>().is_ok();
+    let bare = name.trim_matches(['[', ']']);
+    let local = bare == "localhost" || bare.ends_with(".local") || bare.parse::<std::net::IpAddr>().is_ok();
     let dotted = name.contains('.') && !name.starts_with('.') && !name.ends_with('.');
     if !typed.contains(char::is_whitespace) && (local || dotted) {
         let scheme = if local { "http" } else { "https" };
@@ -146,6 +153,11 @@ mod tests {
         assert_eq!(address("docs.rs/serde?x=1"), "https://docs.rs/serde?x=1");
         assert_eq!(address("localhost:3000/app"), "http://localhost:3000/app");
         assert_eq!(address("127.0.0.1:8080"), "http://127.0.0.1:8080");
+        assert_eq!(address("[::1]:8080"), "http://[::1]:8080");
+        assert_eq!(address("[::1]"), "http://[::1]");
+        assert_eq!(address("::1"), "http://[::1]");
+        assert_eq!(address("::1/admin"), "http://[::1]/admin");
+        assert_eq!(address("[2001:db8::1]:9000/x"), "http://[2001:db8::1]:9000/x");
         assert_eq!(address("  "), BLANK);
         assert_eq!(address("about:blank"), BLANK);
         assert_eq!(address("rust lifetimes"), "https://duckduckgo.com/?q=rust+lifetimes");
