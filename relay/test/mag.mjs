@@ -34,7 +34,7 @@ assert.equal(tailStart(all, 99), 0);
 
 assert.equal(clampLines(-3), 0);
 assert.equal(clampLines(7.4), 7);
-assert.equal(clampLines(99), 30);
+assert.equal(clampLines(99), 80);
 console.log("mag: ok");
 
 // What shows: no blank or border-only rows, a box's walls trimmed, the

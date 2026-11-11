@@ -9,7 +9,7 @@
 // text and a box's side walls (`magRows`).
 
 export const MAG_DEFAULT = 5;
-export const MAG_MAX = 30;
+export const MAG_MAX = 80;
 // Text rows of shell output kept above the shown lines, to drag back through.
 export const MAG_HISTORY = 200;
 

@@ -39,6 +39,9 @@ const claude = [
 const shell = {
   mode: "blocks", columns: 80,
   blocks: [
+    // Enough lines to drag the magnifier past half the screen.
+    { kind: "command", command: "seq 1 60", cwd: "/Users/me/portal", branch: "main", exit: 0, secs: 0.01,
+      lines: lines(Array.from({ length: 60 }, (_, i) => row(`line ${i + 1}`))) },
     { kind: "command", command: "ls", cwd: "/Users/me/portal", branch: "main", exit: 0, secs: 0.02,
       lines: lines([row("README.md  client  server  server-haiku  server-mac")]) },
     { kind: "command", command: "git log --oneline -4", cwd: "/Users/me/portal", branch: "main", exit: 0, secs: 0.05,
