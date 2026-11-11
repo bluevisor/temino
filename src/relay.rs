@@ -42,6 +42,17 @@ pub fn relay_url() -> String {
     crate::setting("relay").unwrap_or_else(|| DEFAULT_RELAY.to_owned()).trim_end_matches('/').to_owned()
 }
 
+/// The phone's web app as the QR code opens it: the account this machine
+/// signed in with rides along after `#for=`, so the phone can say which one
+/// to use. A fragment never reaches the relay.
+pub fn app_url() -> String {
+    let base = format!("{}/app", relay_url());
+    match crate::setting("account_login").filter(|login| !login.is_empty() && signed_in()) {
+        Some(login) => format!("{base}#for={}", encode(&login)),
+        None => base,
+    }
+}
+
 pub fn signed_in() -> bool {
     crate::setting("relay_token").is_some_and(|t| !t.is_empty())
 }

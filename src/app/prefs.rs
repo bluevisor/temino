@@ -292,7 +292,7 @@ impl App {
                 .into_iter()
                 .find_map(|key| crate::setting(key).filter(|v| !v.is_empty()))
                 .unwrap_or_default(),
-            remote_url: format!("{}/app", crate::relay::relay_url()),
+            remote_url: crate::relay::app_url(),
             remote_phones: crate::relay::connected().into_iter().map(|(_, name)| name).collect(),
         }
     }
