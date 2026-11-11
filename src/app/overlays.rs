@@ -136,12 +136,11 @@ impl App {
     pub(super) fn draw_account_menu(&mut self) {
         let Some(menu) = &self.tab_menu else { return };
         let who = account_info();
-        let remote = cfg!(not(target_os = "haiku"));
         let profile = 46.0;
         let mut h = 12.0 + MENU_ROW;
         if who.is_some() {
             h += profile + 9.0 + 9.0 + MENU_ROW;
-        } else if remote {
+        } else {
             h += MENU_ROW;
         }
         let x = menu.x.min(self.width - MENU_WIDTH - 8.0).max(4.0);
@@ -188,7 +187,7 @@ impl App {
             row_y += profile + 4.0;
             divider(scene, row_y);
             row_y += 9.0;
-        } else if remote {
+        } else {
             item(scene, text, menu_hits, "Sign In…", "", MenuAction::SignIn, row_y);
             row_y += MENU_ROW;
         }
@@ -599,7 +598,6 @@ impl App {
 /// Who's signed in to Remote Control here: their first name, and their
 /// photo where the sign-in gave one (Google's does, Apple's doesn't).
 pub(super) fn account_info() -> Option<(String, Option<String>)> {
-    #[cfg(not(target_os = "haiku"))]
     if crate::relay::signed_in() {
         let name = crate::setting("account_name").filter(|n| !n.is_empty()).unwrap_or_else(|| "Signed in".to_owned());
         let picture = crate::setting("account_picture").filter(|p| p.starts_with("https://"));
@@ -632,13 +630,7 @@ pub(super) fn draw_account_face(
         scene.quad(Quad::new(body, theme.text_faint).radius(size * 0.13));
         return;
     };
-    #[cfg(not(target_os = "haiku"))]
     let photo = picture.as_deref().and_then(crate::avatar::get);
-    #[cfg(target_os = "haiku")]
-    let photo: Option<Arc<Picture>> = {
-        let _ = picture;
-        None
-    };
     match photo {
         Some(photo) => text.draw_picture(scene, &photo, rect),
         None => {
@@ -667,10 +659,7 @@ pub fn draw_people(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, rect
         scene.shadow(pill, theme.shadow(0.3), pill.h / 2.0, 6.0);
         scene.quad(Quad::new(pill, theme.raised).radius(pill.h / 2.0).border(1.0, theme.accent));
         let face = Rect::new(pill.x + pad, pill.y + pad, avatar, avatar);
-        #[cfg(not(target_os = "haiku"))]
         let photo = who.picture.as_deref().and_then(crate::avatar::get);
-        #[cfg(target_os = "haiku")]
-        let photo: Option<std::sync::Arc<crate::picture::Picture>> = None;
         match photo {
             Some(photo) => text.draw_picture(scene, &photo, face),
             None => {
