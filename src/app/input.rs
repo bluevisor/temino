@@ -372,9 +372,7 @@ impl App {
             return;
         }
         if let Some((_, device, allow)) = self.ask_hits.iter().find(|(r, _, _)| r.contains(x, y)).cloned() {
-            #[cfg(not(target_os = "haiku"))]
             crate::relay::decide(&device, allow);
-            let _ = allow;
             self.asks.retain(|(d, _, _)| *d != device);
             self.dirty = true;
             return;

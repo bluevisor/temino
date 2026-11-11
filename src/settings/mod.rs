@@ -82,7 +82,7 @@ pub struct Values {
     pub analytics: bool,
     /// The window can be see-through (macOS).
     pub see_through: bool,
-    /// Signed in for remote control; None where there's no relay (Haiku).
+    /// Signed in for remote control; None hides the section (no relay).
     pub remote: Option<bool>,
     /// Who it's signed in as ("you@example.com (Google)", or a first name),
     /// once the relay has said.

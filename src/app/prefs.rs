@@ -287,22 +287,13 @@ impl App {
             provider: crate::llm::PROVIDERS.iter().position(|&p| p == crate::llm::chosen()).unwrap_or(0),
             fields: Field::ALL.map(|field| crate::setting(&field.key()).unwrap_or_default()),
             editing: self.field.clone(),
-            #[cfg(not(target_os = "haiku"))]
             remote: Some(crate::relay::signed_in()),
             remote_account: ["account_login", "account_name"]
                 .into_iter()
                 .find_map(|key| crate::setting(key).filter(|v| !v.is_empty()))
                 .unwrap_or_default(),
-            #[cfg(target_os = "haiku")]
-            remote: None,
-            #[cfg(not(target_os = "haiku"))]
             remote_url: format!("{}/app", crate::relay::relay_url()),
-            #[cfg(target_os = "haiku")]
-            remote_url: String::new(),
-            #[cfg(not(target_os = "haiku"))]
             remote_phones: crate::relay::connected().into_iter().map(|(_, name)| name).collect(),
-            #[cfg(target_os = "haiku")]
-            remote_phones: Vec::new(),
         }
     }
     pub(super) fn settings_action(&mut self, action: Action) {
@@ -387,21 +378,14 @@ impl App {
                     crate::notify::show("Temino", "Notifications are on");
                 }
             }
-            #[cfg(not(target_os = "haiku"))]
             Action::Remote(true) => crate::relay::sign_in(),
-            #[cfg(not(target_os = "haiku"))]
             Action::Remote(false) => crate::relay::sign_out(),
-            #[cfg(target_os = "haiku")]
-            Action::Remote(_) => {}
-            #[cfg(not(target_os = "haiku"))]
             Action::Disconnect(index) => {
                 if let Some((device, name)) = crate::relay::connected().into_iter().nth(index) {
                     crate::relay::disconnect(&device);
                     self.ctx.show_toast(&format!("Disconnected {name}; it has to ask again to come back"));
                 }
             }
-            #[cfg(target_os = "haiku")]
-            Action::Disconnect(_) => {}
             Action::Edit(field) => {
                 self.finish_field();
                 let text = match field {

@@ -245,15 +245,11 @@ impl App {
                 self.settings.to_remote = true;
                 self.dirty = true;
             }
-            #[cfg(not(target_os = "haiku"))]
             MenuAction::SignIn => crate::relay::sign_in(),
-            #[cfg(not(target_os = "haiku"))]
             MenuAction::SignOut => {
                 crate::relay::sign_out();
                 self.dirty = true;
             }
-            #[cfg(target_os = "haiku")]
-            MenuAction::SignIn | MenuAction::SignOut => {}
             MenuAction::Copy | MenuAction::Paste | MenuAction::Clear => {
                 let Some(id) = self.focused_id() else { return };
                 let Self { panes, ctx, .. } = self;
@@ -457,7 +453,6 @@ impl App {
                         if let Some(need @ (AgentState::Waiting | AgentState::Done)) = state {
                             let new = pane.needs_since.map(|(was, _)| was) != Some(need);
                             if away && new {
-                                #[cfg(not(target_os = "haiku"))]
                                 crate::relay::notify(
                                     if need == AgentState::Waiting { "waiting" } else { "done" },
                                     index + 1,
