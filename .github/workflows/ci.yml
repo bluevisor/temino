@@ -51,6 +51,31 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo run --locked -- --selftest "$RUNNER_TEMP/selftest.ppm"
 
+  # The self-hosted Mac Pro 2013 (Xeon, FirePro D500): x86_64 macOS with a
+  # real Metal device, so the render self-test runs here too. Fork PRs never
+  # reach it, since their code would execute on that machine.
+  intel-mac:
+    name: Rust (Intel Mac, Metal)
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, intel-mac]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: clippy
+      - name: Lint
+        run: cargo clippy --locked --all-targets
+      - name: Test
+        run: cargo test --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Noise interop with the web client
+        run: cargo test --locked -- --ignored interop_with_the_web_client
+      - name: Render self-test
+        run: cargo run --locked -- --selftest "$RUNNER_TEMP/selftest.ppm"
+
   relay:
     name: Relay
     runs-on: ubuntu-latest
