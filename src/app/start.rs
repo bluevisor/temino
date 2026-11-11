@@ -3,6 +3,7 @@ use super::*;
 pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32, start: Start) {
     remote::register(platform::window_no(), sender.clone());
     remote::start();
+    crate::api::start();
     let mut app = match App::new(sender, width, height, start) {
         Ok(app) => app,
         Err(error) => {
@@ -28,6 +29,7 @@ pub fn run(receiver: Receiver<Msg>, sender: Sender<Msg>, width: u32, height: u32
                     Msg::Git(..) => "loop: git",
                     Msg::Viewer(..) => "loop: viewer",
                     Msg::Remote(..) => "loop: remote",
+                    Msg::Api(..) => "loop: api",
                 });
                 app.handle(message)
             }

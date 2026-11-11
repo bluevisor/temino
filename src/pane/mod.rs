@@ -107,6 +107,9 @@ pub struct Ctx {
     /// An input method is composing at the cursor: the prompt's hint stays
     /// out of its way.
     pub composing: bool,
+    /// Desktop notifications programs asked for, by pane: title, body. The
+    /// window shows those for panes you can't see.
+    pub notifications: Vec<(u64, Option<String>, String)>,
 }
 
 impl Ctx {
@@ -433,7 +436,10 @@ impl Pane {
                 self.bell = Some(Instant::now());
                 self.notified_at = self.bell;
             }
-            Notice::Notify => self.notified_at = Some(Instant::now()),
+            Notice::Notify(title, body) => {
+                self.notified_at = Some(Instant::now());
+                ctx.notifications.push((self.id, title, body));
+            }
             Notice::Progress(busy) => self.progress = busy,
             Notice::Clear => {
                 self.forget_program();

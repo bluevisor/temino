@@ -38,6 +38,8 @@ pub struct Values {
     /// How many key bindings the keys file holds.
     pub bindings: usize,
     pub ligatures: bool,
+    /// The terminal's font family.
+    pub font: String,
     /// The quick terminal's hotkey, if it's on; the outer None where there
     /// is no quick terminal.
     pub quick_terminal: Option<Option<String>>,
@@ -54,6 +56,8 @@ pub struct Values {
     pub tabs_top: bool,
     /// The side tab list says, under the active tab, what each pane is doing.
     pub extended: bool,
+    /// Desktop notifications for panes out of sight.
+    pub notifications: bool,
     /// As a percentage of the default size.
     pub zoom: f32,
     pub updates: bool,
@@ -117,6 +121,8 @@ impl Field {
 pub enum Action {
     /// The theme this many places along the library.
     Theme(i32),
+    /// The monospaced family this many places along the installed ones.
+    Font(i32),
     /// Open or close the list of every theme.
     ThemeList,
     /// The theme at this place in the library, picked from the list.
@@ -135,6 +141,7 @@ pub enum Action {
     FetchConfig,
     TabsTop(bool),
     Extended(bool),
+    Notifications(bool),
     /// Smaller (-1), the default (0) or bigger (+1).
     Zoom(i32),
     Updates(bool),
@@ -223,7 +230,7 @@ impl Page {
             rows.extend([Row::Opacity, Row::Blur]);
         }
         y = ui.section(x, y, width, "Appearance", &rows, values);
-        y = ui.section(x, y, width, "Text", &[Row::Zoom, Row::Ligatures], values);
+        y = ui.section(x, y, width, "Text", &[Row::Font, Row::Zoom, Row::Ligatures], values);
         let mut shell = vec![Row::Shell, Row::Fetch];
         if values.fetch > 0 {
             shell.push(Row::FetchConfig);
@@ -234,7 +241,7 @@ impl Page {
             keys.push(Row::QuickTerminal);
         }
         y = ui.section(x, y, width, "Keys", &keys, values);
-        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended], values);
+        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Notifications], values);
         let provider = PROVIDERS[values.provider];
         let mut ai = vec![Row::Provider];
         if provider.is("custom") {
@@ -287,6 +294,7 @@ enum Row {
     ThemeFolder,
     Keys,
     Ligatures,
+    Font,
     QuickTerminal,
     Background,
     Opacity,
@@ -297,6 +305,7 @@ enum Row {
     FetchConfig,
     TabsTop,
     Extended,
+    Notifications,
     Updates,
     Analytics,
     CheckForUpdates,
@@ -372,6 +381,7 @@ impl Ui<'_> {
                     n => format!("{n} custom bindings, from the keys file"),
                 },
             ),
+            Row::Font => ("Font", "The terminal's; any monospaced family installed".to_owned()),
             Row::Ligatures => ("Ligatures", "Symbols like -> != >= drawn joined".to_owned()),
             Row::QuickTerminal => (
                 "Quick terminal",
@@ -415,6 +425,10 @@ impl Ui<'_> {
                 };
                 format!("Under the active tab, what each pane is doing · {keys}")
             }),
+            Row::Notifications => (
+                "Desktop notifications",
+                "When an agent waits or finishes, or a program asks, in a tab you can't see".to_owned(),
+            ),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::Analytics => (
                 "Share anonymous usage data",
@@ -464,6 +478,10 @@ impl Ui<'_> {
                 });
             }
             Row::Ligatures => self.toggle(right, rect.y, values.ligatures, Action::Ligatures(!values.ligatures)),
+            Row::Font => {
+                let labels = ["‹".to_owned(), values.font.clone(), "›".to_owned()];
+                self.segments(right, control_y, &labels, None, |i| Action::Font(if i == 0 { -1 } else { 1 }));
+            }
             Row::QuickTerminal => {
                 let on = values.quick_terminal.as_ref().is_some_and(Option::is_some);
                 self.toggle(right, rect.y, on, Action::QuickTerminal(!on));
@@ -513,6 +531,9 @@ impl Ui<'_> {
                 self.segments(right, control_y, &labels, Some(values.tabs_top as usize), |i| Action::TabsTop(i == 1));
             }
             Row::Extended => self.toggle(right, rect.y, values.extended, Action::Extended(!values.extended)),
+            Row::Notifications => {
+                self.toggle(right, rect.y, values.notifications, Action::Notifications(!values.notifications))
+            }
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::Analytics => self.toggle(right, rect.y, values.analytics, Action::Analytics(!values.analytics)),
             Row::CheckForUpdates => self.button(right, control_y, "Check for Updates", Action::CheckForUpdates),
@@ -796,12 +817,9 @@ impl Ui<'_> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_control_can_be_clicked() {
-        let mut scene = Scene::new();
-        let mut text = TextSystem::new(14.0);
-        let theme = Theme::dark();
-        let values = Values {
+    /// Every row showing: Custom shows every AI field.
+    fn sample() -> Values {
+        Values {
             background: Some(0),
             theme: "Temino".into(),
             themes: 12,
@@ -809,6 +827,7 @@ mod tests {
             palette: 0,
             bindings: 0,
             ligatures: true,
+            font: "JetBrains Mono".into(),
             quick_terminal: Some(None),
             opacity: 0,
             blur: false,
@@ -818,6 +837,7 @@ mod tests {
             fetches_installed: [true, false, true],
             tabs_top: false,
             extended: false,
+            notifications: true,
             zoom: 100.0,
             updates: true,
             analytics: true,
@@ -826,11 +846,18 @@ mod tests {
             remote_account: String::new(),
             remote_url: String::new(),
             remote_phones: Vec::new(),
-            // Custom shows every AI field.
             provider: PROVIDERS.len() - 1,
             fields: Default::default(),
             editing: None,
-        };
+        }
+    }
+
+    #[test]
+    fn every_control_can_be_clicked() {
+        let mut scene = Scene::new();
+        let mut text = TextSystem::new(14.0);
+        let theme = Theme::dark();
+        let values = sample();
         let mut page = Page::default();
         let rect = Rect::new(200.0, 0.0, 900.0, 2000.0);
         scene.reset(1100.0, 2000.0, 1.0, theme.background);
@@ -841,6 +868,9 @@ mod tests {
         expected.extend((0..OPACITIES.len()).map(Action::Opacity));
         expected.extend([
             Action::Blur(true),
+            Action::Font(-1),
+            Action::Font(1),
+            Action::Font(1),
             Action::Zoom(-1),
             Action::Zoom(0),
             Action::Zoom(1),
@@ -850,7 +880,12 @@ mod tests {
         expected.extend((0..=FETCHES.len()).map(Action::Fetch));
         expected.push(Action::FetchConfig);
         expected.extend([Action::EditKeys, Action::QuickTerminal(true)]);
-        expected.extend([Action::TabsTop(false), Action::TabsTop(true), Action::Extended(true)]);
+        expected.extend([
+            Action::TabsTop(false),
+            Action::TabsTop(true),
+            Action::Extended(true),
+            Action::Notifications(false),
+        ]);
         expected.extend((0..PROVIDERS.len()).map(Action::Provider));
         expected.extend(Field::ALL.map(Action::Edit));
         expected.extend([Action::Updates(false), Action::Analytics(false), Action::CheckForUpdates]);
@@ -876,35 +911,7 @@ mod tests {
         let mut scene = Scene::new();
         let mut text = TextSystem::new(14.0);
         let theme = Theme::dark();
-        let values = Values {
-            background: Some(0),
-            theme: "Temino".into(),
-            themes: 12,
-            palettes: Vec::new(),
-            palette: 0,
-            bindings: 0,
-            ligatures: true,
-            quick_terminal: Some(None),
-            opacity: 0,
-            blur: false,
-            shell: Some(0),
-            installed: [true, true, false],
-            fetch: 1,
-            fetches_installed: [true, false, true],
-            tabs_top: false,
-            extended: false,
-            zoom: 100.0,
-            updates: true,
-            analytics: true,
-            see_through: true,
-            remote: None,
-            remote_account: String::new(),
-            remote_url: String::new(),
-            remote_phones: Vec::new(),
-            provider: PROVIDERS.len() - 1,
-            fields: Default::default(),
-            editing: None,
-        };
+        let values = sample();
         // Scrolled to the end of 900px of content in a 600px view, then
         // the window grows past the whole content: nothing to scroll.
         let mut page = Page { content_height: 900.0, view_height: 600.0, ..Page::default() };

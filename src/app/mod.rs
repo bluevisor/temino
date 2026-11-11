@@ -29,6 +29,7 @@ use crate::update::{self, Release};
 use crate::viewer::{self, Viewer};
 use crate::Msg;
 
+mod api;
 mod chrome;
 mod control;
 mod draw;
@@ -483,6 +484,11 @@ impl App {
         let gpu = Gpu::new()?;
         let mut text = TextSystem::new(BASE_FONT_SIZE);
         text.ligatures = crate::setting("ligatures").as_deref() != Some("off");
+        if let Some(family) = crate::setting("font").filter(|f| !f.is_empty()) {
+            if let Err(error) = text.set_mono(Some(&family)) {
+                crate::store::log(&format!("font {family}: {error}; JetBrains Mono instead"));
+            }
+        }
         crate::trace("app: fonts ready");
         let background = load_background();
         let opacity = load_opacity();
@@ -504,6 +510,7 @@ impl App {
             device_name: gpu.device_name.clone(),
             blink_epoch: Instant::now(),
             toast: None,
+            notifications: Vec::new(),
             shell,
             composing: false,
         };
@@ -705,6 +712,7 @@ impl App {
                 if moved {
                     self.save_tabs();
                 }
+                self.show_notifications();
                 self.check_install(id);
                 self.dirty = true;
             }
@@ -727,6 +735,11 @@ impl App {
             }
             Msg::Viewer(id, event) => self.viewer_event(id, event),
             Msg::Remote(command) => self.remote_command(command),
+            Msg::Api(call) => {
+                let params = crate::json::parse(&call.params).unwrap_or(crate::json::Value::Null);
+                let _ = call.reply.send(self.api(&call.method, &params));
+                self.dirty = true;
+            }
             Msg::Notice(message) => {
                 self.ctx.toast = Some((message, Instant::now() + Duration::from_secs(6)));
                 self.dirty = true;
