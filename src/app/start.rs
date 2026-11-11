@@ -147,6 +147,14 @@ pub(super) fn load_background() -> Option<usize> {
     crate::setting("background").and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name))
 }
 
+/// `line_spacing=<name>` in the settings file, as a multiple of the font's
+/// line height (the default's when unset or unknown).
+pub(super) fn load_line_spacing() -> f32 {
+    let name = crate::setting("line_spacing").unwrap_or_default();
+    let found = crate::text::LINE_SPACINGS.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name));
+    found.unwrap_or(&crate::text::LINE_SPACINGS[1]).1
+}
+
 /// Where theme files go: Ghostty's format, one scheme per file.
 pub fn themes_dir() -> String {
     format!("{}/themes", crate::settings_dir())

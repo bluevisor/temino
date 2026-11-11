@@ -3,6 +3,9 @@
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Rgb};
 
+mod custom;
+pub use custom::*;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
     pub r: f32,
@@ -328,6 +331,10 @@ pub struct Palette {
     /// The UI's highlight color (ANSI 12 when unset).
     pub accent: Option<u32>,
     pub ansi: [u32; 16],
+    /// The theme file it came from: a theme of your own, which the theme
+    /// editor can change. None for the built-in presets, which stay as
+    /// they are.
+    pub file: Option<std::path::PathBuf>,
 }
 
 /// The built-in schemes, each the screen of a real machine: name,
@@ -473,7 +480,9 @@ const BUILT_IN: [BuiltIn; 11] = [
 ];
 
 /// The theme library: the built-in schemes, then any Ghostty-format theme
-/// files in `dir` (one per file, named after it), alphabetically.
+/// files in `dir` (one per file, named after it), alphabetically. A file
+/// named like a preset joins as "<name> (Custom)": presets are never
+/// replaced.
 pub fn library(dir: &str) -> Vec<Palette> {
     let mut themes: Vec<Palette> = BUILT_IN
         .iter()
@@ -485,15 +494,23 @@ pub fn library(dir: &str) -> Vec<Palette> {
             selection: (selection != 0).then_some(selection),
             accent: (accent != 0).then_some(accent),
             ansi,
+            file: None,
         })
         .collect();
     let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
     files.sort();
     for path in files {
         let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| !n.starts_with('.')) else { continue };
-        let name = name.trim_end_matches(".conf").to_owned();
-        if let Some(palette) = std::fs::read_to_string(&path).ok().and_then(|text| parse_palette(&name, &text)) {
-            themes.retain(|t| t.name != palette.name);
+        let mut name = name.trim_end_matches(".conf").to_owned();
+        if themes.iter().any(|t| t.name.eq_ignore_ascii_case(&name)) {
+            name.push_str(" (Custom)");
+        }
+        if themes.iter().any(|t| t.name.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).ok();
+        if let Some(mut palette) = text.and_then(|text| parse_palette(&name, &text)) {
+            palette.file = Some(path);
             themes.push(palette);
         }
     }
@@ -501,11 +518,11 @@ pub fn library(dir: &str) -> Vec<Palette> {
 }
 
 /// A Ghostty theme file: `background = #282a36`, `foreground = …`,
-/// `cursor-color = …`, `selection-background = …`, `palette = 0=#21222c`.
-/// None without a background and foreground.
+/// `cursor-color = …`, `selection-background = …`, `palette = 0=#21222c`,
+/// and Temino's own `accent = …`. None without a background and foreground.
 pub fn parse_palette(name: &str, text: &str) -> Option<Palette> {
     let hex = |value: &str| u32::from_str_radix(value.trim().trim_start_matches('#'), 16).ok();
-    let (mut background, mut foreground, mut cursor, mut selection) = (None, None, None, None);
+    let (mut background, mut foreground, mut cursor, mut selection, mut accent) = (None, None, None, None, None);
     let mut ansi = Theme::dark().ansi.map(|color| {
         let [r, g, b] = color.to_rgb8();
         (r as u32) << 16 | (g as u32) << 8 | b as u32
@@ -517,6 +534,7 @@ pub fn parse_palette(name: &str, text: &str) -> Option<Palette> {
             "foreground" => foreground = hex(value),
             "cursor-color" => cursor = hex(value),
             "selection-background" => selection = hex(value),
+            "accent" => accent = hex(value),
             "palette" => {
                 if let Some((index, color)) = value.split_once('=') {
                     if let (Ok(index @ 0..=15), Some(color)) = (index.trim().parse::<usize>(), hex(color)) {
@@ -533,8 +551,9 @@ pub fn parse_palette(name: &str, text: &str) -> Option<Palette> {
         foreground: foreground?,
         cursor,
         selection,
-        accent: None,
+        accent,
         ansi,
+        file: None,
     })
 }
 
@@ -691,12 +710,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let names: Vec<&str> = library.iter().map(|p| p.name.as_str()).collect();
         // Hidden files and files that aren't themes are left out; one named
-        // like a built-in replaces it.
-        assert_eq!(&names[BUILT_IN.len() - 1..], ["Apple II", "Ayu", "Zenburn"]);
-        assert_eq!(names.iter().filter(|&&n| n == "Apple II").count(), 1);
-        assert_eq!(library.len(), BUILT_IN.len() + 2);
-        let apple = library.iter().find(|p| p.name == "Apple II").unwrap();
-        assert_eq!(apple.foreground, 0x00ff00);
+        // like a built-in joins beside it, the preset left as it was.
+        assert_eq!(&names[BUILT_IN.len()..], ["Apple II (Custom)", "Ayu", "Zenburn"]);
+        assert_eq!(library.len(), BUILT_IN.len() + 3);
+        let preset = library.iter().find(|p| p.name == "Apple II").unwrap();
+        assert_eq!((preset.foreground, preset.file.is_none()), (0x41ff53, true));
+        let custom = library.iter().find(|p| p.name == "Apple II (Custom)").unwrap();
+        assert_eq!(custom.foreground, 0x00ff00);
+        assert_eq!(custom.file.as_deref(), Some(dir.join("Apple II").as_path()));
         assert_eq!(names[0], "Temino");
     }
 }

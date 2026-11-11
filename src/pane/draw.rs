@@ -672,7 +672,21 @@ impl Pane {
                         scene.mark_caret(Rect::new(caret.x + 1.0, cy, cell.width, cell.height));
                     }
                     if blink {
-                        scene.fill(caret, theme.cursor);
+                        let cx = text_x + cc as f32 * cell.width;
+                        match crate::cursor::prompt() {
+                            crate::cursor::Shape::Block => {
+                                scene.fill(Rect::new(cx, cy, cell.width, cell.height), theme.cursor);
+                                // The character under it, in the background's color.
+                                let under = editor.text[editor.cursor..].chars().next().filter(|&c| c != '\n');
+                                if let Some(c) = under {
+                                    text.draw_cell(scene, c, cx, cy, Style::default(), theme.background, 1);
+                                }
+                            }
+                            crate::cursor::Shape::Underline => {
+                                scene.fill(Rect::new(cx, cy + cell.height - 2.0, cell.width, 2.0), theme.cursor)
+                            }
+                            _ => scene.fill(caret, theme.cursor),
+                        }
                     }
                 }
                 if let Some(completion) = completion {

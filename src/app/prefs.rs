@@ -68,6 +68,8 @@ impl App {
         self.background = None;
         crate::save_setting("background", "");
         crate::save_setting("theme", &self.themes[self.palette].name);
+        // The editor stays open from one theme of your own to the next.
+        self.open_theme_editor(self.theme_edit.is_some());
         self.apply_theme();
     }
     /// `quick_terminal=<keys>` in the settings file: the hotkey that brings
@@ -256,6 +258,8 @@ impl App {
             themes: self.themes.len(),
             palettes: if self.settings.themes_open { self.themes.clone() } else { Vec::new() },
             palette: self.palette,
+            custom: self.themes.get(self.palette).is_some_and(|t| t.file.is_some()),
+            editor: self.theme_edit_values(),
             bindings: self.bindings.list.len(),
             ligatures: self.ctx.text.ligatures,
             font: crate::setting("font").filter(|f| !f.is_empty()).unwrap_or_else(|| "JetBrains Mono".to_owned()),
@@ -270,6 +274,13 @@ impl App {
             extended: self.extended,
             notifications: crate::notify::enabled(),
             zoom: self.zoom_percent(),
+            points: self.zoom * BASE_FONT_SIZE,
+            line_spacing: crate::text::LINE_SPACINGS
+                .iter()
+                .position(|&(_, leading)| leading == self.ctx.text.leading())
+                .unwrap_or(1),
+            cursor: crate::cursor::Shape::ALL.iter().position(|&s| s == crate::cursor::shape()).unwrap_or(0),
+            blink: crate::cursor::blinks(),
             updates: crate::setting("updates").as_deref() != Some("off"),
             analytics: crate::analytics::enabled(),
             see_through: cfg!(target_os = "macos"),
@@ -299,7 +310,9 @@ impl App {
         // A settings change, counted as one — never which setting or
         // what it became. Opening the theme list, starting to type in
         // a field and checking for updates aren't changes.
-        if !matches!(action, Action::Edit(_) | Action::ThemeList | Action::CheckForUpdates) {
+        // Nor are opening the theme editor and picking a color in it.
+        let browsing = matches!(action, Action::ThemeEditor(_) | Action::Slot(_));
+        if !browsing && !matches!(action, Action::Edit(_) | Action::ThemeList | Action::CheckForUpdates) {
             crate::analytics::bump(crate::analytics::Counter::SettingsChanges);
         }
         match action {
@@ -391,8 +404,49 @@ impl App {
             Action::Disconnect(_) => {}
             Action::Edit(field) => {
                 self.finish_field();
-                let text = crate::setting(&field.key()).unwrap_or_default();
+                let text = match field {
+                    Field::ThemeName | Field::ThemeHex => self.theme_field_text(field),
+                    _ => crate::setting(&field.key()).unwrap_or_default(),
+                };
                 self.field = Some((field, text, true));
+            }
+            Action::ThemeEditor(open) => {
+                self.finish_field();
+                self.open_theme_editor(open);
+            }
+            Action::DuplicateTheme => {
+                self.finish_field();
+                self.duplicate_theme();
+            }
+            Action::DeleteTheme => {
+                self.finish_field();
+                self.delete_theme();
+            }
+            Action::Slot(slot) => {
+                self.finish_field();
+                self.pick_slot(slot);
+            }
+            Action::Nudge(channel, step) => {
+                self.finish_field();
+                self.nudge_color(channel, step);
+            }
+            Action::Cursor(index) => {
+                let shape = crate::cursor::Shape::ALL[index.min(crate::cursor::Shape::ALL.len() - 1)];
+                crate::cursor::set_shape(shape);
+                self.ctx.blink_epoch = Instant::now();
+            }
+            Action::Blink(on) => {
+                crate::cursor::set_blinks(on);
+                self.ctx.blink_epoch = Instant::now();
+            }
+            Action::LineSpacing(index) => {
+                let Some(&(name, leading)) = crate::text::LINE_SPACINGS.get(index) else { return };
+                crate::save_setting("line_spacing", &name.to_lowercase());
+                self.ctx.text.set_leading(leading);
+                for pane in &mut self.panes {
+                    pane.cells_changed(&self.ctx.text);
+                }
+                self.relayout();
             }
             Action::Provider(index) => {
                 self.finish_field();
@@ -404,6 +458,11 @@ impl App {
     /// Ends typing in a Settings field, keeping what was typed.
     pub(super) fn finish_field(&mut self) {
         let Some((field, text, _)) = self.field.take() else { return };
+        if matches!(field, Field::ThemeName | Field::ThemeHex) {
+            self.finish_theme_field(field, &text);
+            self.dirty = true;
+            return;
+        }
         crate::save_setting(&field.key(), text.trim());
         if matches!(field, Field::LlmUrl | Field::LlmKey | Field::LlmModel) {
             crate::llm::forget_model();
