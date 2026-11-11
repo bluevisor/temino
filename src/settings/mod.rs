@@ -516,10 +516,7 @@ impl Ui<'_> {
             Row::Remote => (
                 "Control from iPhone or iPad",
                 if values.remote == Some(true) && !values.remote_account.is_empty() {
-                    format!(
-                        "Signed in as {} · end-to-end encrypted; new devices need your OK here",
-                        values.remote_account
-                    )
+                    format!("Signed in as {} · end-to-end encrypted", values.remote_account)
                 } else if values.remote == Some(true) {
                     "Signed in · end-to-end encrypted; new devices need your OK here".to_owned()
                 } else {
@@ -556,10 +553,23 @@ impl Ui<'_> {
             Row::Blink => ("Blink", "Steady when off".to_owned()),
         };
         let left = rect.x + 16.0;
-        self.text.draw_text(self.scene, label, left, rect.y + 25.0, UI, 13.0, theme.text);
-        self.text.draw_text(self.scene, &detail, left, rect.y + 42.0, UI, 11.5, theme.text_dim);
         let right = rect.right() - 16.0;
         let control_y = rect.y + (ROW - CONTROL_HEIGHT) / 2.0;
+        // The control first, so the words know how much room they have:
+        // in a narrow window, or a wider font (Linux's), a long description
+        // is cut short with "…" rather than running under its button.
+        let first_hit = self.hits.len();
+        self.row_control(rect, row, values, right, control_y);
+        let control_left = self.hits[first_hit..].iter().map(|(hit, _)| hit.x).fold(right, f32::min);
+        let room = (control_left - 12.0 - left).max(0.0);
+        let label = self.text.elide(label, UI, 13.0, room);
+        let detail = self.text.elide(&detail, UI, 11.5, room);
+        self.text.draw_text(self.scene, &label, left, rect.y + 25.0, UI, 13.0, theme.text);
+        self.text.draw_text(self.scene, &detail, left, rect.y + 42.0, UI, 11.5, theme.text_dim);
+    }
+
+    /// A row's control, right-aligned at `right`.
+    fn row_control(&mut self, rect: Rect, row: Row, values: &Values, right: f32, control_y: f32) {
         match row {
             Row::Theme => {
                 let labels = ["‹".to_owned(), values.theme.clone(), "›".to_owned()];

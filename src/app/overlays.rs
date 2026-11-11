@@ -140,7 +140,8 @@ impl App {
         let profile = 46.0;
         let mut h = 12.0 + MENU_ROW;
         if who.is_some() {
-            h += profile + 9.0 + 9.0 + MENU_ROW;
+            // The profile row and the gap under it, two dividers, Sign Out.
+            h += profile + 4.0 + 9.0 + 9.0 + MENU_ROW;
         } else if remote {
             h += MENU_ROW;
         }
