@@ -20,10 +20,10 @@ use crate::picture::Picture;
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::remote;
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
-use crate::settings::{self, Action, Field};
+use crate::settings::{self, Action, Field, List};
 use crate::shells::{self, KINDS};
 use crate::text::{Style, TextSystem, UI, UI_BOLD};
-use crate::theme::{self, Color, Palette, Theme, BACKGROUNDS, OPACITIES, SURFACE_LIFT};
+use crate::theme::{self, backgrounds, Color, Mode, Palette, Theme, OPACITIES, SURFACE_LIFT};
 use crate::ui;
 use crate::update::{self, Release};
 use crate::viewer::{self, Viewer};
@@ -34,6 +34,7 @@ mod chrome;
 mod control;
 mod draw;
 mod input;
+mod keys_edit;
 mod layout;
 mod overlays;
 mod persist;
@@ -426,6 +427,13 @@ pub struct App {
     /// changing, and whether Delete was clicked once already.
     theme_edit: Option<(theme::Slot, bool)>,
     background: Option<usize>,
+    /// Light or Dark, as picked in Settings; None: each theme's own.
+    mode: Option<Mode>,
+    /// Settings ▸ Keys waiting for the keys to bind this action to.
+    recording: Option<&'static str>,
+    /// The fonts Settings' font list offers (None: the bundled one), as of
+    /// it opening.
+    font_choices: Vec<Option<String>>,
     opacity: usize,
     blur: bool,
     /// Which of KINDS are installed, as of the Settings tab opening.
@@ -500,9 +508,12 @@ impl App {
         let opacity = load_opacity();
         let themes = theme::library(&themes_dir());
         let palette = crate::setting("theme").and_then(|name| themes.iter().position(|t| t.name == name)).unwrap_or(0);
-        let theme = build_theme(&themes[palette], background, OPACITIES[opacity] as f32 / 100.0);
+        let mode = crate::setting("appearance").and_then(|value| Mode::parse(&value));
+        let shown_mode = mode.unwrap_or_else(|| themes[palette].mode());
+        let theme = build_theme(&themes[palette], background, OPACITIES[opacity] as f32 / 100.0, shown_mode);
         platform::set_background(theme.background.to_rgb8());
-        platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), background.unwrap_or(usize::MAX));
+        let names = backgrounds(shown_mode).map(|(name, _)| name);
+        platform::set_background_menu(&names, background.unwrap_or(usize::MAX));
         let shell = shells::default_shell();
         let (shell_names, selected) = shells::menu(&shell);
         platform::set_shell_menu(&shell_names, selected);
@@ -583,6 +594,9 @@ impl App {
             previewing: None,
             theme_edit: None,
             background,
+            mode,
+            recording: None,
+            font_choices: Vec::new(),
             opacity,
             blur: crate::setting("blur").as_deref() == Some("on"),
             installed: [false; KINDS.len()],

@@ -1,7 +1,7 @@
-//! Settings ▸ Appearance ▸ Customize, and the theme editor under it: a
-//! theme of your own's name, every color it sets as a dot to pick, the
-//! picked one's hex, nudges for its hue, saturation and lightness, and
-//! deleting it. Presets only offer a copy to edit.
+//! The theme editor, opened from Customize… in the theme list: a theme of
+//! your own's name, every color it sets as a dot to pick, the picked one's
+//! hex, nudges for its hue, saturation and lightness, and copying or
+//! deleting it. Presets are never edited: Customize… starts from a copy.
 
 use super::*;
 use crate::theme::{hex, ANSI_NAMES};
@@ -37,11 +37,6 @@ impl Ui<'_> {
     pub(super) fn editor_label(&self, row: Row, values: &Values) -> (&'static str, String) {
         let edit = values.editor.as_ref();
         match row {
-            Row::Customize if !values.custom => {
-                ("Customize", "Presets stay as they are · duplicate one to make it your own".to_owned())
-            }
-            Row::Customize if edit.is_some() => ("Customize", "Changes show and save as you make them".to_owned()),
-            Row::Customize => ("Customize", "A theme of your own · change any of its colors".to_owned()),
             Row::ThemeName => ("Name", "In the theme list, and its file's name".to_owned()),
             Row::SlotHex => {
                 let Some(edit) = edit else { return ("", String::new()) };
@@ -57,10 +52,10 @@ impl Ui<'_> {
                 (slot_label(edit.slot), detail)
             }
             Row::Nudge => ("Adjust", "A step at a time".to_owned()),
-            Row::DeleteTheme if edit.is_some_and(|e| e.confirm_delete) => {
-                ("Delete theme", "Its file goes too; this can't be undone".to_owned())
+            Row::EditorActions if edit.is_some_and(|e| e.confirm_delete) => {
+                ("Delete this theme?", "Its file goes too; this can't be undone".to_owned())
             }
-            Row::DeleteTheme => ("Delete theme", "Removes it from the list and its file".to_owned()),
+            Row::EditorActions => ("Saved as you go", "Customize… in the theme list opens this again".to_owned()),
             _ => ("", String::new()),
         }
     }
@@ -68,14 +63,6 @@ impl Ui<'_> {
     pub(super) fn editor_control(&mut self, right: f32, y: f32, row: Row, values: &Values) {
         let edit = values.editor.as_ref();
         match row {
-            Row::Customize if !values.custom => self.button(right, y, "Duplicate & Edit", Action::DuplicateTheme),
-            Row::Customize => {
-                let left = match edit {
-                    Some(_) => self.placed_button(right, y, "Done", Action::ThemeEditor(false)),
-                    None => self.placed_button(right, y, "Edit Colors", Action::ThemeEditor(true)),
-                };
-                self.button(left - 8.0, y, "Duplicate", Action::DuplicateTheme);
-            }
             Row::ThemeName => self.field(right, y, FIELD_WIDTH, Field::ThemeName, values),
             Row::SlotHex => {
                 let left = right - 110.0;
@@ -94,10 +81,12 @@ impl Ui<'_> {
                     x = self.segments(x, y, &labels, None, |i| Action::Nudge(channel, i as i32 - 1)) - 8.0;
                 }
             }
-            Row::DeleteTheme => {
+            Row::EditorActions => {
                 let armed = edit.is_some_and(|e| e.confirm_delete);
+                let left = self.placed_button(right, y, "Done", Action::ThemeEditor(false));
+                let left = self.placed_button(left - 8.0, y, "Duplicate", Action::DuplicateTheme);
                 let label = if armed { "Click Again to Delete" } else { "Delete…" };
-                self.button(right, y, label, Action::DeleteTheme);
+                self.button(left - 8.0, y, label, Action::DeleteTheme);
             }
             _ => {}
         }

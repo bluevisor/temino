@@ -2,16 +2,20 @@
 //! rest of the window. The page only draws and says what a click asks for;
 //! app.rs applies it and remembers it in the settings file.
 
+use crate::bindings::{Bind, Combo};
 use crate::cursor::Shape;
 use crate::fetch::FETCHES;
 use crate::llm::{self, PROVIDERS};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::shells::KINDS;
 use crate::text::{TextSystem, LINE_SPACINGS, UI, UI_BOLD};
-use crate::theme::{Channel, Color, Palette, Slot, Theme, BACKGROUNDS, OPACITIES};
+use crate::theme::{backgrounds, Channel, Color, Mode, Palette, Slot, Theme, OPACITIES};
 
 mod editor;
+mod keys;
+mod lists;
 pub use editor::ThemeEdit;
+pub use lists::List;
 
 /// The page's column, at most this wide, centered in the tab.
 const COLUMN: f32 = 640.0;
@@ -22,7 +26,9 @@ const SWATCH: f32 = 22.0;
 const FIELD_WIDTH: f32 = 260.0;
 /// How far one wheel line scrolls the page.
 const WHEEL_STEP: f32 = 48.0;
-/// The theme list: one line per theme, at most this tall before it scrolls.
+/// A key binding's row: one line, no description.
+const KEY_ROW: f32 = 40.0;
+/// The theme and font lists: one line each, at most this tall before they scroll.
 const LIST_ROW: f32 = 28.0;
 const LIST_HEIGHT: f32 = 340.0;
 /// The Remote Control row that tells the phone's side, QR code and all.
@@ -38,18 +44,23 @@ pub struct Values {
     /// The theme's name, and how many the library holds.
     pub theme: String,
     pub themes: usize,
-    /// The whole library, and which of it is in use, for the theme list.
+    /// The whole library as it shows in this mode, and which of it is in
+    /// use, for the theme list.
     pub palettes: Vec<Palette>,
     pub palette: usize,
-    /// The theme in use is one of your own (a file), not a preset.
-    pub custom: bool,
     /// The theme editor, while it's open on a theme of your own.
     pub editor: Option<ThemeEdit>,
-    /// How many key bindings the keys file holds.
-    pub bindings: usize,
+    /// Light or Dark: every theme in the one picked.
+    pub mode: Mode,
+    /// The keys file's bindings, and the action waiting for new keys.
+    pub keys: Vec<(Combo, Bind)>,
+    pub recording: Option<&'static str>,
     pub ligatures: bool,
-    /// The terminal's font family.
+    /// The terminal's font family; every one to pick from (while the
+    /// font list is open), and which of them it is.
     pub font: String,
+    pub fonts: Vec<String>,
+    pub font_index: usize,
     /// The quick terminal's hotkey, if it's on; the outer None where there
     /// is no quick terminal.
     pub quick_terminal: Option<Option<String>>,
@@ -146,12 +157,26 @@ pub enum Action {
     Theme(i32),
     /// The monospaced family this many places along the installed ones.
     Font(i32),
-    /// Open or close the list of every theme.
-    ThemeList,
+    /// Open or close a list: every theme, or every font.
+    List(List),
     /// The theme at this place in the library, picked from the list.
     PickTheme(usize),
+    /// The font at this place in the font list.
+    PickFont(usize),
+    /// The theme list's last line: edit the theme in use, or a copy of a preset.
+    Customize,
+    Mode(Mode),
     OpenThemes,
+    /// Open the keys file, for what Settings doesn't show (typed text).
     EditKeys,
+    /// Wait for the next keys pressed, to bind this action to them.
+    RecordKey(&'static str),
+    /// This action back on its default keys.
+    ResetKey(&'static str),
+    /// Every action back on its default keys; typed text stays.
+    ResetKeys,
+    /// The binding that types text on this key, removed.
+    RemoveTyped(Combo),
     Ligatures(bool),
     QuickTerminal(bool),
     Background(usize),
@@ -203,9 +228,9 @@ pub struct Page {
     /// How tall the page was last drawn, and the tab it was drawn in.
     content_height: f32,
     view_height: f32,
-    /// The theme list is open (a click on the theme's name), where it was
-    /// last drawn, and how far it's scrolled.
-    pub themes_open: bool,
+    /// The list open (a click on the theme's or the font's name), where
+    /// it was last drawn, and how far it's scrolled.
+    pub open: Option<List>,
     list: Rect,
     list_scroll: f32,
     /// Asked to scroll to Remote Control (from the account menu); set
@@ -220,9 +245,9 @@ impl Page {
         self.hits.iter().rev().find(|(rect, _)| rect.contains(x, y)).map(|&(_, action)| action)
     }
 
-    /// Scrolls the theme list when the mouse is over it, the page otherwise.
+    /// Scrolls the open list when the mouse is over it, the page otherwise.
     pub fn wheel(&mut self, dy: f32, x: f32, y: f32) {
-        if self.themes_open && self.list.contains(x, y) {
+        if self.open.is_some() && self.list.contains(x, y) {
             self.list_scroll += dy * LIST_ROW;
             return;
         }
@@ -230,9 +255,9 @@ impl Page {
         self.scroll = (self.scroll + dy * WHEEL_STEP).clamp(0.0, most);
     }
 
-    /// Opens the theme list scrolled to the theme in use, or closes it.
-    pub fn toggle_themes(&mut self) {
-        self.themes_open = !self.themes_open;
+    /// Opens a list scrolled to what's in use, or closes it.
+    pub fn toggle(&mut self, list: List) {
+        self.open = if self.open == Some(list) { None } else { Some(list) };
         self.list_scroll = f32::NAN;
     }
 
@@ -263,7 +288,7 @@ impl Page {
         ui.text.draw_text(ui.scene, "Settings", x, y + 24.0, UI_BOLD, 22.0, theme.text);
         y += 52.0;
 
-        let mut rows = vec![Row::Theme, Row::Customize, Row::ThemeFolder, Row::Background];
+        let mut rows = vec![Row::Theme, Row::Mode, Row::ThemeFolder, Row::Background];
         if values.see_through {
             rows.extend([Row::Opacity, Row::Blur]);
         }
@@ -280,11 +305,6 @@ impl Page {
             shell.push(Row::FetchConfig);
         }
         y = ui.section(x, y, width, "Shell", &shell, values);
-        let mut keys = vec![Row::Keys];
-        if values.quick_terminal.is_some() {
-            keys.push(Row::QuickTerminal);
-        }
-        y = ui.section(x, y, width, "Keys", &keys, values);
         y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Notifications], values);
         let provider = PROVIDERS[values.provider];
         let mut ai = vec![Row::Provider];
@@ -307,17 +327,18 @@ impl Page {
             y = ui.section(x, y, width, "Remote Control", &rows, values);
         }
         y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::Analytics, Row::CheckForUpdates], values);
+        y = ui.keys(x, y, width, values);
         let version = format!("Temino {}", env!("CARGO_PKG_VERSION"));
         ui.text.draw_text(ui.scene, &version, x, y + 4.0, UI, 11.5, theme.text_faint);
         y += 24.0;
 
-        let anchor = ui.hits.iter().find(|&&(_, action)| action == Action::ThemeList).map(|&(rect, _)| rect);
-        match anchor {
-            Some(anchor) if self.themes_open => {
-                let (list, scroll) = ui.theme_list(anchor, values, self.list_scroll);
-                (self.list, self.list_scroll) = (list, scroll);
+        let open = self.open;
+        let anchor = ui.hits.iter().find(|&&(_, action)| Some(action) == open.map(Action::List)).map(|&(r, _)| r);
+        match (anchor, open) {
+            (Some(anchor), Some(list)) => {
+                (self.list, self.list_scroll) = ui.list(list, anchor, values, self.list_scroll);
             }
-            _ => self.themes_open = false,
+            _ => self.open = None,
         }
 
         self.content_height = y + self.scroll - rect.y + PAD;
@@ -335,8 +356,15 @@ impl Page {
 #[derive(Clone, Copy)]
 enum Row {
     Theme,
+    /// Light or Dark.
+    Mode,
     ThemeFolder,
-    Keys,
+    /// What the key rows do, and resetting them all.
+    KeysHelp,
+    /// An action and the keys that run it.
+    Key(&'static str),
+    /// A key that types text, at this place in the typed ones.
+    Typed(usize),
     Ligatures,
     Font,
     QuickTerminal,
@@ -360,14 +388,13 @@ enum Row {
     Phone,
     Provider,
     Field(Field),
-    /// Duplicate the theme, or edit it if it's yours.
-    Customize,
     /// The theme editor's rows.
     ThemeName,
     Colors(Group),
     SlotHex,
     Nudge,
-    DeleteTheme,
+    /// Done, Duplicate and Delete.
+    EditorActions,
     LineSpacing,
     CursorShape,
     Blink,
@@ -389,13 +416,14 @@ impl Row {
         Row::Colors(Group::Bright),
         Row::SlotHex,
         Row::Nudge,
-        Row::DeleteTheme,
+        Row::EditorActions,
     ];
 
     fn height(self) -> f32 {
         match self {
             Row::Phone => PHONE_ROW,
             Row::Colors(_) => COLORS_ROW,
+            Row::Key(_) => KEY_ROW,
             _ => ROW,
         }
     }
@@ -450,14 +478,8 @@ impl Ui<'_> {
             Row::Theme => {
                 ("Theme", format!("{} of {} · colors for the terminal and the window", values.theme, values.themes))
             }
-            Row::Keys => (
-                "Key bindings",
-                match values.bindings {
-                    0 => "The defaults; the keys file rebinds any of them".to_owned(),
-                    1 => "1 custom binding, from the keys file".to_owned(),
-                    n => format!("{n} custom bindings, from the keys file"),
-                },
-            ),
+            Row::Mode => ("Light or dark", "Every theme comes in both; the backgrounds follow".to_owned()),
+            Row::KeysHelp | Row::Key(_) | Row::Typed(_) => self.key_label(row, values),
             Row::Font => ("Font", "The terminal's; any monospaced family installed".to_owned()),
             Row::Ligatures => ("Ligatures", "Symbols like -> != >= drawn joined".to_owned()),
             Row::QuickTerminal => (
@@ -471,7 +493,8 @@ impl Ui<'_> {
             ),
             Row::ThemeFolder => ("Your themes", "Ghostty theme files dropped here join the list".to_owned()),
             Row::Background => {
-                ("Background", values.background.map_or("The theme's own".to_owned(), |i| BACKGROUNDS[i].0.to_owned()))
+                let names = backgrounds(values.mode);
+                ("Background", values.background.map_or("The theme's own".to_owned(), |i| names[i].0.to_owned()))
             }
             Row::Opacity => ("Background opacity", "How much of the desktop shows through".to_owned()),
             Row::Blur => ("Blur behind the window", "Soften what shows through".to_owned()),
@@ -539,9 +562,7 @@ impl Ui<'_> {
             Row::Field(Field::LlmModel) => ("Model name", "As the provider names it".to_owned()),
             Row::Field(Field::TypesafeKey) => ("TypeSafe key", "Lets Jev decide: command or answer".to_owned()),
             Row::Field(Field::ThemeName | Field::ThemeHex) | Row::Colors(_) => return,
-            Row::Customize | Row::ThemeName | Row::SlotHex | Row::Nudge | Row::DeleteTheme => {
-                self.editor_label(row, values)
-            }
+            Row::ThemeName | Row::SlotHex | Row::Nudge | Row::EditorActions => self.editor_label(row, values),
             Row::LineSpacing => ("Line spacing", "Room between the terminal's lines".to_owned()),
             Row::CursorShape => (
                 "Shape",
@@ -554,7 +575,7 @@ impl Ui<'_> {
         };
         let left = rect.x + 16.0;
         let right = rect.right() - 16.0;
-        let control_y = rect.y + (ROW - CONTROL_HEIGHT) / 2.0;
+        let control_y = rect.y + (rect.h - CONTROL_HEIGHT) / 2.0;
         // The control first, so the words know how much room they have:
         // in a narrow window, or a wider font (Linux's), a long description
         // is cut short with "…" rather than running under its button.
@@ -564,6 +585,12 @@ impl Ui<'_> {
         let room = (control_left - 12.0 - left).max(0.0);
         let label = self.text.elide(label, UI, 13.0, room);
         let detail = self.text.elide(&detail, UI, 11.5, room);
+        if detail.is_empty() {
+            // One line, in the middle of the row.
+            let baseline = (rect.y + (rect.h + self.text.ui_ascent(13.0) * 0.72) / 2.0).round();
+            self.text.draw_text(self.scene, &label, left, baseline, UI, 13.0, theme.text);
+            return;
+        }
         self.text.draw_text(self.scene, &label, left, rect.y + 25.0, UI, 13.0, theme.text);
         self.text.draw_text(self.scene, &detail, left, rect.y + 42.0, UI, 11.5, theme.text_dim);
     }
@@ -574,22 +601,31 @@ impl Ui<'_> {
             Row::Theme => {
                 let labels = ["‹".to_owned(), values.theme.clone(), "›".to_owned()];
                 self.segments(right, control_y, &labels, None, |i| match i {
-                    1 => Action::ThemeList,
+                    1 => Action::List(List::Themes),
                     _ => Action::Theme(i as i32 - 1),
                 });
             }
+            Row::Mode => {
+                let labels = Mode::ALL.map(|mode| mode.name().to_owned());
+                let at = Mode::ALL.iter().position(|&m| m == values.mode);
+                self.segments(right, control_y, &labels, at, |i| Action::Mode(Mode::ALL[i]));
+            }
+            Row::KeysHelp | Row::Key(_) | Row::Typed(_) => self.key_control(right, control_y, row, values),
             Row::Ligatures => self.toggle(right, rect.y, values.ligatures, Action::Ligatures(!values.ligatures)),
             Row::Font => {
                 let labels = ["‹".to_owned(), values.font.clone(), "›".to_owned()];
-                self.segments(right, control_y, &labels, None, |i| Action::Font(if i == 0 { -1 } else { 1 }));
+                self.segments(right, control_y, &labels, None, |i| match i {
+                    0 => Action::Font(-1),
+                    1 => Action::List(List::Fonts),
+                    _ => Action::Font(1),
+                });
             }
             Row::QuickTerminal => {
                 let on = values.quick_terminal.as_ref().is_some_and(Option::is_some);
                 self.toggle(right, rect.y, on, Action::QuickTerminal(!on));
             }
-            Row::Keys => self.button(right, control_y, "Edit Key Bindings", Action::EditKeys),
             Row::ThemeFolder => self.button(right, control_y, "Open Themes Folder", Action::OpenThemes),
-            Row::Background => self.swatches(right, rect.y + (ROW - SWATCH) / 2.0, values.background),
+            Row::Background => self.swatches(right, rect.y + (ROW - SWATCH) / 2.0, values),
             Row::Opacity => {
                 let labels: Vec<String> = OPACITIES.iter().map(|o| format!("{o}")).collect();
                 self.segments(right, control_y, &labels, Some(values.opacity), Action::Opacity);
@@ -649,7 +685,7 @@ impl Ui<'_> {
             Row::Field(field) => self.field(right, control_y, FIELD_WIDTH, field, values),
             Row::Connected(index) => self.button(right, control_y, "Disconnect", Action::Disconnect(index)),
             Row::Phone | Row::Colors(_) => {}
-            Row::Customize | Row::ThemeName | Row::SlotHex | Row::Nudge | Row::DeleteTheme => {
+            Row::ThemeName | Row::SlotHex | Row::Nudge | Row::EditorActions => {
                 self.editor_control(right, control_y, row, values)
             }
             Row::LineSpacing => {

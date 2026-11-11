@@ -8,6 +8,9 @@ use std::time::SystemTime;
 use crate::keys::Named;
 use crate::platform::{mods, KeyEvent};
 
+mod edit;
+pub use edit::*;
+
 /// What a binding does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Bind {
@@ -191,6 +194,32 @@ fn unescape(text: &str) -> Vec<u8> {
     out
 }
 
+/// One line of a keys file as a binding; None for a comment, a blank
+/// line, or one that doesn't make sense.
+pub fn parse_line(line: &str) -> Option<(Combo, Bind)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let (keys, action) = line.split_once('=')?;
+    // `cmd+= = bigger_text`: the key is '=', the separator the next one.
+    let (keys, action) = if action.trim_start().starts_with('=') && keys.ends_with('+') {
+        (format!("{keys}="), action.trim_start()[1..].to_owned())
+    } else {
+        (keys.to_owned(), action.to_owned())
+    };
+    let combo = parse_combo(&keys)?;
+    let action = action.trim();
+    let bind = if let Some(text) = action.strip_prefix("text:") {
+        Bind::Text(unescape(text))
+    } else if matches!(action, "ignore" | "unbind" | "none") {
+        Bind::Ignore
+    } else {
+        Bind::Action(ACTIONS.iter().find(|(name, _)| *name == action)?.0)
+    };
+    Some((combo, bind))
+}
+
 /// The bindings in a keys file, and the lines that didn't make sense.
 pub fn parse(text: &str) -> (Vec<(Combo, Bind)>, Vec<String>) {
     let mut bindings = Vec::new();
@@ -200,25 +229,7 @@ pub fn parse(text: &str) -> (Vec<(Combo, Bind)>, Vec<String>) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let parsed = line.split_once('=').and_then(|(keys, action)| {
-            // `cmd+= = bigger_text`: the key is '=', the separator the next one.
-            let (keys, action) = if action.trim_start().starts_with('=') && keys.ends_with('+') {
-                (format!("{keys}="), action.trim_start()[1..].to_owned())
-            } else {
-                (keys.to_owned(), action.to_owned())
-            };
-            let combo = parse_combo(&keys)?;
-            let action = action.trim();
-            let bind = if let Some(text) = action.strip_prefix("text:") {
-                Bind::Text(unescape(text))
-            } else if matches!(action, "ignore" | "unbind" | "none") {
-                Bind::Ignore
-            } else {
-                Bind::Action(ACTIONS.iter().find(|(name, _)| *name == action)?.0)
-            };
-            Some((combo, bind))
-        });
-        match parsed {
+        match parse_line(line) {
             Some(binding) => bindings.push(binding),
             None => errors.push(format!("line {}: {line}", number + 1)),
         }

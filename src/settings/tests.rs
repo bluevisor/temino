@@ -8,11 +8,14 @@ fn sample() -> Values {
         themes: 12,
         palettes: Vec::new(),
         palette: 0,
-        custom: false,
         editor: None,
-        bindings: 0,
+        mode: Mode::Dark,
+        keys: Vec::new(),
+        recording: None,
         ligatures: true,
         font: "JetBrains Mono".into(),
+        fonts: Vec::new(),
+        font_index: 0,
         quick_terminal: Some(None),
         opacity: 0,
         blur: false,
@@ -48,19 +51,19 @@ fn every_control_can_be_clicked() {
     let theme = Theme::dark();
     let values = sample();
     let mut page = Page::default();
-    let rect = Rect::new(200.0, 0.0, 900.0, 2000.0);
-    scene.reset(1100.0, 2000.0, 1.0, theme.background);
+    let rect = Rect::new(200.0, 0.0, 900.0, 8000.0);
+    scene.reset(1100.0, 8000.0, 1.0, theme.background);
     page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
     let actions: Vec<Action> = page.hits.iter().map(|&(_, a)| a).collect();
-    // A preset in use: Customize only offers a copy.
-    let mut expected =
-        vec![Action::Theme(-1), Action::ThemeList, Action::Theme(1), Action::DuplicateTheme, Action::OpenThemes];
-    expected.extend((0..BACKGROUNDS.len()).map(Action::Background));
+    let mut expected = vec![Action::Theme(-1), Action::List(List::Themes), Action::Theme(1)];
+    expected.extend(Mode::ALL.map(Action::Mode));
+    expected.push(Action::OpenThemes);
+    expected.extend((0..6).map(Action::Background));
     expected.extend((0..OPACITIES.len()).map(Action::Opacity));
     expected.extend([
         Action::Blur(true),
         Action::Font(-1),
-        Action::Font(1),
+        Action::List(List::Fonts),
         Action::Font(1),
         Action::Zoom(-1),
         Action::Zoom(0),
@@ -73,7 +76,6 @@ fn every_control_can_be_clicked() {
     expected.extend((0..KINDS.len()).map(Action::Shell));
     expected.extend((0..=FETCHES.len()).map(Action::Fetch));
     expected.push(Action::FetchConfig);
-    expected.extend([Action::EditKeys, Action::QuickTerminal(true)]);
     expected.extend([
         Action::TabsTop(false),
         Action::TabsTop(true),
@@ -83,6 +85,11 @@ fn every_control_can_be_clicked() {
     expected.extend((0..PROVIDERS.len()).map(Action::Provider));
     expected.extend(Field::ALL.map(Action::Edit));
     expected.extend([Action::Updates(false), Action::Analytics(false), Action::CheckForUpdates]);
+    // Keys: nothing changed, so no Reset All; a shortcut per action.
+    expected.extend([Action::EditKeys, Action::QuickTerminal(true)]);
+    for (_, group) in crate::bindings::GROUPS {
+        expected.extend(group.iter().filter(|a| keys::shown(a)).map(|&a| Action::RecordKey(a)));
+    }
     assert_eq!(actions, expected);
     // A click lands on what's under it, and nothing overlaps.
     for (rect, action) in &page.hits {
@@ -99,15 +106,12 @@ fn the_theme_editor_offers_every_color_of_a_theme_of_your_own() {
     let mut palette = crate::theme::library("/nonexistent")[1].copy_as("Mine");
     palette.file = Some("/nonexistent/Mine".into());
     let edit = ThemeEdit { palette, slot: Slot::Ansi(1), confirm_delete: false };
-    let values = Values { custom: true, editor: Some(edit), ..sample() };
+    let values = Values { editor: Some(edit), ..sample() };
     let mut page = Page::default();
     let rect = Rect::new(200.0, 0.0, 900.0, 3000.0);
     scene.reset(1100.0, 3000.0, 1.0, theme.background);
     page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
     let actions: Vec<Action> = page.hits.iter().map(|&(_, a)| a).collect();
-    // Customize: Done and Duplicate, right to left.
-    let at = actions.iter().position(|&a| a == Action::Theme(1)).unwrap();
-    assert_eq!(actions[at + 1..at + 4], [Action::ThemeEditor(false), Action::DuplicateTheme, Action::OpenThemes]);
     // The editor: name, 5 + 8 + 8 colors, hex, three nudges, delete.
     let start = actions.iter().position(|&a| a == Action::Edit(Field::ThemeName)).unwrap();
     let mut expected = vec![Action::Edit(Field::ThemeName)];
@@ -117,17 +121,16 @@ fn the_theme_editor_offers_every_color_of_a_theme_of_your_own() {
     for channel in [Channel::Lightness, Channel::Saturation, Channel::Hue] {
         expected.extend((-1..=1).map(|step| Action::Nudge(channel, step)));
     }
-    expected.push(Action::DeleteTheme);
+    // Done, Duplicate and Delete, right to left.
+    expected.extend([Action::ThemeEditor(false), Action::DuplicateTheme, Action::DeleteTheme]);
     assert_eq!(actions[start..start + expected.len()], expected[..]);
     for (rect, action) in &page.hits {
         let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(page.action_at(x, y), Some(*action), "{action:?}");
     }
-    // A theme of your own with the editor closed offers to edit it.
-    let values = Values { custom: true, ..sample() };
-    page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
+    // Closed, the editor's rows are gone.
+    page.draw(&mut scene, &mut text, &theme, rect, &sample(), (0.0, 0.0));
     let actions: Vec<Action> = page.hits.iter().map(|&(_, a)| a).collect();
-    assert!(actions.contains(&Action::ThemeEditor(true)));
     assert!(!actions.iter().any(|a| matches!(a, Action::Slot(_) | Action::DeleteTheme)));
 }
 
@@ -187,16 +190,16 @@ fn a_page_that_fits_never_scrolls() {
 fn the_wheel_scrolls_the_theme_list_only_while_over_it() {
     let list = Rect::new(100.0, 100.0, 200.0, 300.0);
     let mut page = Page { content_height: 2000.0, view_height: 600.0, list, ..Page::default() };
-    page.toggle_themes();
-    assert!(page.themes_open);
+    page.toggle(List::Themes);
+    assert_eq!(page.open, Some(List::Themes));
     page.list_scroll = 0.0;
     page.wheel(2.0, 150.0, 200.0);
     assert_eq!((page.list_scroll, page.scroll), (2.0 * LIST_ROW, 0.0));
     page.wheel(1.0, 50.0, 200.0);
     assert_eq!((page.list_scroll, page.scroll), (2.0 * LIST_ROW, WHEEL_STEP));
     // Closed, the list's old place scrolls the page.
-    page.toggle_themes();
-    assert!(!page.themes_open);
+    page.toggle(List::Themes);
+    assert_eq!(page.open, None);
     page.wheel(1.0, 150.0, 200.0);
     assert_eq!(page.scroll, 2.0 * WHEEL_STEP);
 }
@@ -211,4 +214,58 @@ fn a_click_goes_to_what_was_drawn_last_under_it() {
     assert_eq!(page.action_at(150.0, 250.0), None);
     // Rectangles take their top-left edge, not their bottom-right one.
     assert_eq!(page.action_at(400.0, 10.0), None);
+}
+
+/// Draws the page with `values` and returns every click it offers.
+fn actions_of(page: &mut Page, values: &Values) -> Vec<Action> {
+    let mut scene = Scene::new();
+    let mut text = TextSystem::new(14.0);
+    let theme = Theme::dark();
+    let rect = Rect::new(200.0, 0.0, 900.0, 8000.0);
+    scene.reset(1100.0, 8000.0, 1.0, theme.background);
+    page.draw(&mut scene, &mut text, &theme, rect, values, (0.0, 0.0));
+    page.hits.iter().map(|&(_, a)| a).collect()
+}
+
+#[test]
+fn the_theme_list_ends_with_customize() {
+    let palettes = crate::theme::library("/nonexistent");
+    let values = Values { palettes: palettes.clone(), palette: 2, ..sample() };
+    let mut page = Page { open: Some(List::Themes), ..Page::default() };
+    let actions = actions_of(&mut page, &values);
+    assert_eq!(page.open, Some(List::Themes));
+    let at = actions.iter().position(|&a| a == Action::PickTheme(0)).unwrap();
+    // The list's padding first (the one in use), then every theme, then Customize….
+    assert_eq!(actions[at - 1], Action::PickTheme(2));
+    let picks: Vec<Action> = (0..palettes.len()).map(Action::PickTheme).collect();
+    assert_eq!(actions[at..at + palettes.len()], picks[..]);
+    assert_eq!(actions[at + palettes.len()], Action::Customize);
+}
+
+#[test]
+fn the_font_name_drops_a_list_of_every_font() {
+    let fonts: Vec<String> = ["JetBrains Mono (built in)", "Menlo", "Monaco"].map(String::from).to_vec();
+    let values = Values { fonts, font_index: 1, ..sample() };
+    let mut page = Page { open: Some(List::Fonts), ..Page::default() };
+    let actions = actions_of(&mut page, &values);
+    let at = actions.iter().position(|&a| a == Action::PickFont(0)).unwrap();
+    assert_eq!(actions[at - 1..at + 3], [1, 0, 1, 2].map(Action::PickFont));
+    assert!(!actions.contains(&Action::Customize));
+}
+
+#[test]
+fn a_changed_shortcut_offers_reset_and_waiting_shows_one_cap() {
+    let (keys, _) = crate::bindings::parse("ctrl+t = new_tab\ncmd+j = text:ls\\r\n");
+    let values = Values { keys, recording: Some("copy"), ..sample() };
+    let actions = actions_of(&mut Page::default(), &values);
+    // New tab: Reset, then its two keys (right to left).
+    let at = actions.iter().position(|&a| a == Action::ResetKey("new_tab")).unwrap();
+    assert_eq!(actions[at - 2..at], [Action::RecordKey("new_tab"); 2]);
+    assert!(actions.contains(&Action::ResetKeys));
+    // Copy waits for keys: one cap, no Reset.
+    assert_eq!(actions.iter().filter(|&&a| a == Action::RecordKey("copy")).count(), 1);
+    assert!(!actions.contains(&Action::ResetKey("copy")));
+    // The key that types text can be removed.
+    let combo = crate::bindings::parse_combo("cmd+j").unwrap();
+    assert!(actions.contains(&Action::RemoveTyped(combo)));
 }

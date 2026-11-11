@@ -1,8 +1,18 @@
 use super::*;
 
 impl App {
+    /// Light or Dark: the one picked, else the theme's own.
+    pub(super) fn shown_mode(&self) -> Mode {
+        self.mode.unwrap_or_else(|| self.themes.get(self.palette).map_or(Mode::Dark, Palette::mode))
+    }
+    /// Settings ▸ Appearance ▸ Light or dark: every theme in `mode` from now on.
+    pub(super) fn set_mode(&mut self, mode: Mode) {
+        self.mode = Some(mode);
+        crate::save_setting("appearance", &mode.name().to_lowercase());
+        self.apply_theme();
+    }
     pub(super) fn set_background(&mut self, index: usize) {
-        let Some(&(name, _)) = BACKGROUNDS.get(index) else { return };
+        let Some(&(name, _)) = backgrounds(self.shown_mode()).get(index) else { return };
         self.background = Some(index);
         crate::save_setting("background", name);
         self.apply_theme();
@@ -14,7 +24,7 @@ impl App {
         let (x, y) = self.mouse;
         let hovered = match self.settings.action_at(x, y) {
             Some(Action::PickTheme(index))
-                if self.settings.themes_open && matches!(self.pane_at(x, y), Some((SETTINGS, _))) =>
+                if self.settings.open == Some(List::Themes) && matches!(self.pane_at(x, y), Some((SETTINGS, _))) =>
             {
                 Some(index)
             }
@@ -27,37 +37,66 @@ impl App {
         match hovered.and_then(|index| self.themes.get(index)) {
             Some(palette) => {
                 // Picked, a theme drops the background preset.
-                self.ctx.theme = build_theme(palette, None, self.ctx.theme.opacity);
+                let mode = self.mode.unwrap_or_else(|| palette.mode());
+                self.ctx.theme = build_theme(palette, None, self.ctx.theme.opacity, mode);
                 platform::set_background(self.ctx.theme.background.to_rgb8());
                 self.dirty = true;
             }
             None => self.apply_theme(),
         }
     }
+    /// The fonts to pick from: the bundled JetBrains Mono (None) first,
+    /// then every installed monospaced family.
+    pub(super) fn font_choices() -> Vec<Option<String>> {
+        let mut choices: Vec<Option<String>> = vec![None];
+        // Not the system's hidden faces (".LastResort") or emoji.
+        let usable = |f: &String| f != "JetBrains Mono" && !f.starts_with('.') && !f.contains("Emoji");
+        choices.extend(crate::fonts::families().into_iter().filter(usable).map(Some));
+        choices
+    }
+    /// Where the font in use is in `choices`.
+    fn font_at(choices: &[Option<String>]) -> usize {
+        let current = crate::setting("font").filter(|f| !f.is_empty());
+        choices.iter().position(|c| *c == current).unwrap_or(0)
+    }
     /// Settings ▸ Text ▸ Font: the monospaced family `step` places along
     /// the installed ones, the bundled JetBrains Mono first.
     pub(super) fn step_font(&mut self, step: i32) {
-        let mut choices: Vec<Option<String>> = vec![None];
-        choices.extend(crate::fonts::families().into_iter().filter(|f| f != "JetBrains Mono").map(Some));
-        let current = crate::setting("font").filter(|f| !f.is_empty());
-        let at = choices.iter().position(|c| *c == current).unwrap_or(0) as i32;
+        let choices = App::font_choices();
+        let at = App::font_at(&choices) as i32;
         let n = choices.len() as i32;
         // A family that won't load is passed over, in the same direction.
         for tries in 1..n {
             let next = &choices[(at + step * tries).rem_euclid(n) as usize];
-            match self.ctx.text.set_mono(next.as_deref()) {
-                Ok(()) => {
-                    crate::save_setting("font", next.as_deref().unwrap_or(""));
-                    for pane in &mut self.panes {
-                        pane.cells_changed(&self.ctx.text);
-                    }
-                    self.relayout();
-                    return;
-                }
-                Err(error) => crate::trace(&format!("font {next:?}: {error}")),
+            if self.use_font(next.as_deref()) {
+                return;
             }
         }
         self.ctx.show_toast("No other monospaced fonts to choose from");
+    }
+    /// The font at `index` in the font list, picked.
+    pub(super) fn pick_font(&mut self, index: usize) {
+        let Some(choice) = self.font_choices.get(index).cloned() else { return };
+        if !self.use_font(choice.as_deref()) {
+            self.ctx.show_toast(&format!("{} won't load", choice.as_deref().unwrap_or("JetBrains Mono")));
+        }
+    }
+    /// The terminal's font, if it loads; false if it doesn't.
+    fn use_font(&mut self, family: Option<&str>) -> bool {
+        match self.ctx.text.set_mono(family) {
+            Ok(()) => {
+                crate::save_setting("font", family.unwrap_or(""));
+                for pane in &mut self.panes {
+                    pane.cells_changed(&self.ctx.text);
+                }
+                self.relayout();
+                true
+            }
+            Err(error) => {
+                crate::trace(&format!("font {family:?}: {error}"));
+                false
+            }
+        }
     }
     /// Settings ▸ Theme: the scheme `step` places along the library; its
     /// own background replaces one picked before.
@@ -89,10 +128,12 @@ impl App {
         }
     }
     pub(super) fn apply_theme(&mut self) {
+        let mode = self.shown_mode();
         let palette = self.themes.get(self.palette).unwrap_or(&self.themes[0]);
-        self.ctx.theme = build_theme(palette, self.background, self.ctx.theme.opacity);
+        self.ctx.theme = build_theme(palette, self.background, self.ctx.theme.opacity, mode);
         platform::set_background(self.ctx.theme.background.to_rgb8());
-        platform::set_background_menu(&BACKGROUNDS.map(|(name, _)| name), self.background.unwrap_or(usize::MAX));
+        let names = backgrounds(mode).map(|(name, _)| name);
+        platform::set_background_menu(&names, self.background.unwrap_or(usize::MAX));
         self.dirty = true;
     }
     pub(super) fn set_opacity(&mut self, index: usize) {
@@ -256,13 +297,26 @@ impl App {
             background: self.background,
             theme: self.themes.get(self.palette).map(|t| t.name.clone()).unwrap_or_default(),
             themes: self.themes.len(),
-            palettes: if self.settings.themes_open { self.themes.clone() } else { Vec::new() },
+            palettes: match self.settings.open {
+                Some(List::Themes) => self.themes.iter().map(|p| p.in_mode(self.shown_mode())).collect(),
+                _ => Vec::new(),
+            },
             palette: self.palette,
-            custom: self.themes.get(self.palette).is_some_and(|t| t.file.is_some()),
             editor: self.theme_edit_values(),
-            bindings: self.bindings.list.len(),
+            mode: self.shown_mode(),
+            keys: self.bindings.list.clone(),
+            recording: self.recording,
             ligatures: self.ctx.text.ligatures,
             font: crate::setting("font").filter(|f| !f.is_empty()).unwrap_or_else(|| "JetBrains Mono".to_owned()),
+            fonts: match self.settings.open {
+                Some(List::Fonts) => self
+                    .font_choices
+                    .iter()
+                    .map(|c| c.clone().unwrap_or_else(|| "JetBrains Mono (built in)".to_owned()))
+                    .collect(),
+                _ => Vec::new(),
+            },
+            font_index: App::font_at(&self.font_choices),
             quick_terminal: platform::QUICK_TERMINAL.then(App::quick_terminal_key),
             opacity: self.opacity,
             blur: self.blur,
@@ -302,23 +356,45 @@ impl App {
         // what it became. Opening the theme list, starting to type in
         // a field and checking for updates aren't changes.
         // Nor are opening the theme editor and picking a color in it.
-        let browsing = matches!(action, Action::ThemeEditor(_) | Action::Slot(_));
-        if !browsing && !matches!(action, Action::Edit(_) | Action::ThemeList | Action::CheckForUpdates) {
+        let browsing = matches!(action, Action::ThemeEditor(_) | Action::Slot(_) | Action::RecordKey(_));
+        if !browsing && !matches!(action, Action::Edit(_) | Action::List(_) | Action::CheckForUpdates) {
             crate::analytics::bump(crate::analytics::Counter::SettingsChanges);
         }
         match action {
             Action::Background(index) => self.set_background(index),
             Action::Theme(step) => self.step_theme(step),
             Action::Font(step) => self.step_font(step),
-            Action::ThemeList => {
-                self.themes = theme::library(&themes_dir());
-                self.settings.toggle_themes();
+            Action::List(list) => {
+                match list {
+                    List::Themes => self.themes = theme::library(&themes_dir()),
+                    List::Fonts => self.font_choices = App::font_choices(),
+                }
+                self.settings.toggle(list);
             }
             Action::PickTheme(index) => {
-                self.settings.themes_open = false;
+                self.settings.open = None;
                 self.previewing = None;
                 self.step_theme(index as i32 - self.palette as i32);
             }
+            Action::PickFont(index) => {
+                self.settings.open = None;
+                self.pick_font(index);
+            }
+            Action::Customize => {
+                self.settings.open = None;
+                self.previewing = None;
+                self.finish_field();
+                self.customize_theme();
+            }
+            Action::Mode(mode) => self.set_mode(mode),
+            Action::RecordKey(action) => {
+                self.finish_field();
+                // A second click on the one waiting stops waiting.
+                self.recording = if self.recording == Some(action) { None } else { Some(action) };
+            }
+            Action::ResetKey(action) => self.rebind(action, bindings::default_combo(action)),
+            Action::ResetKeys => self.reset_keys(),
+            Action::RemoveTyped(combo) => self.remove_typed(combo),
             Action::QuickTerminal(on) => {
                 let keys = crate::setting("quick_terminal").filter(|k| !k.is_empty() && k != "off");
                 let keys = if on { keys.unwrap_or_else(|| QUICK_TERMINAL_KEY.to_owned()) } else { "off".to_owned() };
@@ -554,10 +630,11 @@ impl App {
 /// How long a pane sits idle before coming back to it shows a recap:
 /// `TEMINO_RECAP_MINUTES`, else the `recap_minutes` setting, else 10.
 /// Zero turns it off (Command+I still shows one).
-/// A scheme from the library, on the picked background if there is one.
-pub(super) fn build_theme(palette: &Palette, background: Option<usize>, opacity: f32) -> Theme {
-    let theme = palette.theme();
-    let theme = match background.and_then(|i| BACKGROUNDS.get(i)) {
+/// A scheme from the library in `mode`, on the picked background if there
+/// is one.
+pub(super) fn build_theme(palette: &Palette, background: Option<usize>, opacity: f32, mode: Mode) -> Theme {
+    let theme = palette.in_mode(mode).theme();
+    let theme = match background.and_then(|i| backgrounds(mode).get(i)) {
         Some(&(_, rgb)) => theme.with_background(rgb),
         None => theme,
     };

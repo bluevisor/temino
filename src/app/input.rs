@@ -90,6 +90,10 @@ impl App {
     }
     /// A key: the keys file's binding for it, else the default.
     pub(super) fn key(&mut self, key: KeyEvent) {
+        // Settings ▸ Keys waiting for keys takes them, shortcuts and all.
+        if self.record_key(&key) {
+            return;
+        }
         if self.renaming.is_none() && self.field.is_none() {
             if self.bindings.refresh() && !self.bindings.errors.is_empty() {
                 let errors = &self.bindings.errors;
@@ -147,8 +151,7 @@ impl App {
             return;
         }
         if key.named == Some(Named::Escape) {
-            if self.settings.themes_open {
-                self.settings.themes_open = false;
+            if self.settings.open.take().is_some() {
                 self.dirty = true;
                 return;
             }
@@ -352,12 +355,21 @@ impl App {
         if !on_field {
             self.finish_field();
         }
-        // A click off the theme list closes it, and does nothing else.
-        if self.settings.themes_open {
-            let on_list = matches!(self.pane_at(x, y), Some((SETTINGS, _)))
-                && matches!(self.settings.action_at(x, y), Some(Action::PickTheme(_) | Action::ThemeList));
+        let in_settings = matches!(self.pane_at(x, y), Some((SETTINGS, _)));
+        let action = if in_settings { self.settings.action_at(x, y) } else { None };
+        // A click anywhere but a shortcut stops waiting for keys.
+        if self.recording.is_some() && !matches!(action, Some(Action::RecordKey(_))) {
+            self.recording = None;
+            self.dirty = true;
+        }
+        // A click off the open list closes it, and does nothing else.
+        if self.settings.open.is_some() {
+            let on_list = matches!(
+                action,
+                Some(Action::PickTheme(_) | Action::PickFont(_) | Action::List(_) | Action::Customize)
+            );
             if !on_list {
-                self.settings.themes_open = false;
+                self.settings.open = None;
                 self.dirty = true;
                 return;
             }
@@ -541,7 +553,7 @@ impl App {
     }
     pub(super) fn mouse_moved(&mut self, x: f32, y: f32, pressed: i32) {
         self.mouse = (x, y);
-        if self.settings.themes_open {
+        if self.settings.open.is_some() {
             // The theme under the pointer previews (see `preview_theme`).
             self.dirty = true;
         }
