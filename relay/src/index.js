@@ -92,16 +92,22 @@ async function login(request, env, url) {
   const ret = p.get("return") || "";
   if (!returnAllowed(ret, url.origin)) return page("Temino", "<h1>Can't sign in</h1><p>That sign-in link isn't one of Temino's.</p>");
   const pub = p.get("pub") || "";
+  // The account the phone's Mac is signed in with, "you@example.com (Google)".
+  const mac = (p.get("for") || "").slice(0, 160);
+  const google = /^(\S+@\S+) \(Google\)$/.exec(mac);
   if (!/^[0-9a-f]{64}$/.test(pub)) return page("Temino", "<h1>Can't sign in</h1><p>The device's key is missing.</p>");
   const req = await sign(env, {
     ret, state: p.get("state") || "", pub, nonce: random(),
     name: (p.get("name") || "Device").slice(0, 60), kind: p.get("kind") === "desktop" ? "desktop" : "phone",
+    // Google's chooser starts on the account the Mac uses.
+    hint: google ? google[1] : "",
     exp: Date.now() + 10 * 60 * 1000,
   });
   const q = `?req=${encodeURIComponent(req)}`;
   const dev = env.DEV_LOGIN === "1" ? `<a class="b" href="/auth/dev${q}">Dev sign-in (local only)</a>` : "";
   return page("Sign in to Temino", `<h1>Sign in to Temino</h1>
-<p>Connect <b>${esc(p.get("name") || "this device")}</b> to your other Temino devices.</p>
+<p>Connect <b>${esc(p.get("name") || "this device")}</b> to your other Temino devices.</p>${mac
+    ? `<p>Your Mac is signed in as <b>${esc(mac)}</b>. Use that same account here.</p>` : ""}
 <a class="b apple" href="/auth/apple${q}">Continue with Apple</a>
 <a class="b" href="/auth/google${q}">Continue with Google</a>${dev}`);
 }
@@ -135,6 +141,7 @@ async function google(env, url) {
     response_type: "code", scope: "openid email profile", state: await hold(env, req), nonce: req.nonce,
     prompt: "select_account",
   });
+  if (req.hint) q.set("login_hint", req.hint);
   return Response.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${q}`, 302);
 }
 

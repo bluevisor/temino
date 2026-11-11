@@ -75,11 +75,26 @@ async function loadKeys() {
 }
 
 // ---- signing in
+// The account the Mac whose QR code opened this page is signed in with,
+// "you@example.com (Google)", from the code's `#for=`. Kept so every
+// sign-in screen can say which account to use; none when opened by hand.
+function takeHint() {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (!hash.has("for")) return;
+  store.set("temino-for", hash.get("for").slice(0, 160) || null);
+  hash.delete("for");
+  const rest = hash.toString();
+  history.replaceState(null, "", location.pathname + location.search + (rest ? `#${rest}` : ""));
+}
+const macAccount = () => store.get("temino-for");
+const macEmail = () => (/^(.*?)(?: \((?:Apple|Google)\))?$/.exec(macAccount() || "")[1] || "").toLowerCase();
+
 function signIn() {
   const state = hex(crypto.getRandomValues(new Uint8Array(12)));
   store.set("temino-state", state);
   const name = /iPad/.test(navigator.userAgent) ? "iPad" : /iPhone/.test(navigator.userAgent) ? "iPhone" : "Browser";
   const q = new URLSearchParams({ return: `${location.origin}/app`, state, pub: hex(keys.public), name, kind: "phone" });
+  if (macAccount()) q.set("for", macAccount());
   location.href = `/login?${q}`;
 }
 
@@ -103,7 +118,10 @@ function center(html) {
 function connect() {
   const token = store.get("temino-token");
   if (!token) {
-    center(`<h1>Temino Remote</h1><p>Sign in with the account you use in Temino on your Mac.</p><button id="signin">Sign In</button>`);
+    const which = macAccount()
+      ? `Your Mac is signed in as <b>${esc(macAccount())}</b>. Sign in here with that same account.`
+      : "Sign in with the account you use in Temino on your Mac.";
+    center(`<h1>Temino Remote</h1><p>${which}</p><button id="signin">Sign In</button>`);
     $("signin").onclick = signIn;
     return;
   }
@@ -353,13 +371,22 @@ function render() {
   }
 }
 
-// Who this phone is signed in as: "Signed in as you@example.com (Google)".
+// Who this phone is signed in as: "you@example.com (Google)".
 // A Mac shows the same in Settings, so the two can be told apart.
-function signedInAs() {
+function phoneAccount() {
   const self = devices.find((d) => d.id === me);
   const provider = { apple: " (Apple)", google: " (Google)" }[self && self.provider] || "";
-  const who = self && (self.email ? self.email + provider : self.person);
-  return who ? `Signed in as ${who}` : "Signed in";
+  return self ? (self.email ? self.email + provider : self.person) : "";
+}
+const signedInAs = () => phoneAccount() ? `Signed in as ${phoneAccount()}` : "Signed in";
+
+// Signed in to another account than the Mac whose code was scanned: no Mac
+// of that account is online here, and its email isn't this one's. (Apple
+// and Google with the same address share an account, so compare emails.)
+function wrongAccount() {
+  const self = devices.find((d) => d.id === me);
+  if (!macEmail() || !self || !self.email || self.email.toLowerCase() === macEmail()) return false;
+  return !devices.some((d) => d.kind === "desktop" && d.online);
 }
 
 // Every machine on your account.
@@ -369,7 +396,10 @@ function renderUser() {
   $("footer").hidden = true;
   document.body.classList.add("wide-off");
   const desktops = devices.filter((d) => d.kind === "desktop");
-  $("main").innerHTML = (desktops.length ? `<div class="cards">` + desktops.map((d) => `
+  const wrong = wrongAccount()
+    ? `<div class="center"><h1>Wrong account</h1><p>This phone is signed in as <b>${esc(phoneAccount())}</b>, but your Mac is signed in as <b>${esc(macAccount())}</b>. Sign out, then sign in with ${esc(macAccount())}.</p></div>`
+    : "";
+  $("main").innerHTML = wrong + (wrong && !desktops.length ? "" : desktops.length ? `<div class="cards">` + desktops.map((d) => `
     <div class="card ${d.id === machine ? "current" : ""}" data-machine="${esc(d.id)}">${dot(d.online ? "idle" : null)}
       <div class="t"><div>${esc(d.name)}</div><div>${d.online ? "Online" : "Offline"}</div></div>
     </div>`).join("") + `</div>` : `<div class="center"><p>No Mac on this account yet. In Temino, open Settings and sign in to Remote Control.</p></div>`)
@@ -889,6 +919,7 @@ addEventListener("resize", render);
 
 try {
   keys = await loadKeys();
+  takeHint();
   takeToken();
   connect();
 } catch (error) {
