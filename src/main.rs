@@ -10,7 +10,6 @@ mod analytics;
 mod api;
 mod app;
 mod ask;
-#[cfg(not(target_os = "haiku"))]
 mod avatar;
 mod bindings;
 mod cli;
@@ -34,7 +33,6 @@ mod notify;
 mod pane;
 mod picture;
 mod platform;
-#[cfg(not(target_os = "haiku"))]
 mod relay;
 mod remote;
 mod scene;

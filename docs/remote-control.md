@@ -50,11 +50,10 @@ with a team.
   that isn't connected can't be reached end to end. On iPhone, Web Push
   needs the page added to the Home Screen; then Notify Me on the You view.
 
-On the Mac: Settings ▸ Remote Control ▸ Sign In…  On the phone: open the
-relay's `/app`, sign in with the same account, then Allow on the Mac.
-
-Haiku has no relay yet (rustls's ring isn't known to build there); the
-local host below still works.
+On the computer (macOS, Linux or Haiku): Settings ▸ Remote Control ▸
+Sign In…  On the phone: open the relay's `/app`, sign in with the same
+account, then Allow on the computer. On Haiku the sign-in page opens in
+WebPositive.
 
 ## Local host (no relay)
 

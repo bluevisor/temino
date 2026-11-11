@@ -288,7 +288,6 @@ pub fn publish(no: u32, state: String, lines: HashMap<String, String>) {
 /// Starts the host, once, if the settings file turns it on. Returns where
 /// it listens.
 pub fn start() -> Option<&'static str> {
-    #[cfg(not(target_os = "haiku"))]
     crate::relay::start();
     STARTED
         .get_or_init(|| {
