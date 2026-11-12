@@ -75,11 +75,26 @@ async function loadKeys() {
 }
 
 // ---- signing in
+// The account the Mac whose QR code opened this page is signed in with,
+// "you@example.com (Google)", from the code's `#for=`. Kept so every
+// sign-in screen can say which account to use; none when opened by hand.
+function takeHint() {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (!hash.has("for")) return;
+  store.set("temino-for", hash.get("for").slice(0, 160) || null);
+  hash.delete("for");
+  const rest = hash.toString();
+  history.replaceState(null, "", location.pathname + location.search + (rest ? `#${rest}` : ""));
+}
+const macAccount = () => store.get("temino-for");
+const macEmail = () => (/^(.*?)(?: \((?:Apple|Google)\))?$/.exec(macAccount() || "")[1] || "").toLowerCase();
+
 function signIn() {
   const state = hex(crypto.getRandomValues(new Uint8Array(12)));
   store.set("temino-state", state);
   const name = /iPad/.test(navigator.userAgent) ? "iPad" : /iPhone/.test(navigator.userAgent) ? "iPhone" : "Browser";
   const q = new URLSearchParams({ return: `${location.origin}/app`, state, pub: hex(keys.public), name, kind: "phone" });
+  if (macAccount()) q.set("for", macAccount());
   location.href = `/login?${q}`;
 }
 
@@ -103,7 +118,10 @@ function center(html) {
 function connect() {
   const token = store.get("temino-token");
   if (!token) {
-    center(`<h1>Temino Remote</h1><p>Sign in with the account you use in Temino on your Mac.</p><button id="signin">Sign In</button>`);
+    const which = macAccount()
+      ? `Your Mac is signed in as <b>${esc(macAccount())}</b>. Sign in here with that same account.`
+      : "Sign in with the account you use in Temino on your Mac.";
+    center(`<h1>Temino Remote</h1><p>${which}</p><button id="signin">Sign In</button>`);
     $("signin").onclick = signIn;
     return;
   }
@@ -301,6 +319,7 @@ function render() {
   $("crumbs").innerHTML = crumbs.slice(0, depth).map((c, i) => i === depth - 1 ? `<b>${esc(c)}</b>` : esc(c)).join(" › ");
   $("footer").hidden = level !== "pane";
   document.body.classList.toggle("wide-off", level !== "pane");
+  if (level !== "pane") document.body.classList.remove("magfull");
   side(w);
   strip(w);
   if (level === "pane") {
@@ -353,13 +372,22 @@ function render() {
   }
 }
 
-// Who this phone is signed in as: "Signed in as you@example.com (Google)".
+// Who this phone is signed in as: "you@example.com (Google)".
 // A Mac shows the same in Settings, so the two can be told apart.
-function signedInAs() {
+function phoneAccount() {
   const self = devices.find((d) => d.id === me);
   const provider = { apple: " (Apple)", google: " (Google)" }[self && self.provider] || "";
-  const who = self && (self.email ? self.email + provider : self.person);
-  return who ? `Signed in as ${who}` : "Signed in";
+  return self ? (self.email ? self.email + provider : self.person) : "";
+}
+const signedInAs = () => phoneAccount() ? `Signed in as ${phoneAccount()}` : "Signed in";
+
+// Signed in to another account than the Mac whose code was scanned: no Mac
+// of that account is online here, and its email isn't this one's. (Apple
+// and Google with the same address share an account, so compare emails.)
+function wrongAccount() {
+  const self = devices.find((d) => d.id === me);
+  if (!macEmail() || !self || !self.email || self.email.toLowerCase() === macEmail()) return false;
+  return !devices.some((d) => d.kind === "desktop" && d.online);
 }
 
 // Every machine on your account.
@@ -369,7 +397,10 @@ function renderUser() {
   $("footer").hidden = true;
   document.body.classList.add("wide-off");
   const desktops = devices.filter((d) => d.kind === "desktop");
-  $("main").innerHTML = (desktops.length ? `<div class="cards">` + desktops.map((d) => `
+  const wrong = wrongAccount()
+    ? `<div class="center"><h1>Wrong account</h1><p>This phone is signed in as <b>${esc(phoneAccount())}</b>, but your Mac is signed in as <b>${esc(macAccount())}</b>. Sign out, then sign in with ${esc(macAccount())}.</p></div>`
+    : "";
+  $("main").innerHTML = wrong + (wrong && !desktops.length ? "" : desktops.length ? `<div class="cards">` + desktops.map((d) => `
     <div class="card ${d.id === machine ? "current" : ""}" data-machine="${esc(d.id)}">${dot(d.online ? "idle" : null)}
       <div class="t"><div>${esc(d.name)}</div><div>${d.online ? "Online" : "Offline"}</div></div>
     </div>`).join("") + `</div>` : `<div class="center"><p>No Mac on this account yet. In Temino, open Settings and sign in to Remote Control.</p></div>`)
@@ -613,9 +644,19 @@ function screenHtml(p, live) {
 // them). It follows the cursor: the Mac's command line when one is up, else
 // the row the cursor is on in a full-screen program (Claude Code's input
 // box, vim) or a running command. The grip on top sets how many lines of
-// output it shows (5 unless changed), kept on this phone.
+// output it shows (5 unless changed), kept on this phone. Dragged all the
+// way up, the magnifier takes the whole pane ("full"); dragging back down,
+// or the magnifier key, brings the pane back above it.
 let magOn = store.get("temino-mag") != null ? store.get("temino-mag") === "1" : !matchMedia("(min-width: 768px)").matches;
 let magLines = store.get("temino-mag-lines") != null ? clampLines(Number(store.get("temino-mag-lines")) || 0) : MAG_DEFAULT;
+let magFull = store.get("temino-mag-full") === "1";
+let magDrag = null; // the height, in px, the grip is being dragged to
+// The pane keeps at least this much above the magnifier; drag past it and
+// the magnifier takes the whole pane.
+const MAG_KEEP = 72;
+const magRow = () => parseFloat(getComputedStyle($("mag").querySelector("pre, .cmd") || $("mag")).lineHeight) || 22;
+// Lines to show: full, enough to fill the screen however long they are.
+const magWant = () => magFull ? Math.ceil(innerHeight / magRow()) + 2 : magLines;
 const termRows = (rows, cursor) => {
   const m = magRows(rows, cursor);
   return m.rows.length ? `<pre class="term">${m.rows.map((r, i) => rowHtml(r, i === m.cursor?.[0] ? m.cursor[1] : null, true)).join("\n")}</pre>` : "";
@@ -629,7 +670,7 @@ function magHtml(p) {
   const sc = p && p.screen;
   if (!sc) return null;
   const around = (lines, cr, cc) => {
-    const span = aroundCursor(lines, cr, magLines);
+    const span = aroundCursor(lines, cr, magWant());
     return span && { hist: termRows(lines.slice(0, span.from)), win: termRows(lines.slice(span.from, span.to), [cr - span.from, cc]) };
   };
   if (sc.mode === "grid") {
@@ -639,7 +680,7 @@ function magHtml(p) {
   const ed = sc.editor && shown(p.id, sc.editor);
   if (ed) {
     const atEnd = ed.cursor >= Array.from(ed.text).length, ghost = atEnd && ed.suggestion;
-    const out = lastOutput(sc.blocks, MAG_HISTORY + magLines), k = tailStart(out, magLines);
+    const want = magWant(), out = lastOutput(sc.blocks, MAG_HISTORY + want), k = tailStart(out, want);
     return { hist: termRows(out.slice(0, k)), win: termRows(out.slice(k))
       + `<div class="cmd"><span class="pr">${ed.ai ? "✦" : "❯"}</span> ${rowHtml(colored(ed), ghost ? null : ed.cursor)}`
       + (ghost ? `<span class="cur"> </span><span class="ghost">${esc(ed.suggestion)}</span>` : "") + `</div>` };
@@ -651,15 +692,22 @@ function drawMag(p) {
   const mag = $("mag");
   const m = magOn && level === "pane" ? magHtml(p) : null;
   mag.hidden = $("maggrip").hidden = !(m && m.win);
+  document.body.classList.toggle("magfull", !mag.hidden && magFull);
   $("magkey").classList.toggle("on", magOn);
   if (mag.hidden) return;
   const top = mag.scrollTop;
+  // What it may take beside the pane: its own height and the pane's, less
+  // what the pane keeps.
+  const room = (magFull ? 0 : $("main").offsetHeight + mag.offsetHeight) - MAG_KEEP;
   mag.innerHTML = `<div>${m.hist}</div><div class="win">${m.win}</div>`;
-  // As tall as the shown lines (CSS caps it near half the screen; no top
-  // padding, or a sliver of history shows), the history out of view above
-  // them. Dragged back, it keeps its place as new output comes in below.
+  // As tall as the shown lines (no top padding, or a sliver of history
+  // shows), the history out of view above them; full, as tall as the pane
+  // (CSS). Dragged back, it keeps its place as new output comes in below.
   const cs = getComputedStyle(mag), px = (k) => parseFloat(cs[k]) || 0;
-  mag.style.height = `${mag.querySelector(".win").offsetHeight + px("paddingBottom") + px("borderBottomWidth")}px`;
+  const fits = mag.querySelector(".win").offsetHeight + px("paddingBottom") + px("borderBottomWidth");
+  // Dragged, it's where the finger is, but no taller than all there is.
+  const h = magDrag != null ? Math.min(magDrag, fits) : Math.min(fits, Math.max(room, magRow()));
+  mag.style.height = magFull ? "" : `${Math.round(h)}px`;
   mag.scrollTop = magBack ? top : mag.scrollHeight;
 }
 $("mag").onscroll = () => {
@@ -668,31 +716,61 @@ $("mag").onscroll = () => {
 };
 const magHome = () => { if (magBack) { magBack = 0; drawMag(currentPane()); } };
 
-// Drag the grip up for more lines of output, down for fewer. A line is the
-// magnifier's line height; the count shows on the grip while dragging.
+// Drag the grip up for more lines of output, down for fewer: the divider
+// stays under your finger, and lets go on a whole line. A line is the
+// magnifier's line height; the count shows on the grip while dragging. Up
+// past what the pane keeps, the magnifier takes the whole pane.
+const setMagFull = (on) => { magFull = on; store.set("temino-mag-full", on ? "1" : "0"); };
 {
   const grip = $("maggrip");
   let start = null;
+  const label = () => {
+    grip.dataset.n = magFull ? "Full screen" : `${magLines} line${magLines === 1 ? "" : "s"}`;
+  };
   grip.onpointerdown = (e) => {
     e.preventDefault();
     grip.setPointerCapture(e.pointerId);
-    const row = parseFloat(getComputedStyle($("mag").querySelector("pre, .cmd") || $("mag")).lineHeight) || 22;
-    start = { y: e.clientY, lines: magLines, row };
+    const mag = $("mag"), cs = getComputedStyle(mag);
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+    // The pane and the magnifier share this; full, the magnifier has it all.
+    const room = (magFull ? 0 : $("main").offsetHeight) + mag.offsetHeight;
+    start = { y: e.clientY, h: mag.offsetHeight, room, row: magRow(), pad, lines: magLines };
     grip.classList.add("on");
-    grip.dataset.n = `${magLines} line${magLines === 1 ? "" : "s"}`;
+    label();
   };
   grip.onpointermove = (e) => {
     if (!start) return;
-    const n = clampLines(start.lines + (start.y - e.clientY) / start.row);
-    if (n === magLines) return;
+    const h = start.h + start.y - e.clientY;
+    const full = h > start.room - MAG_KEEP;
+    // The input line takes a row; the rest are lines of output. Full keeps
+    // the count it started with, to come back to.
+    const n = full ? start.lines : clampLines((h - start.pad) / start.row - 1);
+    const drag = full ? null : Math.max(start.row + start.pad, h);
+    if (full === magFull && n === magLines && drag === magDrag) return;
+    if (full !== magFull) setMagFull(full);
     magLines = n;
-    grip.dataset.n = `${n} line${n === 1 ? "" : "s"}`;
+    magDrag = drag;
     drawMag(currentPane());
+    // Fewer lines on the screen than asked for: count the ones there are.
+    const win = $("mag").querySelector(".win");
+    if (!full && win && $("mag").offsetHeight < drag) {
+      magLines = clampLines(win.innerText.split("\n").filter((l) => /[\p{L}\p{N}]/u.test(l)).length - 1);
+    }
+    label();
   };
   grip.onpointerup = grip.onpointercancel = () => {
     if (!start) return;
     start = null;
     grip.classList.remove("on");
+    // Let go on the whole line at or below the finger (wrapped lines are
+    // taller than the estimate).
+    const at = $("mag").offsetHeight;
+    magDrag = null;
+    drawMag(currentPane());
+    while (!magFull && magLines > 0 && $("mag").offsetHeight > at + 1) {
+      magLines--;
+      drawMag(currentPane());
+    }
     store.set("temino-mag-lines", String(magLines));
   };
 }
@@ -849,7 +927,13 @@ $("keys").onclick = (e) => {
   const b = e.target.closest("button");
   if (!b) return;
   if (b.id === "kb") { const t = $("type"); document.activeElement === t ? t.blur() : t.focus(); return; }
-  if (b.id === "magkey") { magOn = !magOn; store.set("temino-mag", magOn ? "1" : "0"); drawMag(currentPane()); return; }
+  if (b.id === "magkey") {
+    // Full: back to the pane with the magnifier under it. Else on or off.
+    if (magFull) setMagFull(false);
+    else { magOn = !magOn; store.set("temino-mag", magOn ? "1" : "0"); }
+    drawMag(currentPane());
+    return;
+  }
   const [, k, mods] = KEYS[b.dataset.key];
   key(k, mods || []);
 };
@@ -889,6 +973,7 @@ addEventListener("resize", render);
 
 try {
   keys = await loadKeys();
+  takeHint();
   takeToken();
   connect();
 } catch (error) {

@@ -396,6 +396,9 @@ pub struct App {
     menu_rect: Rect,
     dividers: Vec<Divider>,
     tab_menu: Option<TabMenu>,
+    /// The tab number a ⌘-digit just picked and when: a quick next digit
+    /// extends it (⌘1 ⌘2 → tab 12).
+    tab_digits: Option<(usize, Instant)>,
     renaming: Option<Rename>,
     /// The Settings text field being typed in, its text, and whether
     /// that's all selected.
@@ -578,6 +581,7 @@ impl App {
             menu_rect: Rect::default(),
             dividers: Vec::new(),
             tab_menu: None,
+            tab_digits: None,
             renaming: None,
             field: None,
             hover_tab: None,

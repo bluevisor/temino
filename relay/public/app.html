@@ -93,11 +93,17 @@
   #keys button { flex: none; padding: 6px 12px; }
   #keys #magkey.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--raised)); }
   /* The magnifier: the input line and the output above it in reading-size
-     type, scrolled to the cursor; at most about half the screen. Earlier
-     lines sit above, out of view: drag inside to scroll back to them. */
+     type, scrolled to the cursor, its lines at the bottom. Earlier lines sit
+     above, out of view: drag inside to scroll back to them. Its height is
+     set by the grip (app.js), up to the whole pane. */
   #mag { position: relative; margin: 0 0 8px; padding: 6px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 0 0 8px 8px;
-    border-top: 0; overflow-x: hidden; overflow-y: auto; max-height: 45dvh; scrollbar-width: none;
-    overscroll-behavior: contain; touch-action: pan-y; }
+    border-top: 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: none;
+    overscroll-behavior: contain; touch-action: pan-y; display: flex; flex-direction: column; }
+  #mag > div:first-child { margin-top: auto; }
+  /* Full: the magnifier takes the pane's place. */
+  body.magfull main { display: none; }
+  body.magfull footer { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  body.magfull #mag { flex: 1; min-height: 0; }
   /* Its grip: drag up for more lines of output, down for fewer. */
   #maggrip { height: 26px; display: flex; align-items: center; justify-content: center; touch-action: none; cursor: ns-resize;
     background: var(--bg); border: 1px solid var(--line); border-bottom: 0; border-radius: 8px 8px 0 0; color: var(--faint); font-size: 12px; }
@@ -150,6 +156,7 @@
     #side { display: block; grid-row: 2 / 4; overflow: auto; padding: 12px 0 12px 12px; border-right: 1px solid var(--line); }
     body.wide-off #side { display: none; }
     body.wide-off main, body.wide-off footer { grid-column: 1 / -1; }
+    body.magfull footer { grid-row: 2 / 4; }
     #side .card { padding: 9px 10px; margin-bottom: 6px; margin-right: 12px; }
     #side .pane { margin-left: 18px; font-size: 13px; }
     main { padding: 16px; }

@@ -315,10 +315,7 @@ impl App {
                     self.jump_to_needs(key.shift());
                     true
                 }
-                (_, Some(c @ '1'..='9')) => {
-                    self.switch_tab(c as usize - '1' as usize);
-                    true
-                }
+                (_, Some(c @ '0'..='9')) if self.tab_digit(c as usize - '0' as usize) => true,
                 (_, Some('=' | '+')) => {
                     self.step_font_size(1.0);
                     true

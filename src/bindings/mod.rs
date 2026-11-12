@@ -50,6 +50,25 @@ impl Combo {
     }
 }
 
+/// ⌘1…9 picks a tab. Linux desktops usually keep Super+1…9 for their dock,
+/// so there the shortcut adds Alt: Super+Alt+1 (Command+Option on a Mac
+/// keyboard) or Ctrl+Shift+Alt+1. Plain ⌘1 still works where it gets through.
+const TAB_KEYS: [&str; 9] = if cfg!(target_os = "linux") {
+    [
+        "cmd+alt+1",
+        "cmd+alt+2",
+        "cmd+alt+3",
+        "cmd+alt+4",
+        "cmd+alt+5",
+        "cmd+alt+6",
+        "cmd+alt+7",
+        "cmd+alt+8",
+        "cmd+alt+9",
+    ]
+} else {
+    ["cmd+1", "cmd+2", "cmd+3", "cmd+4", "cmd+5", "cmd+6", "cmd+7", "cmd+8", "cmd+9"]
+};
+
 /// Every action a key can be bound to, and the default shortcut that does
 /// it ("cmd" is the shortcut modifier on every platform).
 pub const ACTIONS: &[(&str, &str)] = &[
@@ -69,15 +88,15 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pane_right", "cmd+alt+right"),
     ("pane_up", "cmd+alt+up"),
     ("pane_down", "cmd+alt+down"),
-    ("tab_1", "cmd+1"),
-    ("tab_2", "cmd+2"),
-    ("tab_3", "cmd+3"),
-    ("tab_4", "cmd+4"),
-    ("tab_5", "cmd+5"),
-    ("tab_6", "cmd+6"),
-    ("tab_7", "cmd+7"),
-    ("tab_8", "cmd+8"),
-    ("tab_9", "cmd+9"),
+    ("tab_1", TAB_KEYS[0]),
+    ("tab_2", TAB_KEYS[1]),
+    ("tab_3", TAB_KEYS[2]),
+    ("tab_4", TAB_KEYS[3]),
+    ("tab_5", TAB_KEYS[4]),
+    ("tab_6", TAB_KEYS[5]),
+    ("tab_7", TAB_KEYS[6]),
+    ("tab_8", TAB_KEYS[7]),
+    ("tab_9", TAB_KEYS[8]),
     ("toggle_tab_list", "cmd+b"),
     ("extend_tab_list", "cmd+shift+b"),
     ("jump_to_agent", "cmd+`"),
@@ -470,6 +489,10 @@ mod tests {
         assert_eq!(default_event("zoom_pane").unwrap().named, Some(Named::Enter));
         assert!(default_event("quick_terminal").is_none());
         assert!(default_event("no_such_action").is_none());
+        // Tabs: ⌘1, or on Linux (where Super+1 is the dock's) ⌘⌥1.
+        let tab = default_event("tab_1").unwrap();
+        let alt = if cfg!(target_os = "linux") { mods::OPTION } else { 0 };
+        assert_eq!((tab.mods, tab.bytes.as_slice()), (mods::COMMAND | alt, &b"1"[..]));
         // The template is all comments, so a new keys file binds nothing.
         let template = template();
         assert_eq!(parse(&template), (Vec::new(), Vec::new()));

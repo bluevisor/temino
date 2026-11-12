@@ -10,15 +10,22 @@ impl Ui<'_> {
         let theme = self.theme;
         let left = rect.x + 16.0;
         self.text.draw_text(self.scene, "On your iPhone or iPad", left, rect.y + 25.0, UI, 13.0, theme.text);
-        let address = values.remote_url.trim_start_matches("https://");
+        let address = values.remote_url.split('#').next().unwrap_or_default().trim_start_matches("https://");
         let open = format!("Scan the code, or open {address}");
+        // The account's email once signed in (before that, or for a machine
+        // signed in before the relay passed it on, it may be a first name).
+        let same = if values.remote_account.contains('@') {
+            format!("Sign in there as {}", values.remote_account)
+        } else {
+            "Sign in with the same Apple or Google account".to_owned()
+        };
         let mut steps = Vec::new();
         if values.remote != Some(true) {
             steps.push("Sign in here first, with Sign In… above");
         }
         steps.extend([
             open.as_str(),
-            "Sign in with the same Apple or Google account",
+            same.as_str(),
             "Allow it here: Temino shows the code the phone shows",
             "For agent alerts: Share ▸ Add to Home Screen",
         ]);
