@@ -599,17 +599,30 @@ temino_round_corners(NSWindow* window)
 	}
 }
 
+// Windows in full screen, or on their way in or out of it. AppKit owns the
+// title bar strip all that time (it moves to a window of its own), and
+// sizing it then sets the two against each other: AppKit puts its height
+// back and looks again, we change it again, until the stack runs out.
+static NSHashTable<NSWindow*>* sFullScreen;
+// Whether the strip's frame is changing by our hand, not AppKit's.
+static bool sPlacing = false;
+
+static bool
+in_full_screen(NSWindow* window)
+{
+	return (window.styleMask & NSWindowStyleMaskFullScreen) != 0 || [sFullScreen containsObject:window];
+}
+
 static void
 place_traffic_lights(NSWindow* window)
 {
 	NSButton* close = [window standardWindowButton:NSWindowCloseButton];
 	NSView* bar = close.superview;
 	NSView* container = bar.superview;
-	static bool placing = false;
-	if (container == nil || sTitlebarHeight <= 0 || placing
-		|| (window.styleMask & NSWindowStyleMaskFullScreen) != 0)
+	if (container == nil || sTitlebarHeight <= 0 || sPlacing || in_full_screen(window)
+		|| container.window != window)
 		return;
-	placing = true;
+	sPlacing = true;
 	NSRect frame = container.frame;
 	if (NSHeight(frame) != sTitlebarHeight) {
 		DEBUG_LOG(@"titlebar: strip %.0f high set back to %.0f, style %#lx, strip in %@",
@@ -628,7 +641,7 @@ place_traffic_lights(NSWindow* window)
 		place.origin.y = round((sTitlebarHeight - NSHeight(place)) / 2);
 		[button setFrameOrigin:place.origin];
 	}
-	placing = false;
+	sPlacing = false;
 }
 
 
@@ -674,8 +687,18 @@ temino_titlebar(void* view_handle, double height)
 			NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
 			NSWindowDidBecomeKeyNotification,
 			NSWindowDidResignKeyNotification];
+		if (sFullScreen == nil)
+			sFullScreen = [NSHashTable weakObjectsHashTable];
+		[center addObserverForName:NSWindowWillEnterFullScreenNotification object:window queue:nil
+			usingBlock:^(NSNotification* note) {
+				DEBUG_LOG(@"window: %@", note.name);
+				[sFullScreen addObject:note.object];
+			}];
 		for (NSNotificationName name in names) {
 			[center addObserverForName:name object:window queue:nil usingBlock:^(NSNotification* note) {
+				// Out of full screen, the title bar is ours to place again.
+				if ([note.name isEqualToString:NSWindowDidExitFullScreenNotification])
+					[sFullScreen removeObject:note.object];
 				// A drag's resizes would fill the log; its end says enough.
 				if (!((NSWindow*)note.object).inLiveResize) {
 					DEBUG_LOG(@"window: %@, %.0fx%.0f, style %#lx", note.name,
@@ -687,8 +710,14 @@ temino_titlebar(void* view_handle, double height)
 			}];
 		}
 #ifdef TEMINO_DEBUG
-		for (NSNotificationName name in @[NSWindowWillEnterFullScreenNotification,
-				NSWindowWillExitFullScreenNotification, NSWindowDidChangeScreenNotification,
+		// TEMINO_FULLSCREEN_TEST=N: in and out of full screen N times, a few
+		// seconds apart, to watch the title bar through it in temino.log.
+		int rounds = atoi(getenv("TEMINO_FULLSCREEN_TEST") ?: "0");
+		for (int i = 0; i < rounds * 2; i++) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((2 + i * 4) * NSEC_PER_SEC)),
+				dispatch_get_main_queue(), ^{ [window toggleFullScreen:nil]; });
+		}
+		for (NSNotificationName name in @[NSWindowWillExitFullScreenNotification, NSWindowDidChangeScreenNotification,
 				NSWindowDidMiniaturizeNotification, NSWindowDidDeminiaturizeNotification]) {
 			[center addObserverForName:name object:window queue:nil usingBlock:^(NSNotification* note) {
 				DEBUG_LOG(@"window: %@", note.name);
@@ -699,9 +728,29 @@ temino_titlebar(void* view_handle, double height)
 		// with no window notification; its frame changing gives that away.
 		NSView* container = [window standardWindowButton:NSWindowCloseButton].superview.superview;
 		container.postsFrameChangedNotifications = YES;
+		__weak NSWindow* owner = window;
 		[center addObserverForName:NSViewFrameDidChangeNotification object:container queue:nil
-			usingBlock:^(NSNotification* note) {
-				place_traffic_lights(((NSView*)note.object).window);
+			usingBlock:^(__unused NSNotification* note) {
+				// Put back twice in one pass of the event loop and AppKit
+				// isn't giving way: let it have the bar, and place it once
+				// more when the pass is over.
+				static int sPutBack = 0;
+				NSWindow* window = owner;
+				if (window == nil || sPlacing || in_full_screen(window))
+					return;
+				if (sPutBack == 0) {
+					dispatch_async(dispatch_get_main_queue(), ^{
+						bool gaveWay = sPutBack > 2;
+						sPutBack = 0;
+						if (gaveWay) {
+							DEBUG_LOG(@"titlebar: AppKit kept its height; placed after the pass");
+							place_traffic_lights(owner);
+						}
+					});
+				}
+				if (++sPutBack > 2)
+					return;
+				place_traffic_lights(window);
 			}];
 	}
 }
