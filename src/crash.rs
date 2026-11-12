@@ -9,11 +9,16 @@
 //! temino.log and crash.log before the system's own crash report is made.
 
 use crate::store;
-use std::ffi::CString;
 use std::sync::OnceLock;
 
 /// This launch's `running-<pid>` file, taken away at exit.
-static MARKER: OnceLock<CString> = OnceLock::new();
+static MARKER: OnceLock<String> = OnceLock::new();
+
+// Declared here, not taken from the libc crate: Haiku builds without it.
+extern "C" {
+    fn atexit(callback: extern "C" fn()) -> i32;
+    fn kill(pid: i32, signal: i32) -> i32;
+}
 
 /// Starts tracking: says how the last session ended if it wasn't by
 /// quitting, notes this launch in temino.log and watches for a crash.
@@ -31,12 +36,9 @@ pub fn install() {
         std::env::consts::ARCH
     ));
     let marker = format!("{dir}/running-{}", std::process::id());
-    if std::fs::write(&marker, store::timestamp_now()).is_ok() {
-        if let Ok(path) = CString::new(marker) {
-            let _ = MARKER.set(path);
-            // Any way out through exit(), AppKit's own included.
-            unsafe { libc::atexit(leave) };
-        }
+    if std::fs::write(&marker, store::timestamp_now()).is_ok() && MARKER.set(marker).is_ok() {
+        // Any way out through exit(), AppKit's own included.
+        unsafe { atexit(leave) };
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     signals::install(&dir);
@@ -44,7 +46,7 @@ pub fn install() {
 
 extern "C" fn leave() {
     if let Some(marker) = MARKER.get() {
-        unsafe { libc::unlink(marker.as_ptr()) };
+        let _ = std::fs::remove_file(marker);
     }
     crate::debug_log!("quit");
 }
@@ -78,8 +80,8 @@ fn marker_pid(name: &str) -> Option<u32> {
 
 /// Whether a process with this pid exists (ours to signal or not).
 fn is_running(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
-    unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    let Ok(pid) = i32::try_from(pid) else { return false };
+    unsafe { kill(pid, 0) == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied }
 }
 
 /// A line of the debug log from the macOS shim (debug builds only).
