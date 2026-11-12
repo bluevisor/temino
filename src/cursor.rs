@@ -41,6 +41,10 @@ impl Shape {
 /// An index into Shape::ALL: Auto until changed.
 static SHAPE: AtomicU8 = AtomicU8::new(0);
 static BLINK: AtomicBool = AtomicBool::new(true);
+/// The shape the pointer is over in Settings, shown in place of SHAPE
+/// for now (NO_PREVIEW: none).
+static PREVIEW: AtomicU8 = AtomicU8::new(NO_PREVIEW);
+const NO_PREVIEW: u8 = u8::MAX;
 
 /// `cursor=block|bar|underline` and `cursor_blink=off` from the settings file.
 pub fn load() {
@@ -57,8 +61,23 @@ pub fn prompt() -> Shape {
     }
 }
 
+/// The shape drawn: a previewed one, else the one picked.
 pub fn shape() -> Shape {
+    match PREVIEW.load(Ordering::Relaxed) {
+        NO_PREVIEW => picked(),
+        index => Shape::ALL[index as usize % Shape::ALL.len()],
+    }
+}
+
+/// The shape picked in Settings (and saved), whatever is previewed.
+pub fn picked() -> Shape {
     Shape::ALL[SHAPE.load(Ordering::Relaxed) as usize % Shape::ALL.len()]
+}
+
+/// Show `shape` for now without picking it; None ends that.
+pub fn preview(shape: Option<Shape>) {
+    let index = shape.and_then(|shape| Shape::ALL.iter().position(|&s| s == shape));
+    PREVIEW.store(index.map_or(NO_PREVIEW, |i| i as u8), Ordering::Relaxed);
 }
 
 pub fn set_shape(shape: Shape) {

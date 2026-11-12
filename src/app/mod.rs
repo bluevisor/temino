@@ -39,6 +39,7 @@ mod layout;
 mod overlays;
 mod persist;
 mod prefs;
+mod preview;
 mod start;
 mod tabs;
 mod theme_edit;
@@ -423,9 +424,10 @@ pub struct App {
     /// The keys file, as last read.
     bindings: Bindings,
     palette: usize,
-    /// The theme the pointer is over in Settings' theme list, shown for now
-    /// in place of `palette`.
-    previewing: Option<usize>,
+    /// The choice the pointer is over in Settings, shown for now in place
+    /// of the one in use (see `preview`), and whether it failed to load.
+    previewing: Option<settings::Preview>,
+    preview_failed: bool,
     /// The theme editor, open on a theme of your own: the color it's
     /// changing, and whether Delete was clicked once already.
     theme_edit: Option<(theme::Slot, bool)>,
@@ -596,6 +598,7 @@ impl App {
             bindings: Bindings::default(),
             palette,
             previewing: None,
+            preview_failed: false,
             theme_edit: None,
             background,
             mode,

@@ -17,34 +17,6 @@ impl App {
         crate::save_setting("background", name);
         self.apply_theme();
     }
-    /// While the theme list is open, the theme under the pointer shows
-    /// everywhere at once, as picking it would; off the list, or with it
-    /// closed, the theme in use is back.
-    pub(super) fn preview_theme(&mut self) {
-        let (x, y) = self.mouse;
-        let hovered = match self.settings.action_at(x, y) {
-            Some(Action::PickTheme(index))
-                if self.settings.open == Some(List::Themes) && matches!(self.pane_at(x, y), Some((SETTINGS, _))) =>
-            {
-                Some(index)
-            }
-            _ => None,
-        };
-        if hovered == self.previewing {
-            return;
-        }
-        self.previewing = hovered;
-        match hovered.and_then(|index| self.themes.get(index)) {
-            Some(palette) => {
-                // Picked, a theme drops the background preset.
-                let mode = self.mode.unwrap_or_else(|| palette.mode());
-                self.ctx.theme = build_theme(palette, None, self.ctx.theme.opacity, mode);
-                platform::set_background(self.ctx.theme.background.to_rgb8());
-                self.dirty = true;
-            }
-            None => self.apply_theme(),
-        }
-    }
     /// The fonts to pick from: the bundled JetBrains Mono (None) first,
     /// then every installed monospaced family.
     pub(super) fn font_choices() -> Vec<Option<String>> {
@@ -86,10 +58,7 @@ impl App {
         match self.ctx.text.set_mono(family) {
             Ok(()) => {
                 crate::save_setting("font", family.unwrap_or(""));
-                for pane in &mut self.panes {
-                    pane.cells_changed(&self.ctx.text);
-                }
-                self.relayout();
+                self.reflow();
                 true
             }
             Err(error) => {
@@ -333,7 +302,7 @@ impl App {
                 .iter()
                 .position(|&(_, leading)| leading == self.ctx.text.leading())
                 .unwrap_or(1),
-            cursor: crate::cursor::Shape::ALL.iter().position(|&s| s == crate::cursor::shape()).unwrap_or(0),
+            cursor: crate::cursor::Shape::ALL.iter().position(|&s| s == crate::cursor::picked()).unwrap_or(0),
             blink: crate::cursor::blinks(),
             updates: crate::setting("updates").as_deref() != Some("off"),
             analytics: crate::analytics::enabled(),
@@ -378,7 +347,7 @@ impl App {
             }
             Action::PickFont(index) => {
                 self.settings.open = None;
-                self.pick_font(index);
+                self.commit_font(index);
             }
             Action::Customize => {
                 self.settings.open = None;
@@ -502,11 +471,8 @@ impl App {
             Action::LineSpacing(index) => {
                 let Some(&(name, leading)) = crate::text::LINE_SPACINGS.get(index) else { return };
                 crate::save_setting("line_spacing", &name.to_lowercase());
-                self.ctx.text.set_leading(leading);
-                for pane in &mut self.panes {
-                    pane.cells_changed(&self.ctx.text);
-                }
-                self.relayout();
+                // Already showing as a preview, nothing lays out again.
+                self.set_leading(leading);
             }
             Action::Provider(index) => {
                 self.finish_field();

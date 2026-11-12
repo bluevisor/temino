@@ -8,14 +8,16 @@ use crate::fetch::FETCHES;
 use crate::llm::{self, PROVIDERS};
 use crate::scene::{Quad, Rect, Scene, LAYER_CONTENT, LAYER_OVERLAY};
 use crate::shells::KINDS;
-use crate::text::{TextSystem, LINE_SPACINGS, UI, UI_BOLD};
+use crate::text::{Style, TextSystem, LINE_SPACINGS, UI, UI_BOLD};
 use crate::theme::{backgrounds, Channel, Color, Mode, Palette, Slot, Theme, OPACITIES};
 
 mod editor;
 mod keys;
 mod lists;
+mod preview;
 pub use editor::ThemeEdit;
 pub use lists::List;
+pub use preview::Preview;
 
 /// The page's column, at most this wide, centered in the tab.
 const COLUMN: f32 = 640.0;
@@ -297,7 +299,8 @@ impl Page {
             let title = format!("Theme Editor · {}", edit.palette.name);
             y = ui.section(x, y, width, &title, &Row::EDITOR, values);
         }
-        let text_rows = [Row::Font, Row::Zoom, Row::LineSpacing, Row::Ligatures];
+        // The sample first: the font list drops over the rows under Font.
+        let text_rows = [Row::Sample, Row::Font, Row::Zoom, Row::LineSpacing, Row::Ligatures];
         y = ui.section(x, y, width, "Text", &text_rows, values);
         y = ui.section(x, y, width, "Cursor", &[Row::CursorShape, Row::Blink], values);
         let mut shell = vec![Row::Shell, Row::Fetch];
@@ -366,6 +369,8 @@ enum Row {
     /// A key that types text, at this place in the typed ones.
     Typed(usize),
     Ligatures,
+    /// A few lines of terminal, in its font, spacing, colors and cursor.
+    Sample,
     Font,
     QuickTerminal,
     Background,
@@ -452,18 +457,26 @@ impl Ui<'_> {
     fn section(&mut self, x: f32, y: f32, width: f32, title: &str, rows: &[Row], values: &Values) -> f32 {
         let theme = self.theme;
         self.text.draw_text(self.scene, &title.to_uppercase(), x + 2.0, y + 12.0, UI_BOLD, 10.5, theme.text_faint);
-        let card = Rect::new(x, y + 22.0, width, rows.iter().map(|row| row.height()).sum());
+        let card = Rect::new(x, y + 22.0, width, rows.iter().map(|&row| self.row_height(row)).sum());
         self.scene.quad(Quad::new(card, theme.panel(0.04)).radius(10.0).border(1.0, theme.divider));
         let mut row_y = card.y;
         for (i, &row) in rows.iter().enumerate() {
-            let row_rect = Rect::new(card.x, row_y, card.w, row.height());
+            let row_rect = Rect::new(card.x, row_y, card.w, self.row_height(row));
             if i > 0 {
                 self.scene.fill(Rect::new(row_rect.x + 16.0, row_rect.y, row_rect.w - 32.0, 1.0), theme.divider);
             }
             self.row(row_rect, row, values);
-            row_y += row.height();
+            row_y += row_rect.h;
         }
         card.bottom() + 28.0
+    }
+
+    /// The sample grows with the terminal's font and line spacing.
+    fn row_height(&self, row: Row) -> f32 {
+        match row {
+            Row::Sample => preview::sample_height(self.text),
+            _ => row.height(),
+        }
     }
 
     fn row(&mut self, rect: Rect, row: Row, values: &Values) {
@@ -473,6 +486,9 @@ impl Ui<'_> {
         }
         if let Row::Colors(group) = row {
             return self.colors(rect, group, values);
+        }
+        if let Row::Sample = row {
+            return self.sample(rect);
         }
         let (label, detail) = match row {
             Row::Theme => {
@@ -546,7 +562,7 @@ impl Ui<'_> {
                     "Sign in with Apple or Google, then on your phone too".to_owned()
                 },
             ),
-            Row::Phone => return,
+            Row::Phone | Row::Sample => return,
             Row::Connected(index) => (
                 values.remote_phones[index].as_str(),
                 "Connected · Disconnect takes back its OK: it has to ask again".to_owned(),
@@ -684,7 +700,7 @@ impl Ui<'_> {
             }
             Row::Field(field) => self.field(right, control_y, FIELD_WIDTH, field, values),
             Row::Connected(index) => self.button(right, control_y, "Disconnect", Action::Disconnect(index)),
-            Row::Phone | Row::Colors(_) => {}
+            Row::Phone | Row::Sample | Row::Colors(_) => {}
             Row::ThemeName | Row::SlotHex | Row::Nudge | Row::EditorActions => {
                 self.editor_control(right, control_y, row, values)
             }
