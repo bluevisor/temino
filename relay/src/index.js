@@ -24,7 +24,7 @@
 
 import { Hub } from "./hub.js";
 import { verifyIdToken, appleClientSecret } from "./jwt.js";
-import { RETENTION_DAYS, dayKey, hashId, summarize, validPing } from "./analytics.js";
+import { dayKey, recordPing, summarize, validPing } from "./analytics.js";
 export { Hub };
 
 const enc = new TextEncoder();
@@ -262,10 +262,6 @@ async function connect(request, env, url) {
   return hub(env, token.a).fetch(new Request("https://hub/connect", { headers }));
 }
 
-// One ping a day per install, stored under the day and the hashed id —
-// so one install counts once a day however often it pings, and the raw
-// id is never stored. Its counters also add into the day's aggregate.
-// Entries expire after RETENTION_DAYS.
 async function analytics(request, env) {
   const body = await request.text();
   if (body.length > 4096) return new Response("too large", { status: 400 });
@@ -277,20 +273,7 @@ async function analytics(request, env) {
   }
   const ping = validPing(value);
   if (!ping) return new Response("bad ping", { status: 400 });
-  const day = dayKey(new Date());
-  const ttl = { expirationTtl: RETENTION_DAYS * 24 * 60 * 60 };
-  const key = `analytics:${day}:${await hashId(env.RELAY_SECRET, ping.id)}`;
-  const stored = JSON.stringify({ version: ping.version, os: ping.os, arch: ping.arch, shell: ping.shell, gpu: ping.gpu, counters: ping.counters });
-  await env.ACCOUNTS.put(key, stored, ttl);
-  // The day's totals across installs (a read-modify-write; at this
-  // scale a lost race just undercounts a ping).
-  const aggKey = `analytics:agg:${day}`;
-  let totals = {};
-  try {
-    totals = JSON.parse(await env.ACCOUNTS.get(aggKey)) || {};
-  } catch {}
-  for (const [name, n] of Object.entries(ping.counters)) totals[name] = (totals[name] || 0) + n;
-  await env.ACCOUNTS.put(aggKey, JSON.stringify(totals), ttl);
+  await recordPing(env.ACCOUNTS, env.RELAY_SECRET, ping, dayKey(new Date()));
   return new Response(null, { status: 204 });
 }
 
