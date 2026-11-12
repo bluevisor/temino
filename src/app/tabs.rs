@@ -76,6 +76,7 @@ fn tab_number(last: Option<(usize, Instant)>, digit: usize, now: Instant, tabs: 
 
 impl App {
     pub(super) fn close_tab(&mut self, index: usize) {
+        crate::debug_log!("tab {}: closing, of {}", index + 1, self.tabs.len());
         let mut leaves = Vec::new();
         self.tabs[index].root.leaves(&mut leaves);
         for id in leaves {

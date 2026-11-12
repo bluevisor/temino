@@ -248,7 +248,10 @@ presses to a window for scripted tests. After editing a shader, run
 
 Set `TEMINO_TRACE=1` to log startup and frame stages to `trace.log` in the
 settings directory (`~/config/settings/Temino` on Haiku). History, the shell
-integration script and crash logs live in the same directory. `TEMINO_SHELL` picks another bash.
+integration script and crash logs live in the same directory: `temino.log` notes each
+launch, any failure, a crash (what killed it, with the stack on macOS) and a session that
+ended without quitting; `crash.log` keeps the latest crash alone. A debug build also logs
+window, tab and shell events there. `TEMINO_SHELL` picks another bash.
 `TEMINO_CAPTURE=frame.ppm` saves every frame as it's drawn, for screenshots.
 
 ## Updates

@@ -4,7 +4,13 @@ fn main() {
         println!("cargo:rerun-if-changed={file}");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        cc::Build::new().file("src/macos/shim.m").file("src/macos/viewer.m").flag("-fobjc-arc").compile("temino_macos");
+        let mut shim = cc::Build::new();
+        shim.file("src/macos/shim.m").file("src/macos/viewer.m").flag("-fobjc-arc");
+        // A debug build's shim logs what the window is doing (debug_log!).
+        if std::env::var("PROFILE").as_deref() == Ok("debug") {
+            shim.define("TEMINO_DEBUG", None);
+        }
+        shim.compile("temino_macos");
         for framework in ["AppKit", "Carbon", "Metal", "CoreText", "WebKit"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }

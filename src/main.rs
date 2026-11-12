@@ -14,6 +14,7 @@ mod avatar;
 mod bindings;
 mod cli;
 mod complete;
+mod crash;
 mod cursor;
 mod e2e;
 mod editor;
@@ -180,6 +181,7 @@ fn main() {
         std::process::exit(app::selftest(path, width, height, frames));
     }
     store::install_panic_hook();
+    crash::install();
 
     let (sender, receiver) = mpsc::channel();
     platform::app_new("application/x-vnd.bluevisor-Temino");

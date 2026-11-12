@@ -699,6 +699,7 @@ impl App {
     /// A new tab in `cwd`, or else the focused pane's directory.
     fn new_tab_in(&mut self, cwd: Option<String>) -> Result<(), String> {
         let id = self.make_pane_in(cwd)?;
+        crate::debug_log!("tab {}: opened, pane {id}", self.tabs.len() + 1);
         // Settings ▸ Shell's fetch greets each new tab.
         if let Some(command) = fetch::command() {
             if let Some(pane) = self.pane(id) {
@@ -745,6 +746,7 @@ impl App {
                 self.dirty = true;
             }
             Msg::ShellExited(id, code) => {
+                crate::debug_log!("pane {id}: shell exited, code {code}, {} panes", self.panes.len());
                 // With other panes around, `exit` closes this one; the last
                 // one offers a new shell instead.
                 if self.panes.len() > 1 {
@@ -939,6 +941,7 @@ impl App {
     /// Done with this window: its tabs saved (if it keeps them) and its
     /// shells hung up; the loop then ends.
     fn shut_down(&mut self) {
+        crate::debug_log!("window: shutting down, {} tabs, {} panes", self.tabs.len(), self.panes.len());
         self.save_tabs();
         self.save_sessions();
         for pane in &mut self.panes {

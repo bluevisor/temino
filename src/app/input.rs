@@ -9,6 +9,9 @@ impl App {
                 self.key(key);
             }
             UiEvent::Resize { width, height, scale } => {
+                if (width as f32, height as f32) != self.window || scale != self.scale {
+                    crate::debug_log!("window: {width}x{height} at {scale}x");
+                }
                 self.window = (width as f32, height as f32);
                 self.scale = scale;
                 self.set_zoom(self.zoom, false);

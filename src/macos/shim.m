@@ -18,6 +18,14 @@
 
 #import "shim.h"
 
+// A line in temino.log from a debug build (store::debug); nothing otherwise.
+#ifdef TEMINO_DEBUG
+extern void temino_debug_line(const char* text);
+#define DEBUG_LOG(...) temino_debug_line([NSString stringWithFormat:__VA_ARGS__].UTF8String)
+#else
+#define DEBUG_LOG(...) ((void)0)
+#endif
+
 
 // MARK: Metal
 
@@ -603,6 +611,11 @@ place_traffic_lights(NSWindow* window)
 		return;
 	placing = true;
 	NSRect frame = container.frame;
+	if (NSHeight(frame) != sTitlebarHeight) {
+		DEBUG_LOG(@"titlebar: strip %.0f high set back to %.0f, style %#lx, strip in %@",
+			NSHeight(frame), sTitlebarHeight, (unsigned long)window.styleMask,
+			container.window == window ? @"this window" : NSStringFromClass(container.window.class));
+	}
 	frame.size.height = sTitlebarHeight;
 	frame.origin.y = NSHeight(window.frame) - sTitlebarHeight;
 	container.frame = frame;
@@ -663,10 +676,25 @@ temino_titlebar(void* view_handle, double height)
 			NSWindowDidResignKeyNotification];
 		for (NSNotificationName name in names) {
 			[center addObserverForName:name object:window queue:nil usingBlock:^(NSNotification* note) {
+				// A drag's resizes would fill the log; its end says enough.
+				if (!((NSWindow*)note.object).inLiveResize) {
+					DEBUG_LOG(@"window: %@, %.0fx%.0f, style %#lx", note.name,
+						NSWidth(((NSWindow*)note.object).frame), NSHeight(((NSWindow*)note.object).frame),
+						(unsigned long)((NSWindow*)note.object).styleMask);
+				}
 				place_traffic_lights(note.object);
 				temino_round_corners(note.object);
 			}];
 		}
+#ifdef TEMINO_DEBUG
+		for (NSNotificationName name in @[NSWindowWillEnterFullScreenNotification,
+				NSWindowWillExitFullScreenNotification, NSWindowDidChangeScreenNotification,
+				NSWindowDidMiniaturizeNotification, NSWindowDidDeminiaturizeNotification]) {
+			[center addObserverForName:name object:window queue:nil usingBlock:^(NSNotification* note) {
+				DEBUG_LOG(@"window: %@", note.name);
+			}];
+		}
+#endif
 		// AppKit also lays the bar out on its own, at its standard height,
 		// with no window notification; its frame changing gives that away.
 		NSView* container = [window standardWindowButton:NSWindowCloseButton].superview.superview;

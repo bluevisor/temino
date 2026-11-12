@@ -142,6 +142,7 @@ impl App {
     }
     /// Closes a pane, its tab when it was the last, the window after that.
     pub(super) fn close_pane(&mut self, id: u64) {
+        crate::debug_log!("pane {id}: closing");
         if let Some(index) = self.viewers.iter().position(|v| v.id == id) {
             let viewer = &mut self.viewers[index];
             if viewer.dirty && !viewer.close_armed {
