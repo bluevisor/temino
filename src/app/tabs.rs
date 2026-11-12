@@ -60,6 +60,20 @@ impl Mark {
     }
 }
 
+/// How soon after one ⌘-digit the next still extends the number.
+const DIGIT_WINDOW: Duration = Duration::from_millis(700);
+
+/// The tab number (from 1) a ⌘-digit picks. A digit soon after the last one
+/// extends that number when there are that many tabs; otherwise it stands
+/// alone, and a lone 0 picks nothing.
+fn tab_number(last: Option<(usize, Instant)>, digit: usize, now: Instant, tabs: usize) -> Option<usize> {
+    let longer = last
+        .filter(|&(_, at)| now.saturating_duration_since(at) < DIGIT_WINDOW)
+        .map(|(number, _)| number * 10 + digit)
+        .filter(|&number| number <= tabs);
+    longer.or((digit > 0).then_some(digit))
+}
+
 impl App {
     pub(super) fn close_tab(&mut self, index: usize) {
         let mut leaves = Vec::new();
@@ -76,6 +90,19 @@ impl App {
         self.active = index;
         self.relayout();
         self.focus_moved(before);
+    }
+    /// ⌘ and a digit: that tab, or with a digit just before it the
+    /// two-digit tab (⌘1 ⌘2 → 12, ⌘1 ⌘0 → 10). False for a lone ⌘0, which
+    /// stays the font reset.
+    pub(super) fn tab_digit(&mut self, digit: usize) -> bool {
+        let now = Instant::now();
+        let Some(number) = tab_number(self.tab_digits, digit, now, self.tabs.len()) else {
+            self.tab_digits = None;
+            return false;
+        };
+        self.tab_digits = Some((number, now));
+        self.switch_tab(number - 1);
+        true
     }
     pub(super) fn toggle_tab_list(&mut self) {
         let visible = !self.tab_list_visible();
@@ -546,6 +573,24 @@ pub(super) fn title_and_summary(reply: &str) -> Option<(String, Option<String>)>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn two_quick_digits_pick_a_two_digit_tab() {
+        use super::{tab_number, DIGIT_WINDOW};
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        let soon = t + Duration::from_millis(200);
+        let late = t + DIGIT_WINDOW;
+        assert_eq!(tab_number(None, 1, t, 20), Some(1));
+        assert_eq!(tab_number(None, 0, t, 20), None, "a lone ⌘0 stays the font reset");
+        assert_eq!(tab_number(Some((1, t)), 2, soon, 20), Some(12));
+        assert_eq!(tab_number(Some((1, t)), 0, soon, 20), Some(10));
+        assert_eq!(tab_number(Some((1, t)), 2, late, 20), Some(2), "too slow: just tab 2");
+        assert_eq!(tab_number(Some((1, t)), 2, soon, 11), Some(2), "no tab 12: just tab 2");
+        assert_eq!(tab_number(Some((1, t)), 0, soon, 9), None, "no tab 10: ⌘0 resets the font");
+        assert_eq!(tab_number(Some((12, t)), 3, soon, 20), Some(3));
+        assert_eq!(tab_number(Some((1, t)), 2, soon, 200), Some(12));
+        assert_eq!(tab_number(Some((12, t)), 3, soon, 200), Some(123));
+    }
     use super::*;
 
     #[test]
