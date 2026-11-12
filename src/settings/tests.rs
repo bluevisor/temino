@@ -269,3 +269,60 @@ fn a_changed_shortcut_offers_reset_and_waiting_shows_one_cap() {
     let combo = crate::bindings::parse_combo("cmd+j").unwrap();
     assert!(actions.contains(&Action::RemoveTyped(combo)));
 }
+
+/// Where the font name (the font list's anchor) is drawn.
+fn font_name_at(text: &mut TextSystem) -> Rect {
+    let mut scene = Scene::new();
+    let theme = Theme::dark();
+    let mut page = Page::default();
+    scene.reset(1100.0, 8000.0, 1.0, theme.background);
+    page.draw(&mut scene, text, &theme, Rect::new(200.0, 0.0, 900.0, 8000.0), &sample(), (0.0, 0.0));
+    page.hits.iter().find(|&&(_, a)| a == Action::List(List::Fonts)).map(|&(rect, _)| rect).unwrap()
+}
+
+#[test]
+fn the_sample_terminal_sits_above_font_and_follows_line_spacing() {
+    let mut text = TextSystem::new(14.0);
+    text.set_leading(LINE_SPACINGS[0].1);
+    let tight = font_name_at(&mut text);
+    let lines = 4.0;
+    let before = text.cell.height;
+    text.set_leading(LINE_SPACINGS[3].1);
+    let grown = text.cell.height - before;
+    assert!(grown > 0.0);
+    // Only the sample, above Font, grows with the line spacing.
+    let airy = font_name_at(&mut text);
+    assert!((airy.y - tight.y - lines * grown).abs() < 0.01, "{} vs {}", airy.y - tight.y, lines * grown);
+}
+
+#[test]
+fn hovering_a_visual_choice_previews_it() {
+    let lists = [None, Some(List::Themes), Some(List::Fonts)];
+    // A list's names only while that list is open.
+    assert_eq!(Preview::of(Action::PickFont(2), Some(List::Fonts)), Some(Preview::Font(2)));
+    assert_eq!(Preview::of(Action::PickFont(2), Some(List::Themes)), None);
+    assert_eq!(Preview::of(Action::PickTheme(1), Some(List::Themes)), Some(Preview::Theme(1)));
+    assert_eq!(Preview::of(Action::PickTheme(1), None), None);
+    for open in lists {
+        assert_eq!(Preview::of(Action::Background(3), open), Some(Preview::Background(3)));
+        assert_eq!(Preview::of(Action::LineSpacing(2), open), Some(Preview::LineSpacing(2)));
+        assert_eq!(Preview::of(Action::Cursor(1), open), Some(Preview::Cursor(1)));
+        assert_eq!(Preview::of(Action::Opacity(4), open), Some(Preview::Opacity(4)));
+        // Not a look: nothing to preview.
+        assert_eq!(Preview::of(Action::Ligatures(true), open), None);
+        assert_eq!(Preview::of(Action::Zoom(1), open), None);
+    }
+    assert!(Preview::Font(1).same_setting(Preview::Font(4)));
+    assert!(!Preview::Font(1).same_setting(Preview::LineSpacing(1)));
+}
+
+#[test]
+fn a_previewed_cursor_shape_is_drawn_but_not_picked() {
+    use crate::cursor::{self, Shape};
+    let picked = cursor::picked();
+    let other = if picked == Shape::Underline { Shape::Block } else { Shape::Underline };
+    cursor::preview(Some(other));
+    assert_eq!((cursor::shape(), cursor::picked()), (other, picked));
+    cursor::preview(None);
+    assert_eq!(cursor::shape(), picked);
+}

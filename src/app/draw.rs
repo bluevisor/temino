@@ -3,7 +3,7 @@ use super::*;
 impl App {
     pub(super) fn render(&mut self) {
         crate::trace("render: begin");
-        self.preview_theme();
+        self.preview();
         self.dirty = false;
         let (width, height) = (self.width, self.height);
         self.scene.reset(width, height, self.scale * self.zoom, self.ctx.theme.window());

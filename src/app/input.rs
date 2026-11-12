@@ -550,8 +550,10 @@ impl App {
     }
     pub(super) fn mouse_moved(&mut self, x: f32, y: f32, pressed: i32) {
         self.mouse = (x, y);
-        if self.settings.open.is_some() {
-            // The theme under the pointer previews (see `preview_theme`).
+        // A choice under the pointer previews, and one left stops (see `preview`).
+        let previewable = matches!(self.pane_at(x, y), Some((SETTINGS, _)))
+            && self.settings.action_at(x, y).and_then(|a| settings::Preview::of(a, self.settings.open)).is_some();
+        if previewable || self.previewing.is_some() || self.settings.open.is_some() {
             self.dirty = true;
         }
         if !self.consent_hits.is_empty() {
