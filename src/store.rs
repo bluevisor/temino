@@ -86,18 +86,57 @@ fn now_secs() -> u64 {
 
 /// `secs` since 1970 as UTC, `2026-11-07T16:24:05Z`.
 pub fn timestamp(secs: u64) -> String {
-    let (days, rest) = (secs / 86_400, secs % 86_400);
-    // Days to a civil date (Howard Hinnant's algorithm).
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest / 60 % 60, rest % 60)
+    Stamp(secs).to_string()
+}
+
+/// `timestamp`, written without allocating (the crash handler can't).
+pub struct Stamp(pub u64);
+
+impl std::fmt::Display for Stamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let (days, rest) = (self.0 / 86_400, self.0 % 86_400);
+        // Days to a civil date (Howard Hinnant's algorithm).
+        let z = days as i64 + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        write!(f, "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest / 60 % 60, rest % 60)
+    }
+}
+
+/// In a debug build, a line in temino.log for what the app is doing
+/// (windows, tabs, shells; never what's typed), so a crash report has the
+/// minutes before it. Nothing in a release build.
+#[macro_export]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            $crate::store::debug(&format!($($arg)*));
+        }
+    };
+}
+
+/// A `debug_log!` line. One said over and over (a layout loop, say) is
+/// written once, then counted when something else follows.
+pub fn debug(message: &str) {
+    static LAST: Mutex<(String, u32)> = Mutex::new((String::new(), 0));
+    let repeats = {
+        let mut last = LAST.locked();
+        if last.0 == message {
+            last.1 += 1;
+            return;
+        }
+        std::mem::replace(&mut *last, (message.to_owned(), 0)).1
+    };
+    if repeats > 0 {
+        log(&format!("debug: (the line before, {repeats} more times)"));
+    }
+    log(&format!("debug: {message}"));
 }
 
 /// Whether a panic on the thread called `name` takes the app down. The

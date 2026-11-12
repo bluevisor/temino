@@ -305,6 +305,7 @@ impl Handler {
             }
         }
         crate::trace(&format!("window {no}: opened"));
+        crate::debug_log!("window {no}: opened");
         SENDERS.locked().push((no, sender.clone()));
         win.send_size();
         self.windows.push(win);
@@ -335,6 +336,7 @@ impl Handler {
         drop(win);
         WINDOWS.store(self.windows.len(), Ordering::Release);
         crate::trace(&format!("window {no}: closed, {} left", self.windows.len()));
+        crate::debug_log!("window {no}: closed, {} left", self.windows.len());
         let Some(next) = self.windows.first() else {
             event_loop.exit();
             return;
@@ -466,7 +468,10 @@ impl ApplicationHandler<(u32, Request)> for Handler {
         let primary = self.primary;
         let Some(win) = self.windows.iter_mut().find(|win| win.window.id() == id) else { return };
         match event {
-            WindowEvent::CloseRequested => win.send(UiEvent::Close),
+            WindowEvent::CloseRequested => {
+                crate::debug_log!("window {}: close asked for", win.no);
+                win.send(UiEvent::Close)
+            }
             WindowEvent::Resized(_) => {
                 win.send_size();
                 if win.no == primary {
@@ -479,11 +484,13 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                crate::debug_log!("window {}: scale {} to {scale_factor}", win.no, win.scale);
                 win.scale = scale_factor;
                 win.send_size();
             }
             WindowEvent::RedrawRequested => win.draw(),
             WindowEvent::Focused(focused) => {
+                crate::debug_log!("window {}: {}", win.no, if focused { "in front" } else { "behind" });
                 if focused {
                     // Menu picks go to the window in front.
                     *MENU_SENDER.locked() = Some(win.sender.clone());
