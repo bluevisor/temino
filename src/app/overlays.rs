@@ -205,20 +205,19 @@ impl App {
     pub(super) fn draw_pane_menu(&mut self) {
         let Some(menu) = &self.tab_menu else { return };
         let cmd = platform::shortcut;
-        let rows: [(&str, String, MenuAction); 7] = [
+        let mut rows: Vec<(&str, String, MenuAction)> = vec![
             ("Copy", cmd("C"), MenuAction::Copy),
             ("Paste", cmd("V"), MenuAction::Paste),
             ("Clear", cmd("K"), MenuAction::Clear),
             ("Split Right", cmd("D"), MenuAction::SplitRight),
             ("Split Down", cmd("E"), MenuAction::SplitDown),
-            // The built-in browser is macOS's (platform::VIEWERS).
-            (
-                "Open Browser Pane",
-                if platform::VIEWERS { "⌥⌘B".to_owned() } else { String::new() },
-                MenuAction::BrowserPane,
-            ),
-            ("Close Pane", cmd("W"), MenuAction::ClosePane),
         ];
+        // The built-in browser is macOS's (platform::VIEWERS); elsewhere
+        // there's nothing to open.
+        if platform::VIEWERS {
+            rows.push(("Open Browser Pane", "⌥⌘B".to_owned(), MenuAction::BrowserPane));
+        }
+        rows.push(("Close Pane", cmd("W"), MenuAction::ClosePane));
         let h = rows.len() as f32 * MENU_ROW + 12.0 + 2.0 * 9.0;
         let x = menu.x.min(self.width - MENU_WIDTH - 8.0).max(4.0);
         let y = menu.y.min(self.height - h - 8.0).max(4.0);
@@ -231,8 +230,10 @@ impl App {
         scene.quad(Quad::new(rect, theme.raised).radius(8.0).border(1.0, theme.divider));
         let ascent = text.ui_ascent(12.0);
         let mut row_y = y + 6.0;
+        let rows_len = rows.len();
         for (i, (label, shortcut, action)) in rows.into_iter().enumerate() {
-            if i == 3 || i == 6 {
+            // Dividers before the splits and before Close Pane.
+            if i == 3 || i == rows_len - 1 {
                 scene.fill(Rect::new(x + 10.0, row_y + 4.0, MENU_WIDTH - 20.0, 1.0), theme.divider);
                 row_y += 9.0;
             }
