@@ -1,7 +1,8 @@
 // The anonymous usage ping: what a ping may say, how an install id is
-// hidden before it is stored, and how the stored days add up. Pure on
-// purpose — index.js does the KV and HTTP, this file only decides, so
-// it can be tested on its own (test/analytics.mjs).
+// hidden before it is stored, how a ping is recorded, and how the
+// stored days add up. index.js does the HTTP; this file does the rest
+// through a store it is handed (the KV binding in production), so it
+// can be tested on its own (test/analytics.mjs).
 //
 // A ping is environment fields and counters, from fixed lists, and
 // nothing else: a random install id, the version, the OS, the CPU
@@ -84,6 +85,36 @@ export async function hashId(secret, id) {
   );
   const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(id)));
   return [...mac].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/// Records one ping under its day and the hashed id, so the raw id is
+/// never stored, and adds what it says into the day's aggregate.
+/// Entries expire after RETENTION_DAYS. A ping's counters say where
+/// the install's day stands, not what this one ping did, so the
+/// aggregate only ever gains the growth over the record already
+/// stored for the install that day: pinging again (a permission
+/// toggle, a replayed body) must not count the same usage twice.
+export async function recordPing(store, secret, ping, day) {
+  const ttl = { expirationTtl: RETENTION_DAYS * 24 * 60 * 60 };
+  const key = `analytics:${day}:${await hashId(secret, ping.id)}`;
+  let before = {};
+  try {
+    before = JSON.parse(await store.get(key))?.counters || {};
+  } catch {}
+  const stored = JSON.stringify({ version: ping.version, os: ping.os, arch: ping.arch, shell: ping.shell, gpu: ping.gpu, counters: ping.counters });
+  await store.put(key, stored, ttl);
+  // The day's totals across installs (a read-modify-write; at this
+  // scale a lost race just undercounts a ping).
+  const aggKey = `analytics:agg:${day}`;
+  let totals = {};
+  try {
+    totals = JSON.parse(await store.get(aggKey)) || {};
+  } catch {}
+  for (const [name, n] of Object.entries(ping.counters)) {
+    const grew = n - (before[name] || 0);
+    if (grew > 0) totals[name] = (totals[name] || 0) + grew;
+  }
+  await store.put(aggKey, JSON.stringify(totals), ttl);
 }
 
 /// `count` days ending at `today` ("YYYY-MM-DD"), oldest first.

@@ -1,7 +1,7 @@
 // The analytics ping's rules: what a ping may say, how ids are hashed,
 // and how stored days add up. Run: node test/analytics.mjs
 import assert from "node:assert/strict";
-import { COUNTERS, dayKey, hashId, lastDays, summarize, validCounters, validPing } from "../src/analytics.js";
+import { COUNTERS, dayKey, hashId, lastDays, recordPing, summarize, validCounters, validPing } from "../src/analytics.js";
 
 const id = "0123456789abcdef0123456789abcdef";
 const ping = { id, version: "0.2.12", os: "macos", arch: "aarch64", shell: "zsh", gpu: "metal", counters: { launches: 1, commands_completed: 42 } };
@@ -73,5 +73,38 @@ assert.deepEqual(summary.today.averages, {
 const empty = summarize([], {}, today);
 assert.equal(empty.today.total, 0);
 assert.equal(empty.today.averages.aiAdoptionPct, 0);
+
+// Recording: a stand-in store with the slice of KV recordPing uses.
+const kv = new Map();
+const store = {
+  get: async (key) => kv.get(key) ?? null,
+  put: async (key, value) => { kv.set(key, value); },
+};
+const aggKey = `analytics:agg:${today}`;
+const totalsOf = async () => JSON.parse(await store.get(aggKey)) || {};
+
+// One install pinging twice in a day — its counters grew between the
+// pings — leaves the day's aggregate at the latest totals, not the
+// sum of both pings. Replaying the second body changes nothing.
+await recordPing(store, "secret", ping, today);
+assert.deepEqual(await totalsOf(), { launches: 1, commands_completed: 42 });
+const grown = { ...ping, counters: { launches: 2, commands_completed: 50 } };
+await recordPing(store, "secret", grown, today);
+assert.deepEqual(await totalsOf(), { launches: 2, commands_completed: 50 });
+await recordPing(store, "secret", grown, today);
+assert.deepEqual(await totalsOf(), { launches: 2, commands_completed: 50 });
+
+// A counters dip (the client restarted its day) adds nothing either.
+await recordPing(store, "secret", ping, today);
+assert.deepEqual(await totalsOf(), { launches: 2, commands_completed: 50 });
+
+// A second install still adds its own totals on top.
+const other = { ...ping, id: "fedcba9876543210fedcba9876543210", counters: { launches: 1, commands_completed: 5 } };
+await recordPing(store, "secret", other, today);
+assert.deepEqual(await totalsOf(), { launches: 3, commands_completed: 55 });
+
+// The install's record is stored under its hash, never the raw id.
+assert.equal(kv.has(`analytics:${today}:${id}`), false);
+assert.equal(JSON.parse(kv.get(`analytics:${today}:${hashed}`)).counters.commands_completed, 42);
 
 console.log("analytics: ok");

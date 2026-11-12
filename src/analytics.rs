@@ -230,21 +230,14 @@ pub fn ping() {
     if now.saturating_sub(last) < DAY {
         return;
     }
+    let Some(arch) = arch_name() else { return };
     crate::save_setting("analytics_sent", &now.to_string());
     let id = install_id();
     let sent = {
         let _guard = COUNTS_LOCK.locked();
         load_counts()
     };
-    let body = payload(
-        &id,
-        env!("CARGO_PKG_VERSION"),
-        os_name(),
-        std::env::consts::ARCH,
-        shell_name().as_deref(),
-        gpu_name(),
-        &sent,
-    );
+    let body = payload(&id, env!("CARGO_PKG_VERSION"), os_name(), arch, shell_name().as_deref(), gpu_name(), &sent);
     let _ = std::thread::Builder::new().name("analytics".into()).spawn(move || {
         let url = std::env::var("TEMINO_ANALYTICS_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
         if post(&url, &body).is_ok() {
@@ -297,6 +290,17 @@ fn os_name() -> &'static str {
         "haiku"
     } else {
         "linux"
+    }
+}
+
+/// The CPU architecture the relay expects (its ARCHES list, mirrored),
+/// or None on one it doesn't know: a ping from there would be refused
+/// every day for good, so none is sent and the counts stay pending,
+/// rather than hammering a guaranteed refusal.
+fn arch_name() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        arch @ ("aarch64" | "x86_64" | "x86") => Some(arch),
+        _ => None,
     }
 }
 
@@ -448,9 +452,13 @@ mod tests {
     }
 
     #[test]
-    fn the_os_and_gpu_names_are_ones_the_relay_accepts() {
+    fn the_environment_names_are_ones_the_relay_accepts() {
         assert!(["macos", "linux", "haiku"].contains(&os_name()));
         assert!(["metal", "vulkan"].contains(&gpu_name()));
+        // An architecture it doesn't know means no ping at all.
+        if let Some(arch) = arch_name() {
+            assert!(["aarch64", "x86_64", "x86"].contains(&arch));
+        }
     }
 
     #[test]

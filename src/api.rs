@@ -22,7 +22,7 @@
 //! - `block` {pane, block}: one block
 //! - `notify` {title, body}: a desktop notification
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::mpsc::{self, Sender};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -137,12 +137,37 @@ fn listen() -> Option<String> {
     None
 }
 
+/// The longest request line read, in bytes. A request is one line of
+/// JSON naming a method and its params — nothing real comes near this —
+/// and a client that never ends its line would otherwise have the
+/// socket read it into memory without limit.
+const MAX_LINE: u64 = 1 << 20;
+
+/// One line from `reader`, without its ending, or None when the client
+/// hung up (or the read failed) — or sent a line past MAX_LINE, whose
+/// rest would read as more lines, so the connection is given up on
+/// rather than answering a truncated request.
+fn request_line(reader: &mut impl BufRead) -> Option<String> {
+    let mut line = String::new();
+    let read = reader.by_ref().take(MAX_LINE).read_line(&mut line).ok()?;
+    if read == 0 || (read as u64 >= MAX_LINE && !line.ends_with('\n')) {
+        return None;
+    }
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    Some(line)
+}
+
 /// One client: a request a line, an answer a line, until it hangs up.
 #[cfg(unix)]
 fn serve(stream: UnixStream) {
     let Ok(mut writer) = stream.try_clone() else { return };
-    for line in BufReader::new(stream).lines() {
-        let Ok(line) = line else { return };
+    let mut reader = BufReader::new(stream);
+    while let Some(line) = request_line(&mut reader) {
         if line.trim().is_empty() {
             continue;
         }
@@ -255,6 +280,22 @@ mod tests {
     fn json_goes_back_out_as_it_came() {
         let text = r#"{"pane":3,"keys":["ctrl+c","Enter"],"wait":true,"timeout":2.5,"cwd":null,"text":"a \"b\"\n"}"#;
         assert_eq!(write(&json::parse(text).unwrap()), text);
+    }
+
+    #[test]
+    fn request_lines_stop_at_the_cap() {
+        // Lines come back without their endings, CRLF included, and a
+        // last line with no ending still counts.
+        let mut lines = BufReader::new(&b"one\r\ntwo\nthree"[..]);
+        assert_eq!(request_line(&mut lines).as_deref(), Some("one"));
+        assert_eq!(request_line(&mut lines).as_deref(), Some("two"));
+        assert_eq!(request_line(&mut lines).as_deref(), Some("three"));
+        assert_eq!(request_line(&mut lines), None);
+
+        // Past the cap with no newline: no line, however much follows.
+        let endless = vec![b'x'; MAX_LINE as usize + 100];
+        let mut over = BufReader::new(&endless[..]);
+        assert_eq!(request_line(&mut over), None);
     }
 
     #[test]
