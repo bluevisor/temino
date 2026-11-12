@@ -141,10 +141,11 @@ pub(super) fn user_host() -> String {
     format!("{user}@{host}")
 }
 
-/// `background=<name>` in the settings file, as an index into BACKGROUNDS
-/// (None, the theme's own, when unset or unknown).
+/// `background=<name>` in the settings file, as an index into the
+/// background presets, light or dark (None, the theme's own, when unset or
+/// unknown).
 pub(super) fn load_background() -> Option<usize> {
-    crate::setting("background").and_then(|name| BACKGROUNDS.iter().position(|(n, _)| *n == name))
+    crate::setting("background").and_then(|name| theme::background_index(&name))
 }
 
 /// `line_spacing=<name>` in the settings file, as a multiple of the font's

@@ -32,15 +32,29 @@ impl App {
         self.apply_theme();
     }
 
-    /// A copy of the theme in use, as it looks now (a background picked
-    /// over it included), saved as a theme of your own and opened in the
-    /// editor.
+    /// The theme list's Customize…: the editor on the theme in use if
+    /// it's yours, else on a copy of it.
+    pub(super) fn customize_theme(&mut self) {
+        if self.own_theme().is_some() {
+            self.open_theme_editor(true);
+        } else {
+            self.duplicate_theme();
+        }
+    }
+
+    /// A copy of the theme in use, as it looks now (in Light or Dark, a
+    /// background picked over it included), saved as a theme of your own
+    /// and opened in the editor.
     pub(super) fn duplicate_theme(&mut self) {
         self.themes = theme::library(&themes_dir());
+        let mode = self.shown_mode();
         let Some(current) = self.themes.get(self.palette) else { return };
-        let name = theme::copy_name(&self.themes, &current.name);
-        let mut copy = current.copy_as(&name);
-        if let Some(&(_, rgb)) = self.background.and_then(|i| BACKGROUNDS.get(i)) {
+        // Named for the version shown when it isn't the theme's own.
+        let base =
+            if current.mode() == mode { current.name.clone() } else { format!("{} {}", current.name, mode.name()) };
+        let name = theme::copy_name(&self.themes, &base);
+        let mut copy = current.in_mode(mode).copy_as(&name);
+        if let Some(&(_, rgb)) = self.background.and_then(|i| backgrounds(mode).get(i)) {
             copy.background = rgb;
         }
         let dir = themes_dir();

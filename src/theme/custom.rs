@@ -82,7 +82,7 @@ pub fn nudge(rgb: u32, channel: Channel, step: i32) -> u32 {
     from_hsl(h, s, l)
 }
 
-fn to_hsl(rgb: u32) -> (f32, f32, f32) {
+pub(super) fn to_hsl(rgb: u32) -> (f32, f32, f32) {
     let [r, g, b] = [(rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff].map(|v| v as f32 / 255.0);
     let (max, min) = (r.max(g).max(b), r.min(g).min(b));
     let l = (max + min) / 2.0;
@@ -101,7 +101,7 @@ fn to_hsl(rgb: u32) -> (f32, f32, f32) {
     (h, s, l)
 }
 
-fn from_hsl(h: f32, s: f32, l: f32) -> u32 {
+pub(super) fn from_hsl(h: f32, s: f32, l: f32) -> u32 {
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
     let m = l - c / 2.0;
@@ -138,7 +138,7 @@ pub fn hex(rgb: u32) -> String {
     format!("#{:06x}", rgb & 0xffffff)
 }
 
-fn to_u32(color: Color) -> u32 {
+pub(super) fn to_u32(color: Color) -> u32 {
     let [r, g, b] = color.to_rgb8();
     (r as u32) << 16 | (g as u32) << 8 | b as u32
 }

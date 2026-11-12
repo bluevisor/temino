@@ -1,5 +1,5 @@
 //! The Settings page's controls: buttons, switches, joined segments, text
-//! fields, color dots, the theme list and the phone's QR code.
+//! fields, color dots and the phone's QR code.
 
 use super::*;
 
@@ -83,7 +83,7 @@ impl Ui<'_> {
         } else {
             theme.divider
         };
-        self.scene.quad(Quad::new(rect, Color::hex(0x000000).alpha(0.22)).radius(7.0).border(1.0, border));
+        self.scene.quad(Quad::new(rect, self.well()).radius(7.0).border(1.0, border));
         let shown = |text: &str| {
             if field.secret() && !text.is_empty() {
                 "•".repeat(text.chars().count().min(24))
@@ -130,70 +130,15 @@ impl Ui<'_> {
         self.hit(rect, Action::Edit(field));
     }
 
-    /// Every theme in a list dropped under `anchor` (the theme's name), the
-    /// one in use lit, each with its background and a few of its colors.
-    /// `scroll` NaN starts it on the one in use; returns where the list is
-    /// and the scroll kept in range.
-    pub(super) fn theme_list(&mut self, anchor: Rect, values: &Values, scroll: f32) -> (Rect, f32) {
+    /// The backgrounds as color dots, right-aligned at `right`: the light
+    /// ones in Light mode.
+    pub(super) fn swatches(&mut self, right: f32, y: f32, values: &Values) {
         let theme = self.theme;
-        let size = 12.5;
-        let widest = values.palettes.iter().map(|p| self.text.measure(&p.name, UI, size)).fold(0.0, f32::max);
-        let w = (widest + 96.0).max(220.0);
-        let content = LIST_ROW * values.palettes.len() as f32;
-        let h = content.min(LIST_HEIGHT) + 8.0;
-        let below = self.clip.bottom() - anchor.bottom() - 12.0;
-        let y = if below >= h || below >= anchor.y - self.clip.y { anchor.bottom() + 6.0 } else { anchor.y - 6.0 - h };
-        let x = (anchor.x + anchor.w / 2.0 - w / 2.0).min(self.clip.right() - w - 12.0).max(self.clip.x + 12.0);
-        let list = Rect::new(x, y, w, h);
-        let most = (content - (h - 8.0)).max(0.0);
-        let scroll =
-            if scroll.is_nan() { LIST_ROW * values.palette as f32 - (h - 8.0 - LIST_ROW) / 2.0 } else { scroll };
-        let scroll = scroll.clamp(0.0, most);
-
-        self.scene.set_layer(LAYER_OVERLAY);
-        let shadow = Rect::new(list.x - 1.0, list.y + 5.0, list.w + 2.0, list.h + 2.0);
-        self.scene.quad(Quad::new(shadow, Color::hex(0x000000).alpha(0.28)).radius(12.0));
-        self.scene.quad(Quad::new(list, theme.raised).radius(10.0).border(1.0, theme.divider));
-        // The list's padding takes clicks too, rather than the rows under it.
-        self.hit(list, Action::PickTheme(values.palette));
-        let inner = list.inset(4.0, 4.0);
-        self.scene.push_clip(inner);
-        let ascent = self.text.ui_ascent(size);
-        for (index, palette) in values.palettes.iter().enumerate() {
-            let line = Rect::new(inner.x, inner.y + index as f32 * LIST_ROW - scroll, inner.w, LIST_ROW);
-            if line.bottom() < inner.y || line.y > inner.bottom() {
-                continue;
-            }
-            let on = index == values.palette;
-            if on {
-                self.scene.quad(Quad::new(line, theme.accent.alpha(0.85)).radius(6.0));
-            } else if self.hovered(line) && inner.contains(self.mouse.0, self.mouse.1) {
-                self.scene.quad(Quad::new(line, Color::hex(0xffffff).alpha(0.07)).radius(6.0));
-            }
-            let chip = Rect::new(line.x + 8.0, line.y + 6.0, 44.0, LIST_ROW - 12.0);
-            let chip_quad = Quad::new(chip, Color::hex(palette.background)).radius(4.0);
-            self.scene.quad(chip_quad.border(1.0, Color::hex(0xffffff).alpha(0.18)));
-            for (i, &ansi) in [1, 2, 4, 5].iter().enumerate() {
-                let dot = Rect::new(chip.x + 5.0 + i as f32 * 9.0, chip.y + chip.h / 2.0 - 3.0, 6.0, 6.0);
-                self.scene.quad(Quad::new(dot, Color::hex(palette.ansi[ansi])).radius(3.0));
-            }
-            let baseline = (line.y + (line.h + ascent * 0.72) / 2.0).round();
-            let color = if on { Color::hex(0x0b0d12) } else { theme.text };
-            self.text.draw_text(self.scene, &palette.name, chip.right() + 12.0, baseline, UI, size, color);
-            let (top, bottom) = (line.y.max(inner.y), line.bottom().min(inner.bottom()));
-            self.hit(Rect::new(line.x, top, line.w, bottom - top), Action::PickTheme(index));
-        }
-        self.scene.pop_clip();
-        self.scene.set_layer(LAYER_CONTENT);
-        (list, scroll)
-    }
-
-    /// The backgrounds as color dots, right-aligned at `right`.
-    pub(super) fn swatches(&mut self, right: f32, y: f32, selected: Option<usize>) {
-        let theme = self.theme;
+        let selected = values.background;
+        let list = backgrounds(values.mode);
         let step = SWATCH + 10.0;
-        let mut x = right - step * BACKGROUNDS.len() as f32 + 10.0;
-        for (index, &(_, rgb)) in BACKGROUNDS.iter().enumerate() {
+        let mut x = right - step * list.len() as f32 + 10.0;
+        for (index, &(_, rgb)) in list.iter().enumerate() {
             let dot = Rect::new(x, y, SWATCH, SWATCH);
             let hit = dot.inset(-4.0, -4.0);
             let ring = if Some(index) == selected {
@@ -201,13 +146,12 @@ impl Ui<'_> {
             } else if self.hovered(hit) {
                 theme.text_dim
             } else {
-                Color::hex(0xffffff).alpha(0.18)
+                theme.lift().alpha(0.18)
             };
             if Some(index) == selected {
                 self.scene.quad(Quad::new(dot.inset(-3.0, -3.0), Color::TRANSPARENT).radius(SWATCH).border(2.0, ring));
-                self.scene.quad(
-                    Quad::new(dot, Color::hex(rgb)).radius(SWATCH / 2.0).border(1.0, Color::hex(0xffffff).alpha(0.18)),
-                );
+                self.scene
+                    .quad(Quad::new(dot, Color::hex(rgb)).radius(SWATCH / 2.0).border(1.0, theme.lift().alpha(0.18)));
             } else {
                 self.scene.quad(Quad::new(dot, Color::hex(rgb)).radius(SWATCH / 2.0).border(1.0, ring));
             }
@@ -230,7 +174,7 @@ impl Ui<'_> {
         let widths: Vec<f32> = labels.iter().map(|l| (self.text.measure(l, UI, size) + 20.0).max(34.0)).collect();
         let total: f32 = widths.iter().sum();
         let outer = Rect::new(right - total - 4.0, y, total + 4.0, CONTROL_HEIGHT);
-        self.scene.quad(Quad::new(outer, Color::hex(0x000000).alpha(0.22)).radius(7.0).border(1.0, theme.divider));
+        self.scene.quad(Quad::new(outer, self.well()).radius(7.0).border(1.0, theme.divider));
         let ascent = self.text.ui_ascent(size);
         let mut x = outer.x + 2.0;
         for (index, (label, w)) in labels.iter().zip(widths).enumerate() {
@@ -239,11 +183,11 @@ impl Ui<'_> {
             if on {
                 self.scene.quad(Quad::new(segment, theme.accent.alpha(0.85)).radius(5.0));
             } else if self.hovered(segment) {
-                self.scene.quad(Quad::new(segment, Color::hex(0xffffff).alpha(0.07)).radius(5.0));
+                self.scene.quad(Quad::new(segment, theme.lift().alpha(0.07)).radius(5.0));
             }
             let label_width = self.text.measure(label, UI, size);
             let baseline = (segment.y + (segment.h + ascent * 0.72) / 2.0).round();
-            let color = if on { Color::hex(0x0b0d12) } else { theme.text };
+            let color = if on { self.on_accent() } else { theme.text };
             self.text.draw_text(self.scene, label, segment.x + (w - label_width) / 2.0, baseline, UI, size, color);
             self.hit(segment, action(index));
             x += w;
@@ -256,13 +200,27 @@ impl Ui<'_> {
         let theme = self.theme;
         let (w, h) = (38.0, 22.0);
         let track = Rect::new(right - w, row_y + (ROW - h) / 2.0, w, h);
-        let fill =
-            if on { theme.accent } else { Color::hex(0xffffff).alpha(if self.hovered(track) { 0.18 } else { 0.12 }) };
+        let fill = if on { theme.accent } else { theme.lift().alpha(if self.hovered(track) { 0.18 } else { 0.12 }) };
         self.scene.quad(Quad::new(track, fill).radius(h / 2.0));
         let knob = h - 4.0;
         let kx = if on { track.right() - knob - 2.0 } else { track.x + 2.0 };
         self.scene.quad(Quad::new(Rect::new(kx, track.y + 2.0, knob, knob), Color::hex(0xf4f6fa)).radius(knob / 2.0));
         self.hit(track.inset(-6.0, -6.0), action);
+    }
+
+    /// The sunken fill under fields and segments.
+    pub(super) fn well(&self) -> Color {
+        Color::hex(0x000000).alpha(if self.theme.light() { 0.06 } else { 0.22 })
+    }
+
+    /// Words on the accent's fill: dark on a light accent, white on a dark one.
+    pub(super) fn on_accent(&self) -> Color {
+        let a = self.theme.accent;
+        if 0.2126 * a.r + 0.7152 * a.g + 0.0722 * a.b > 0.45 {
+            Color::hex(0x0b0d12)
+        } else {
+            Color::hex(0xffffff)
+        }
     }
 
     pub(super) fn button(&mut self, right: f32, y: f32, label: &str, action: Action) {
@@ -276,7 +234,7 @@ impl Ui<'_> {
         let size = 12.0;
         let w = self.text.measure(label, UI, size) + 24.0;
         let rect = Rect::new(right - w, y, w, CONTROL_HEIGHT);
-        let fill = if self.hovered(rect) { theme.raised.mix(Color::hex(0xffffff), 0.06) } else { theme.raised };
+        let fill = if self.hovered(rect) { theme.raised.mix(theme.lift(), 0.06) } else { theme.raised };
         self.scene.quad(Quad::new(rect, fill).radius(7.0).border(1.0, theme.divider));
         let baseline = (rect.y + (rect.h + self.text.ui_ascent(size) * 0.72) / 2.0).round();
         self.text.draw_text(self.scene, label, rect.x + 12.0, baseline, UI, size, theme.text);

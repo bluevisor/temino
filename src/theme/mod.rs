@@ -4,7 +4,9 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Rgb};
 
 mod custom;
+mod mode;
 pub use custom::*;
+pub use mode::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
@@ -43,7 +45,7 @@ impl Color {
     /// The WCAG contrast ratio against another color, 1.0 (none) to
     /// 21.0 (black on white); alpha is ignored, both colors read as
     /// opaque. Small text wants at least 4.5. Only the theme tests call
-    /// this — it exists to keep the built-in theme's text legible.
+    /// this — it exists to keep the built-in themes' text legible.
     #[cfg(test)]
     pub fn contrast(self, other: Color) -> f32 {
         let luminance = |c: Color| {
@@ -567,14 +569,16 @@ impl Palette {
         let text = Color::hex(self.foreground);
         let ansi = self.ansi.map(Color::hex);
         let accent = Color::hex(self.accent.unwrap_or(self.ansi[12]));
+        let light = self.mode() == Mode::Light;
         let theme = Theme {
             background,
             surface: background,
             raised: background,
             divider: background,
             text,
-            text_dim: text.mix(background, 0.38),
-            text_faint: text.mix(background, 0.6),
+            // Faded text shows more on white, so it fades less there.
+            text_dim: text.mix(background, if light { 0.26 } else { 0.38 }),
+            text_faint: text.mix(background, if light { 0.36 } else { 0.6 }),
             accent,
             success: ansi[2],
             error: ansi[1],
