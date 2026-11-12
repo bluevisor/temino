@@ -142,7 +142,12 @@ mod signals {
     impl Write for Line {
         fn write_str(&mut self, text: &str) -> std::fmt::Result {
             let room = self.bytes.len() - self.len;
-            let take = text.len().min(room);
+            let mut take = text.len().min(room);
+            // Cut on a character boundary, never inside a character:
+            // the log would otherwise hold bytes nothing can read.
+            while !text.is_char_boundary(take) {
+                take -= 1;
+            }
             self.bytes[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
             self.len += take;
             Ok(())
@@ -223,6 +228,22 @@ mod signals {
             // Returning runs the faulting instruction again (or lets abort()
             // finish), now with the default action: the app dies as it would
             // have, and the system writes its own crash report.
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_full_line_cuts_on_a_character_boundary() {
+            // 319 one-byte characters, then a two-byte one across the
+            // buffer's end: the line stops before it, whole.
+            let mut line = Line { bytes: [0; 320], len: 0 };
+            let text = format!("{}é", "x".repeat(319));
+            let _ = line.write_str(&text);
+            assert_eq!(line.len, 319);
+            assert_eq!(std::str::from_utf8(&line.bytes[..line.len]).unwrap(), "x".repeat(319));
         }
     }
 }
