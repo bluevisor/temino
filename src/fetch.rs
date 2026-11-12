@@ -1,5 +1,5 @@
 //! The system-info "fetch" a new tab can open with: fastfetch, neofetch or
-//! rustfetch. Settings ▸ Shell picks one (`fetch=<name>` in the settings
+//! haikufetch. Settings ▸ Shell picks one (`fetch=<name>` in the settings
 //! file, `off` or unset for none), installs a missing one, and opens its
 //! config file.
 
@@ -16,6 +16,12 @@ pub struct Fetch {
     gen_config: &'static [&'static str],
     /// Installed with cargo from this repository, not a package manager.
     cargo_git: Option<&'static str>,
+    /// Keeps its config in Haiku's own ~/config/settings rather than
+    /// ~/.config.
+    haiku_settings: bool,
+    /// Older names it went by: a `fetch=` setting naming one still picks it,
+    /// and an installed copy runs until this one is installed.
+    old_names: &'static [&'static str],
     /// The PPA to add first where apt doesn't have it (older Ubuntus).
     ppa: Option<&'static str>,
 }
@@ -27,16 +33,29 @@ pub const FETCHES: [Fetch; 3] = [
         config: "fastfetch/config.jsonc",
         gen_config: &["--gen-config"],
         cargo_git: None,
+        haiku_settings: false,
+        old_names: &[],
         ppa: Some("ppa:zhangsongcui3371/fastfetch"),
     },
     // neofetch writes its config the first time it runs.
-    Fetch { name: "neofetch", config: "neofetch/config.conf", gen_config: &[], cargo_git: None, ppa: None },
-    // So does rustfetch, in the platform's config directory.
     Fetch {
-        name: "rustfetch",
-        config: "rustfetch/config.toml",
+        name: "neofetch",
+        config: "neofetch/config.conf",
         gen_config: &[],
-        cargo_git: Some("https://github.com/bluevisor/rustfetch"),
+        cargo_git: None,
+        haiku_settings: false,
+        old_names: &[],
+        ppa: None,
+    },
+    // haikufetch runs on defaults until asked to write its config. It was
+    // called rustfetch before.
+    Fetch {
+        name: "haikufetch",
+        config: "haikufetch/config.toml",
+        gen_config: &["--init-config"],
+        cargo_git: Some("https://github.com/bluevisor/haikufetch"),
+        haiku_settings: true,
+        old_names: &["rustfetch"],
         ppa: None,
     },
 ];
@@ -44,18 +63,23 @@ pub const FETCHES: [Fetch; 3] = [
 /// The fetch picked in Settings, as an index into FETCHES.
 pub fn chosen() -> Option<usize> {
     let name = crate::setting("fetch")?;
-    FETCHES.iter().position(|fetch| fetch.name == name)
+    FETCHES.iter().position(|fetch| fetch.name == name || fetch.old_names.contains(&name.as_str()))
 }
 
-/// Which of FETCHES are installed.
+/// Which of FETCHES are installed (under their current names: an old copy
+/// still offers the install).
 pub fn installed() -> [bool; FETCHES.len()] {
     FETCHES.each_ref().map(|fetch| shells::which(fetch.name).is_some())
 }
 
-/// The command a new tab runs: the picked fetch, if it's installed.
+/// The command a new tab runs: the picked fetch, if it's installed, or a
+/// copy under an older name until it is.
 pub fn command() -> Option<String> {
     let fetch = &FETCHES[chosen()?];
-    shells::which(fetch.name).map(|_| fetch.name.to_owned())
+    std::iter::once(&fetch.name)
+        .chain(fetch.old_names)
+        .find(|name| shells::which(name).is_some())
+        .map(|name| (*name).to_owned())
 }
 
 impl Fetch {
@@ -80,7 +104,7 @@ impl Fetch {
 
     /// Its config file, made with the defaults first if there is none.
     pub fn config_file(&self) -> Result<String, String> {
-        let path = format!("{}/{}", config_dir(self.cargo_git.is_some()), self.config);
+        let path = format!("{}/{}", config_dir(self.haiku_settings), self.config);
         if std::path::Path::new(&path).exists() {
             return Ok(path);
         }
@@ -100,12 +124,12 @@ impl Fetch {
 }
 
 /// $XDG_CONFIG_HOME or ~/.config, where fastfetch and neofetch look on
-/// every system. Rust programs using the `dirs` crate (`native`) look in
-/// ~/Library/Application Support on macOS instead.
-fn config_dir(native: bool) -> String {
+/// every system and haikufetch everywhere but Haiku, where it uses
+/// ~/config/settings like Haiku's own apps.
+fn config_dir(haiku_settings: bool) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
-    if native && cfg!(target_os = "macos") {
-        return format!("{home}/Library/Application Support");
+    if haiku_settings && cfg!(target_os = "haiku") {
+        return format!("{home}/config/settings");
     }
     std::env::var("XDG_CONFIG_HOME").ok().filter(|dir| !dir.is_empty()).unwrap_or_else(|| format!("{home}/.config"))
 }
