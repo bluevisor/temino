@@ -325,7 +325,8 @@ impl App {
         // what it became. Opening the theme list, starting to type in
         // a field and checking for updates aren't changes.
         // Nor are opening the theme editor and picking a color in it.
-        let browsing = matches!(action, Action::ThemeEditor(_) | Action::Slot(_) | Action::RecordKey(_));
+        let browsing =
+            matches!(action, Action::ThemeEditor(_) | Action::Slot(_) | Action::RecordKey(_) | Action::Section(_));
         if !browsing && !matches!(action, Action::Edit(_) | Action::List(_) | Action::CheckForUpdates) {
             crate::analytics::bump(crate::analytics::Counter::SettingsChanges);
         }
@@ -468,6 +469,7 @@ impl App {
                 crate::cursor::set_blinks(on);
                 self.ctx.blink_epoch = Instant::now();
             }
+            Action::Section(section) => self.settings.show(section),
             Action::LineSpacing(index) => {
                 let Some(&(name, leading)) = crate::text::LINE_SPACINGS.get(index) else { return };
                 crate::save_setting("line_spacing", &name.to_lowercase());

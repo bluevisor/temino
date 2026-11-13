@@ -1,5 +1,5 @@
-//! The Settings tab (Command+,): every setting on one page, drawn like the
-//! rest of the window. The page only draws and says what a click asks for;
+//! The Settings tab (Command+,): every setting, in sub tabs (Appearance,
+//! Terminal, AI, …), drawn like the rest of the window. The page only draws and says what a click asks for;
 //! app.rs applies it and remembers it in the settings file.
 
 use crate::bindings::{Bind, Combo};
@@ -15,9 +15,11 @@ mod editor;
 mod keys;
 mod lists;
 mod preview;
+mod sections;
 pub use editor::ThemeEdit;
 pub use lists::List;
 pub use preview::Preview;
+pub use sections::Section;
 
 /// The page's column, at most this wide, centered in the tab.
 const COLUMN: f32 = 640.0;
@@ -220,6 +222,8 @@ pub enum Action {
     Blink(bool),
     /// An index into LINE_SPACINGS.
     LineSpacing(usize),
+    /// Show this sub tab of the page.
+    Section(Section),
 }
 
 #[derive(Default)]
@@ -235,8 +239,9 @@ pub struct Page {
     pub open: Option<List>,
     list: Rect,
     list_scroll: f32,
-    /// Asked to scroll to Remote Control (from the account menu); set
-    /// again once drawn there, for one more frame.
+    /// The sub tab showing.
+    pub section: Section,
+    /// Asked to show Remote Control (from the account menu).
     pub to_remote: bool,
     pub redraw: bool,
 }
@@ -257,6 +262,15 @@ impl Page {
         self.scroll = (self.scroll + dy * WHEEL_STEP).clamp(0.0, most);
     }
 
+    /// Switches to a sub tab, from its top, with no list open.
+    pub fn show(&mut self, section: Section) {
+        if self.section != section {
+            self.section = section;
+            self.scroll = 0.0;
+            self.open = None;
+        }
+    }
+
     /// Opens a list scrolled to what's in use, or closes it.
     pub fn toggle(&mut self, list: List) {
         self.open = if self.open == Some(list) { None } else { Some(list) };
@@ -274,6 +288,14 @@ impl Page {
     ) {
         self.hits.clear();
         self.view_height = rect.h;
+        // The account menu's Remote Control: its own tab, from the top.
+        if std::mem::take(&mut self.to_remote) && values.remote.is_some() {
+            self.show(Section::Remote);
+        }
+        // Signed-out builds without a relay have no Remote tab to stay on.
+        if !Section::shown(values).contains(&self.section) {
+            self.section = Section::default();
+        }
         // The stored scroll was bounded by an older frame: content that
         // shrank (a section closed) or a window that grew can leave it
         // past the end, and the page would draw shifted and half-blank
@@ -290,47 +312,9 @@ impl Page {
         ui.text.draw_text(ui.scene, "Settings", x, y + 24.0, UI_BOLD, 22.0, theme.text);
         y += 52.0;
 
-        let mut rows = vec![Row::Theme, Row::Mode, Row::ThemeFolder, Row::Background];
-        if values.see_through {
-            rows.extend([Row::Opacity, Row::Blur]);
-        }
-        y = ui.section(x, y, width, "Appearance", &rows, values);
-        if let Some(edit) = &values.editor {
-            let title = format!("Theme Editor · {}", edit.palette.name);
-            y = ui.section(x, y, width, &title, &Row::EDITOR, values);
-        }
-        // The sample first: the font list drops over the rows under Font.
-        let text_rows = [Row::Sample, Row::Font, Row::Zoom, Row::LineSpacing, Row::Ligatures];
-        y = ui.section(x, y, width, "Text", &text_rows, values);
-        y = ui.section(x, y, width, "Cursor", &[Row::CursorShape, Row::Blink], values);
-        let mut shell = vec![Row::Shell, Row::Fetch];
-        if values.fetch > 0 {
-            shell.push(Row::FetchConfig);
-        }
-        y = ui.section(x, y, width, "Shell", &shell, values);
-        y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Notifications], values);
-        let provider = PROVIDERS[values.provider];
-        let mut ai = vec![Row::Provider];
-        if provider.is("custom") {
-            ai.push(Row::Field(Field::LlmUrl));
-        }
-        if provider.takes_key() {
-            ai.push(Row::Field(Field::LlmKey));
-        }
-        if !provider.is("off") {
-            ai.push(Row::Field(Field::LlmModel));
-        }
-        ai.push(Row::Field(Field::TypesafeKey));
-        y = ui.section(x, y, width, "AI", &ai, values);
-        let remote_at = y - top;
-        if values.remote.is_some() {
-            let mut rows = vec![Row::Remote];
-            rows.extend((0..values.remote_phones.len()).map(Row::Connected));
-            rows.push(Row::Phone);
-            y = ui.section(x, y, width, "Remote Control", &rows, values);
-        }
-        y = ui.section(x, y, width, "Updates", &[Row::Updates, Row::Analytics, Row::CheckForUpdates], values);
-        y = ui.keys(x, y, width, values);
+        let section = self.section;
+        y = ui.section_bar(x, y, width, section, values);
+        y = ui.sections(x, y, width, section, values);
         let version = format!("Temino {}", env!("CARGO_PKG_VERSION"));
         ui.text.draw_text(ui.scene, &version, x, y + 4.0, UI, 11.5, theme.text_faint);
         y += 24.0;
@@ -346,11 +330,6 @@ impl Page {
 
         self.content_height = y + self.scroll - rect.y + PAD;
         scene.pop_clip();
-        if std::mem::take(&mut self.to_remote) {
-            let most = (self.content_height - self.view_height).max(0.0);
-            self.scroll = remote_at.clamp(0.0, most);
-            self.redraw = true;
-        }
     }
 }
 

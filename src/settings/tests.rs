@@ -52,9 +52,22 @@ fn every_control_can_be_clicked() {
     let values = sample();
     let mut page = Page::default();
     let rect = Rect::new(200.0, 0.0, 900.0, 8000.0);
-    scene.reset(1100.0, 8000.0, 1.0, theme.background);
-    page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
-    let actions: Vec<Action> = page.hits.iter().map(|&(_, a)| a).collect();
+    // Every sub tab in turn: the bar first, then its controls.
+    let mut actions = Vec::new();
+    for section in Section::shown(&values) {
+        page.show(section);
+        scene.reset(1100.0, 8000.0, 1.0, theme.background);
+        page.draw(&mut scene, &mut text, &theme, rect, &values, (0.0, 0.0));
+        let bar: Vec<Action> = Section::shown(&values).into_iter().map(Action::Section).collect();
+        let drawn: Vec<Action> = page.hits.iter().map(|&(_, a)| a).collect();
+        assert_eq!(drawn[..bar.len()], bar[..]);
+        actions.extend_from_slice(&drawn[bar.len()..]);
+        // A click lands on what's under it, and nothing overlaps.
+        for (rect, action) in &page.hits {
+            let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+            assert_eq!(page.action_at(x, y), Some(*action));
+        }
+    }
     let mut expected = vec![Action::Theme(-1), Action::List(List::Themes), Action::Theme(1)];
     expected.extend(Mode::ALL.map(Action::Mode));
     expected.push(Action::OpenThemes);
@@ -84,18 +97,44 @@ fn every_control_can_be_clicked() {
     ]);
     expected.extend((0..PROVIDERS.len()).map(Action::Provider));
     expected.extend(Field::ALL.map(Action::Edit));
-    expected.extend([Action::Updates(false), Action::Analytics(false), Action::CheckForUpdates]);
     // Keys: nothing changed, so no Reset All; a shortcut per action.
     expected.extend([Action::EditKeys, Action::QuickTerminal(true)]);
     for (_, group) in crate::bindings::GROUPS {
         expected.extend(group.iter().filter(|a| keys::shown(a)).map(|&a| Action::RecordKey(a)));
     }
+    expected.extend([Action::Updates(false), Action::Analytics(false), Action::CheckForUpdates]);
     assert_eq!(actions, expected);
-    // A click lands on what's under it, and nothing overlaps.
-    for (rect, action) in &page.hits {
-        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-        assert_eq!(page.action_at(x, y), Some(*action));
-    }
+}
+
+#[test]
+fn remote_control_has_a_tab_only_with_a_relay() {
+    let mut values = sample();
+    values.remote = None;
+    assert!(!Section::shown(&values).contains(&Section::Remote));
+    values.remote = Some(false);
+    assert_eq!(Section::shown(&values), Section::ALL);
+    // The account menu's Remote Control opens its tab from the top.
+    let mut page = Page { scroll: 200.0, to_remote: true, ..Page::default() };
+    let actions = draw_once(&mut page, &values);
+    assert_eq!(page.section, Section::Remote);
+    assert_eq!(page.scroll, 0.0);
+    assert!(actions.contains(&Action::Remote(true)));
+    // Without the relay again, the page falls back to its first tab.
+    values.remote = None;
+    draw_once(&mut page, &values);
+    assert_eq!(page.section, Section::Appearance);
+}
+
+#[test]
+fn a_tab_opens_at_its_top_with_no_list_open() {
+    let mut page = Page { scroll: 300.0, ..Page::default() };
+    page.toggle(List::Fonts);
+    page.show(Section::Keys);
+    assert_eq!((page.section, page.scroll, page.open), (Section::Keys, 0.0, None));
+    // Its own tab again changes nothing.
+    page.scroll = 120.0;
+    page.show(Section::Keys);
+    assert_eq!(page.scroll, 120.0);
 }
 
 #[test]
@@ -216,8 +255,8 @@ fn a_click_goes_to_what_was_drawn_last_under_it() {
     assert_eq!(page.action_at(400.0, 10.0), None);
 }
 
-/// Draws the page with `values` and returns every click it offers.
-fn actions_of(page: &mut Page, values: &Values) -> Vec<Action> {
+/// Draws the page's sub tab showing once and returns every click it offers.
+fn draw_once(page: &mut Page, values: &Values) -> Vec<Action> {
     let mut scene = Scene::new();
     let mut text = TextSystem::new(14.0);
     let theme = Theme::dark();
@@ -227,12 +266,26 @@ fn actions_of(page: &mut Page, values: &Values) -> Vec<Action> {
     page.hits.iter().map(|&(_, a)| a).collect()
 }
 
+/// Draws every sub tab with `values` and returns every click they offer,
+/// then goes back to the tab it was on.
+fn actions_of(page: &mut Page, values: &Values) -> Vec<Action> {
+    let was = page.section;
+    let mut actions = Vec::new();
+    for section in Section::shown(values) {
+        page.section = section;
+        actions.extend(draw_once(page, values));
+    }
+    page.section = was;
+    draw_once(page, values);
+    actions
+}
+
 #[test]
 fn the_theme_list_ends_with_customize() {
     let palettes = crate::theme::library("/nonexistent");
     let values = Values { palettes: palettes.clone(), palette: 2, ..sample() };
     let mut page = Page { open: Some(List::Themes), ..Page::default() };
-    let actions = actions_of(&mut page, &values);
+    let actions = draw_once(&mut page, &values);
     assert_eq!(page.open, Some(List::Themes));
     let at = actions.iter().position(|&a| a == Action::PickTheme(0)).unwrap();
     // The list's padding first (the one in use), then every theme, then Customize….
@@ -247,7 +300,7 @@ fn the_font_name_drops_a_list_of_every_font() {
     let fonts: Vec<String> = ["JetBrains Mono (built in)", "Menlo", "Monaco"].map(String::from).to_vec();
     let values = Values { fonts, font_index: 1, ..sample() };
     let mut page = Page { open: Some(List::Fonts), ..Page::default() };
-    let actions = actions_of(&mut page, &values);
+    let actions = draw_once(&mut page, &values);
     let at = actions.iter().position(|&a| a == Action::PickFont(0)).unwrap();
     assert_eq!(actions[at - 1..at + 3], [1, 0, 1, 2].map(Action::PickFont));
     assert!(!actions.contains(&Action::Customize));
