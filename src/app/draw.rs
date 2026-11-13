@@ -46,7 +46,9 @@ impl App {
         self.draw_remote_marks(&visible);
         for divider in &self.dividers {
             self.scene.set_layer(LAYER_OVERLAY);
-            self.scene.fill(divider.line, self.ctx.theme.divider.mix(self.ctx.theme.text_faint, 0.35));
+            let over = divider.grab_area().contains(self.mouse.0, self.mouse.1);
+            let ink = if over { self.ctx.theme.accent.alpha(0.65) } else { self.ctx.theme.divider };
+            self.scene.fill(divider.line, ink);
             self.scene.set_layer(LAYER_CONTENT);
         }
         self.draw_tab_bar(&agents);
@@ -152,67 +154,32 @@ impl App {
             self.dirty = true;
         }
     }
-    /// The title bar over the window's top, where the system's would be.
-    /// With the full sidebar, as in cmux, the sidebar runs from the very
-    /// top (the traffic lights and the title sit in it) and the bar spans
-    /// only the right side, on its background, with the tab's AI summary. Otherwise
-    /// (compact, too narrow for the lights; the strip; no list) it goes
-    /// across in the sidebar's color. AppKit keeps the traffic lights and
-    /// the dragging; this is only the look.
+    /// One continuous title bar across the window, with the active tab's
+    /// summary centered and room reserved for AppKit's traffic lights.
     pub(super) fn draw_titlebar(&mut self) {
         let top = self.top();
         if top <= 0.0 {
             return;
         }
-        let side = self.tab_area();
-        let column = self.strip == TabStrip::Left && !self.compact && side.w > 0.0;
-        let bar = if column {
-            Rect::new(side.w, 0.0, self.width - side.w, top)
-        } else {
-            Rect::new(0.0, 0.0, self.width, top)
-        };
         let summary = self.tabs.get(self.active).and_then(|tab| tab.ai_title.summary.clone());
         let Self { scene, ctx, title, .. } = self;
         let Ctx { text, theme, .. } = ctx;
-        if column {
-            scene.fill(Rect::new(0.0, 0.0, side.w, top), theme.panel(SURFACE_LIFT / 2.0));
-            scene.fill(Rect::new(side.w - 1.0, 0.0, 1.0, top), theme.divider);
-            scene.fill(bar, theme.background);
-        } else {
-            scene.fill(bar, theme.panel(SURFACE_LIFT / 2.0));
-        }
-        scene.fill(Rect::new(bar.x, top - 1.0, bar.w, 1.0), theme.divider);
-        // Fixed in points, like the bar: zoom leaves it alone. With the
-        // sidebar, the title sits at the top of the tabs, beside the traffic
-        // lights; the bar over the panes is left to drag the window by.
-        // Otherwise it's centered clear of the lights.
+        scene.fill(Rect::new(0.0, 0.0, self.width, top), theme.panel(SURFACE_LIFT / 2.0));
+        scene.fill(Rect::new(0.0, top - 1.0, self.width, 1.0), theme.divider);
+        // Fixed in points, like the native controls, even when zoomed.
+        // Symmetric insets keep the title at the window's true center.
         let lights = 84.0 / self.zoom;
-        let baseline = |font: f32, text: &TextSystem| (top / 2.0 + text.ui_ascent(font) * 0.36).round();
-        if column {
-            // The title, without the app's name: the window is Temino's.
-            let font = 13.0 / self.zoom;
-            let room = (side.w - lights - 10.0).max(0.0);
-            let name = title.strip_suffix(" — Temino").unwrap_or(title);
-            let shown = text.elide(name, UI_BOLD, font, room);
-            let y = baseline(font, text);
-            text.draw_text(scene, &shown, lights - 6.0 / self.zoom, y, UI_BOLD, font, theme.text_dim);
-            // Over the panes: the model's summary of what goes on in the tab.
-            if let Some(summary) = summary {
-                let font = 13.0 / self.zoom;
-                let line = format!("✦ {summary}");
-                let shown = text.elide(&line, UI, font, (bar.w - 32.0 / self.zoom).max(0.0));
-                let w = text.measure(&shown, UI, font);
-                let y = baseline(font, text);
-                text.draw_text(scene, &shown, bar.x + (bar.w - w) / 2.0, y, UI, font, theme.text_dim);
-            }
-            return;
-        }
-        let font = 13.0 / self.zoom;
-        let room = (bar.w - 2.0 * lights).max(0.0);
-        let shown = text.elide(title, UI_BOLD, font, room);
-        let w = text.measure(&shown, UI_BOLD, font);
-        let y = baseline(font, text);
-        text.draw_text(scene, &shown, bar.x + (bar.w - w) / 2.0, y, UI_BOLD, font, theme.text_dim);
+        let font = 14.0 / self.zoom;
+        let room = (self.width - 2.0 * lights).max(0.0);
+        let line = summary.map(|summary| format!("✦ {summary}"));
+        let (label, face) = match &line {
+            Some(line) => (line.as_str(), UI),
+            None => (title.as_str(), UI_BOLD),
+        };
+        let shown = text.elide(label, face, font, room);
+        let w = text.measure(&shown, face, font);
+        let y = (top / 2.0 + text.ui_ascent(font) * 0.36).round();
+        text.draw_text(scene, &shown, (self.width - w) / 2.0, y, face, font, theme.text_dim);
     }
     pub(super) fn draw_tab_bar(&mut self, agents: &[Option<AgentState>]) {
         self.tab_hits.clear();
@@ -466,7 +433,12 @@ impl App {
         let area = self.tab_area();
         let theme = &self.ctx.theme;
         self.scene.fill(area, theme.panel(SURFACE_LIFT / 2.0));
-        self.scene.fill(Rect::new(area.right() - 1.0, area.y, 1.0, area.h), theme.divider);
+        let edge = if self.sidebar_edge().contains(self.mouse.0, self.mouse.1) {
+            theme.accent.alpha(0.65)
+        } else {
+            theme.divider
+        };
+        self.scene.fill(Rect::new(area.right() - 1.0, area.y, 1.0, area.h), edge);
         self.scene.push_clip(Rect::new(0.0, area.y, area.w - 1.0, area.h));
         let dragged = match self.pointer {
             Pointer::Tab { index, dragging: true, .. } => Some(index),
