@@ -100,17 +100,19 @@ impl App {
         for (id, slot) in slots {
             let Some(index) = self.panes.iter().position(|pane| pane.id == id) else { continue };
             let pane = &mut self.panes[index];
+            pane.refresh_place();
             let info = pane.agent_info(now);
             let program = pane.program_now.clone();
+            let place = pane.place();
             let shell = (info.is_none() && program.is_none()).then(|| {
                 pane.refresh_git(&sender, now);
                 let (busy, running) = pane.activity();
                 ShellHeader {
                     busy,
                     failed: pane.last_failed(),
-                    path: ui::short_path(&pane.session.cwd),
+                    place: pane.place(),
                     running: busy.then_some(running),
-                    detail: if busy { String::new() } else { pane.idle_line(&pane.session.cwd, now) },
+                    detail: if busy { String::new() } else { pane.idle_line(&pane.session.cwd, now, false) },
                 }
             });
             let bar = Rect::new(slot.x, slot.y, slot.w, AGENT_HEADER.min(slot.h));
@@ -130,7 +132,7 @@ impl App {
                     reach
                 }
                 (None, Some((name, started)), _) => {
-                    draw_program_header(scene, text, theme, bar, &name, now.duration_since(started), focused);
+                    draw_program_header(scene, text, theme, bar, &place, &name, now.duration_since(started), focused);
                     0.0
                 }
                 (None, None, Some(shell)) => {
@@ -298,7 +300,7 @@ impl App {
                 if busy {
                     return Some(PaneLine { id, agent: None, busy, failed: false, text });
                 }
-                let text = pane.idle_line(base.as_deref().unwrap_or(&pane.session.cwd), now);
+                let text = pane.idle_line(base.as_deref().unwrap_or(&pane.session.cwd), now, true);
                 Some(PaneLine { id, agent: None, busy, failed: pane.last_failed(), text })
             })
             .collect();

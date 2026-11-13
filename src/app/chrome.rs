@@ -324,12 +324,66 @@ fn draw_header_edge(scene: &mut Scene, theme: &Theme, bar: Rect, bottom: f32, fo
     }
 }
 
-/// The bar over an agent's pane. Left: the agent's mark and name, then a
-/// dot and what it's doing, with the turn's clock; then your last prompt.
-/// Right: its subagents, the prompts queued behind this turn, its
-/// session's name and how long it has run, and the toggle that extends it
-/// down (`header_details`), up to `room` tall, the terminal moving down to
-/// make room. Returns how far it reaches below the bar.
+/// Where a pane works, as every header leads with it: the repository's
+/// (or folder's) name, biggest and brightest; the folder under it, or
+/// outside a repository the folders above, faint; then the branch and how
+/// many files changed. At most `room` wide, the name cut last. Returns its
+/// right edge.
+pub(super) fn draw_place(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    place: &Place,
+    x: f32,
+    baseline: f32,
+    room: f32,
+) -> f32 {
+    const NAME: f32 = 13.5;
+    const SMALL: f32 = 12.0;
+    let end = x + room.max(0.0);
+    let mut x = x;
+    // Outside a repository the folders above lead in, faint: "~/Downloads/".
+    if !place.repo {
+        if let Some(parent) = &place.within {
+            let lead = format!("{parent}/");
+            let name_w = text.measure(&place.name, UI_BOLD, NAME);
+            let shown = text.elide(&lead, UI, SMALL, (end - x - name_w).min(room * 0.4).max(0.0));
+            if !shown.is_empty() && shown != "…" {
+                x += text.draw_text(scene, &shown, x, baseline, UI, SMALL, theme.text_faint);
+            }
+        }
+    }
+    let name = text.elide(&place.name, UI_BOLD, NAME, end - x);
+    x += text.draw_text(scene, &name, x, baseline, UI_BOLD, NAME, theme.text);
+    if place.repo {
+        if let Some(within) = &place.within {
+            let shown = text.elide(&format!("/{within}"), UI, SMALL, ((end - x) * 0.5).max(0.0));
+            if shown != "…" {
+                x += text.draw_text(scene, &shown, x, baseline, UI, SMALL, theme.text_dim);
+            }
+        }
+    }
+    if let Some(branch) = &place.branch {
+        let mut label = format!("⎇ {branch}");
+        if place.changes > 0 {
+            label.push_str(&format!(" ●{}", place.changes));
+        }
+        if end - x > 40.0 {
+            x += 10.0;
+            let shown = text.elide(&label, UI, SMALL, end - x);
+            x += text.draw_text(scene, &shown, x, baseline, UI, SMALL, theme.variable);
+        }
+    }
+    x
+}
+
+/// The bar over an agent's pane. Left: the agent's mark, where it works
+/// (`draw_place`), a dot in the color of what it's doing with the turn's
+/// clock, then what it's doing right now, else your last prompt. Right:
+/// its subagents, the prompts queued behind this turn, its session's name
+/// and how long it has run, and the toggle that extends it down
+/// (`header_details`), up to `room` tall, the terminal moving down to make
+/// room. Returns how far it reaches below the bar.
 pub(super) fn draw_agent_header(
     scene: &mut Scene,
     text: &mut TextSystem,
@@ -357,34 +411,28 @@ pub(super) fn draw_agent_header(
     let cy = bar.y + bar.h / 2.0;
     let mut x = bar.x + 10.0;
     if let Some(program) = info.program {
-        let (name, brand) = agent::agent_brand(program);
-        x = draw_agent_icon(scene, text, program, Color::hex(brand), theme.text, x, cy) + 6.0;
-        text.draw_text(scene, name, x, baseline, UI_BOLD, font, theme.text);
-        x += text.measure(name, UI_BOLD, font) + 12.0;
-        scene.fill(Rect::new(x, cy - 7.0, 1.0, 14.0), theme.divider);
-        x += 12.0;
+        let (_, brand) = agent::agent_brand(program);
+        x = draw_agent_icon(scene, text, program, Color::hex(brand), theme.text, x, cy) + 8.0;
     }
+    // Where it works leads, kept to half the bar.
+    x = draw_place(scene, text, theme, &info.place, x, baseline, ((bar.w - 40.0) * 0.5).max(0.0)) + 12.0;
+    scene.fill(Rect::new(x, cy - 7.0, 1.0, 14.0), theme.divider);
+    x += 12.0;
     scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), color).radius(4.0));
-    x += 16.0;
+    x += 14.0;
     let summary = agent_summary(info);
     let ink = match info.state {
         AgentState::Waiting => Color::hex(AGENT_WAITING),
         AgentState::Done => Color::hex(AGENT_DONE),
-        _ => theme.text,
+        _ => theme.text_dim,
     };
-    text.draw_text(scene, &summary, x, baseline, UI_BOLD, font, ink);
-    x += text.measure(&summary, UI_BOLD, font) + 14.0;
-    // The folder it works in, kept to a third of the bar.
-    if !info.cwd.is_empty() {
-        let path = text.elide(&ui::short_path(&info.cwd), UI, font, (bar.w / 3.0).max(0.0));
-        text.draw_text(scene, &path, x, baseline, UI, font, theme.text_dim);
-        x += text.measure(&path, UI, font) + 14.0;
-    }
+    text.draw_text(scene, &summary, x, baseline, UI, font, ink);
+    x += text.measure(&summary, UI, font) + 12.0;
     // The toggle at the right end: a triangle pointing the way it goes.
     let toggle = if hover { theme.text } else { theme.text_faint };
     draw_triangle(scene, bar.right() - 16.0, cy, if info.open { -1.0 } else { 1.0 }, toggle);
     // The right side, laid out from the edge in: the subagents whenever
-    // they fit, the rest only while the prompt keeps some room.
+    // they fit, the rest only while the line keeps some room.
     let mut right = bar.right() - 32.0;
     let subagents = (info.subagents > 0)
         .then(|| format!("{} subagent{}", info.subagents, if info.subagents == 1 { "" } else { "s" }));
@@ -407,19 +455,27 @@ pub(super) fn draw_agent_header(
         text.draw_text(scene, chip, right - w, baseline, UI, 11.0, theme.text_faint);
         right -= w + 14.0;
     }
-    // Coming back to the pane, its recap stands in for the prompt. Opened,
-    // the prompt shows whole underneath, so the bar doesn't repeat it.
-    let line = match (&info.recap, &info.prompt) {
-        (Some(recap), _) => Some((recap.clone(), theme.text)),
-        (None, Some(prompt)) if !info.open => Some((format!("› {prompt}"), theme.text_dim)),
-        _ => None,
-    };
-    if let Some((line, ink)) = line {
-        let room = right - x - 14.0;
-        let shown = text.elide(&line, UI, font, room);
+    if let Some((line, ink)) = header_line(theme, info) {
+        let shown = text.elide(&line, UI, font, right - x - 14.0);
         text.draw_text(scene, &shown, x, baseline, UI, font, ink);
     }
     reach
+}
+
+/// The line after the agent's state: coming back to the pane, its recap;
+/// while it works, what it's doing right now; else your last prompt.
+/// Opened, the extension underneath shows those, so the bar doesn't.
+fn header_line(theme: &Theme, info: &AgentInfo) -> Option<(String, Color)> {
+    if let Some(recap) = &info.recap {
+        return Some((recap.clone(), theme.text));
+    }
+    if info.open {
+        return None;
+    }
+    if let Some(activity) = info.activity.as_ref().filter(|_| info.state == AgentState::Running) {
+        return Some((activity.clone(), theme.text));
+    }
+    info.prompt.as_ref().map(|prompt| (format!("› {prompt}"), theme.text_dim))
 }
 
 /// The extended header, under the bar and above the terminal, on the same
@@ -443,6 +499,11 @@ pub(super) fn draw_header_details(
     // Rows as drawn: an indent, the text, its font and size, its ink, and
     // the height it takes.
     let mut rows: Vec<(f32, String, crate::text::FontId, f32, Color, f32)> = Vec::new();
+    // What it's about, what it's doing now, and what you asked it, first.
+    if let Some(task) = &info.task {
+        let line = text.elide(task, UI_BOLD, 13.0, width);
+        rows.push((0.0, line, UI_BOLD, 13.0, theme.text, LABEL));
+    }
     let mut wrapped = |rows: &mut Vec<_>, lead: &str, body: &str, ink: Color| {
         let indent = text.measure(lead, UI, 12.0);
         for (i, line) in wrap(text, body, UI, 12.0, width - indent).into_iter().enumerate() {
@@ -450,11 +511,14 @@ pub(super) fn draw_header_details(
             rows.push((if i == 0 { 0.0 } else { indent }, line, UI, 12.0, ink, LINE));
         }
     };
-    if let Some(recap) = &info.recap {
-        wrapped(&mut rows, "", recap, theme.text);
+    if let Some(activity) = info.activity.as_ref().filter(|_| info.state == AgentState::Running) {
+        wrapped(&mut rows, "▸ ", activity, theme.accent);
     }
     if let Some(prompt) = &info.prompt {
         wrapped(&mut rows, "› ", prompt, theme.text);
+    }
+    if let Some(recap) = &info.recap {
+        wrapped(&mut rows, "", recap, theme.text_dim);
     }
     for (label, items) in [("Subagents", &info.subagent_tasks), ("Queued", &info.queue)] {
         if items.is_empty() {
@@ -469,10 +533,10 @@ pub(super) fn draw_header_details(
     let mut facts = vec![agent_summary(info)];
     facts.extend(info.name.clone());
     facts.push(format!("up {}", ui::short_duration(info.uptime)));
-    if !info.cwd.is_empty() {
-        facts.push(ui::short_path(&info.cwd));
+    // The bar names the repository and branch; the whole path is here.
+    if !info.place.path.is_empty() {
+        facts.push(info.place.path.clone());
     }
-    facts.extend(info.branch.clone());
     let facts = text.elide(&facts.join(" · "), UI, 11.0, width);
     let facts_h = LABEL + 2.0;
     // Cut short to fit, the last row kept ending in an ellipsis.
@@ -552,12 +616,15 @@ pub(super) fn draw_triangle(scene: &mut Scene, cx: f32, cy: f32, dir: f32, color
     }
 }
 
-/// The bar over a listed program's pane: its name, and how long it has run.
+/// The bar over a listed program's pane: where it runs (`draw_place`),
+/// its name, and how long it has run.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_program_header(
     scene: &mut Scene,
     text: &mut TextSystem,
     theme: &Theme,
     bar: Rect,
+    place: &Place,
     name: &str,
     uptime: Duration,
     focus: Lit,
@@ -567,11 +634,15 @@ pub(super) fn draw_program_header(
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
-    let x = bar.x + 12.0;
-    scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), theme.text_faint).radius(4.0));
-    text.draw_text(scene, name, x + 16.0, baseline, UI_BOLD, font, theme.text);
+    let mut x = bar.x + 12.0;
+    scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), theme.accent).radius(4.0));
+    x += 16.0;
     let uptime = format!("up {}", ui::short_duration(uptime));
     let w = text.measure(&uptime, UI, 11.0);
+    let right = bar.right() - 12.0 - w - 14.0;
+    x = draw_place(scene, text, theme, place, x, baseline, ((right - x) * 0.6).max(0.0)) + 14.0;
+    let shown = text.elide(&format!("▸ {name}"), UI, font, (right - x).max(0.0));
+    text.draw_text(scene, &shown, x, baseline, UI, font, theme.text);
     text.draw_text(scene, &uptime, bar.right() - 12.0 - w, baseline, UI, 11.0, theme.text_faint);
 }
 
@@ -579,17 +650,17 @@ pub(super) fn draw_program_header(
 pub(super) struct ShellHeader {
     pub(super) busy: bool,
     pub(super) failed: bool,
-    /// The folder it's in.
-    pub(super) path: String,
+    /// Where it is.
+    pub(super) place: Place,
     /// The command running, while one is.
     pub(super) running: Option<String>,
     /// At rest: the last command, how it ended and when, and the branch.
     pub(super) detail: String,
 }
 
-/// The bar over a plain terminal: a dot (lit while a command
-/// runs, red after one failed), the folder, the command running, then the
-/// last command, how it ended and when, and the git branch.
+/// The bar over a plain terminal: a dot (lit while a command runs, red
+/// after one failed), where it is (`draw_place`), then the command running,
+/// or the last command, how it ended and when.
 pub(super) fn draw_shell_header(
     scene: &mut Scene,
     text: &mut TextSystem,
@@ -615,10 +686,8 @@ pub(super) fn draw_shell_header(
     scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), dot).radius(4.0));
     x += 16.0;
     let right = bar.right() - 12.0;
-    // The folder keeps at most half the bar, so what's going on still shows.
-    let shown = text.elide(&shell.path, UI_BOLD, font, ((right - x) / 2.0).max(0.0));
-    text.draw_text(scene, &shown, x, baseline, UI_BOLD, font, theme.text);
-    x += text.measure(&shown, UI_BOLD, font) + 14.0;
+    // Where it is keeps at most half the bar, so what's going on still shows.
+    x = draw_place(scene, text, theme, &shell.place, x, baseline, ((right - x) / 2.0).max(0.0)) + 14.0;
     let running = shell.running.as_ref().filter(|command| !command.is_empty()).map(|command| format!("▸ {command}"));
     let rest = [(running, theme.text), (Some(shell.detail.clone()).filter(|d| !d.is_empty()), theme.text_dim)];
     for (part, ink) in rest.into_iter().filter_map(|(part, ink)| part.map(|part| (part, ink))) {
