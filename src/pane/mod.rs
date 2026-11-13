@@ -427,10 +427,10 @@ impl Pane {
         true
     }
 
-    /// The line that brings back, at the next launch, what's running here:
-    /// a coding agent's conversation, or a monitor. Anything else isn't
-    /// run again: Up recalls it.
-    pub fn resume(&self) -> Option<String> {
+    /// The line that brings back, at the next launch, what's running here,
+    /// and the setting it's under (see `crate::resume`). Anything else
+    /// isn't run again: Up recalls it.
+    pub fn resume(&self) -> Option<(crate::resume::Kind, String)> {
         let block = self.session.active().filter(|block| block.kind == BlockKind::Command)?;
         let claude = self.session.foreground_group().and_then(agent::claude_session_id);
         let program = match claude {

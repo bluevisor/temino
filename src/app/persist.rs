@@ -1,4 +1,5 @@
 use super::*;
+use crate::resume::Kind;
 
 impl App {
     /// Reopens the tabs open at the last quit, each with its panes in their
@@ -50,12 +51,10 @@ impl App {
         // in panes that by then hold something else.
         let resumes = std::fs::read_to_string(resume_path()).unwrap_or_default();
         let _ = std::fs::remove_file(resume_path());
-        if resume_programs() {
-            let panes = self.saved_panes();
-            for (index, line) in read_resumes(&resumes) {
-                if let Some(pane) = panes.get(index).copied().and_then(|id| self.pane(id)) {
-                    pane.run_when_ready(line);
-                }
+        let panes = self.saved_panes();
+        for (index, kind, line) in read_resumes(&resumes) {
+            if let Some(pane) = panes.get(index).copied().filter(|_| kind.enabled()).and_then(|id| self.pane(id)) {
+                pane.run_when_ready(line);
             }
         }
         self.switch_tab(active);
@@ -88,12 +87,15 @@ impl App {
                 pane.save_history(&format!("{history}/{index}"));
             }
         }
-        let resumes: Vec<(usize, String)> = if resume_programs() {
-            let panes = self.saved_panes();
-            panes.iter().enumerate().filter_map(|(index, &id)| Some((index, self.pane(id)?.resume()?))).collect()
-        } else {
-            Vec::new()
-        };
+        let resumes: Vec<(usize, Kind, String)> = self
+            .saved_panes()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, id)| {
+                let (kind, line) = self.pane(id)?.resume().filter(|(kind, _)| kind.enabled())?;
+                Some((index, kind, line))
+            })
+            .collect();
         if resumes.is_empty() {
             let _ = std::fs::remove_file(resume_path());
         } else {
@@ -240,26 +242,25 @@ pub(super) fn node_has_shell(node: &Node, is_viewer: &impl Fn(u64) -> bool) -> b
     leaves.iter().any(|&id| !is_viewer(id))
 }
 
-/// Settings ▸ Terminal ▸ Reopen running programs: off unless turned on.
-pub(super) fn resume_programs() -> bool {
-    crate::setting("resume_programs").as_deref() == Some("on")
-}
-
 /// What each pane was running at the last quit, for `restore_tabs`.
 pub(super) fn resume_path() -> String {
     format!("{}/resume", crate::settings_dir())
 }
 
-/// A line a pane: its number in `saved_panes`, then the command line.
-pub(super) fn write_resumes(resumes: &[(usize, String)]) -> String {
-    resumes.iter().map(|(index, line)| format!("{index}\t{line}\n")).collect()
+/// A line a pane: its number in `saved_panes`, the setting that brings
+/// it back (`Kind::code`), then the command line.
+pub(super) fn write_resumes(resumes: &[(usize, Kind, String)]) -> String {
+    resumes.iter().map(|(index, kind, line)| format!("{index}\t{}\t{line}\n", kind.code())).collect()
 }
 
-pub(super) fn read_resumes(text: &str) -> Vec<(usize, String)> {
+pub(super) fn read_resumes(text: &str) -> Vec<(usize, Kind, String)> {
     text.lines()
         .filter_map(|line| {
-            let (index, line) = line.split_once('\t')?;
-            Some((index.parse().ok()?, line.to_owned())).filter(|(_, line)| !line.trim().is_empty())
+            let mut fields = line.splitn(3, '\t');
+            let index = fields.next()?.parse().ok()?;
+            let kind = Kind::from_code(fields.next()?)?;
+            let line = fields.next().filter(|line| !line.trim().is_empty())?;
+            Some((index, kind, line.to_owned()))
         })
         .collect()
 }
@@ -438,12 +439,16 @@ mod tests {
 
     #[test]
     fn what_panes_ran_is_written_and_read_back() {
-        let resumes = vec![(0, "claude-max --resume 1234-abcd".to_owned()), (3, "claude -v --resume 9-f".to_owned())];
+        let resumes = vec![
+            (0, Kind::Program, "claude-max --resume 1234-abcd".to_owned()),
+            (3, Kind::Server, "npm run dev".to_owned()),
+        ];
         let text = write_resumes(&resumes);
-        assert_eq!(text, "0\tclaude-max --resume 1234-abcd\n3\tclaude -v --resume 9-f\n");
+        assert_eq!(text, "0\tP\tclaude-max --resume 1234-abcd\n3\tS\tnpm run dev\n");
         assert_eq!(read_resumes(&text), resumes);
-        // Damaged lines are skipped, not run.
-        assert_eq!(read_resumes("x\tls\n2\t \nclaude\n4\tclaude\t-r 1\n"), [(4, "claude\t-r 1".to_owned())]);
+        // Damaged or unknown lines are skipped, not run.
+        let damaged = "x\tP\tls\n1\tZ\tls\n2\tP\t \nclaude\n4\tP\tvim a\tb\n";
+        assert_eq!(read_resumes(damaged), [(4, Kind::Program, "vim a\tb".to_owned())]);
     }
 
     #[test]

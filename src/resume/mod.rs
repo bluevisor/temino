@@ -1,39 +1,62 @@
 //! Bringing back, at launch, what each pane was running at quit: a coding
-//! agent picks its conversation back up, a monitor starts again. Anything
-//! else isn't run again on its own (Up recalls it): a second run could
-//! do harm.
+//! agent picks its conversation back up; a monitor, a session manager, a
+//! log, a remote shell or an editor starts again, and with their own
+//! setting, dev servers. Anything else isn't run again on its own (Up
+//! recalls it): a second run could do harm.
 
 use crate::agent;
 
-/// Programs that only show things, so running them again is safe: system
-/// and GPU monitors.
-const MONITORS: [&str; 16] = [
-    "top", "htop", "btop", "btm", "nvtop", "glances", "atop", "gtop", "gotop", "bpytop", "bashtop", "zenith", "s-tui",
-    "nvitop", "macmon", "bottom",
-];
+mod rerun;
 
-/// The line that brings back what `command` was running: an agent's
-/// conversation (`program` is its entry in AGENTS, `claude_id` Claude
-/// Code's session), or a monitor as it was typed.
-pub fn line(command: &str, program: Option<&str>, claude_id: Option<&str>) -> Option<String> {
+/// Which setting brings a line back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Settings ▸ Reopen running programs: agents, monitors, tmux, logs,
+    /// ssh, editors.
+    Program,
+    /// Settings ▸ Restart dev servers.
+    Server,
+}
+
+impl Kind {
+    pub fn code(self) -> &'static str {
+        match self {
+            Kind::Program => "P",
+            Kind::Server => "S",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Kind> {
+        match code {
+            "P" => Some(Kind::Program),
+            "S" => Some(Kind::Server),
+            _ => None,
+        }
+    }
+
+    /// Whether its setting is on; both are off unless turned on.
+    pub fn enabled(self) -> bool {
+        let key = match self {
+            Kind::Program => "resume_programs",
+            Kind::Server => "resume_servers",
+        };
+        crate::setting(key).as_deref() == Some("on")
+    }
+}
+
+/// The line that brings back what `command` was running, and which
+/// setting it's under: an agent's conversation (`program` is its entry in
+/// AGENTS, `claude_id` Claude Code's session), or a program that's safe
+/// to run again.
+pub fn line(command: &str, program: Option<&str>, claude_id: Option<&str>) -> Option<(Kind, String)> {
     let command = command.trim();
     if command.is_empty() || command.contains('\n') {
         return None;
     }
-    if let Some(program) = program {
-        return resume_line(command, program, claude_id);
+    match program {
+        Some(program) => resume_line(command, program, claude_id).map(|line| (Kind::Program, line)),
+        None => rerun::line(command),
     }
-    rerun_line(command)
-}
-
-/// A monitor run on its own, as it was typed; not through sudo (it would
-/// stop at a password prompt), nor in a pipeline or list.
-fn rerun_line(command: &str) -> Option<String> {
-    let words = shell_words(command);
-    let name = agent::program_name(command)?;
-    let plain = !words.iter().any(|word| matches!(*word, "sudo" | "doas" | "|" | "||" | "&&" | ";" | "&"))
-        && !command.contains(['|', ';', '&', '`', '$', '>', '<']);
-    (plain && MONITORS.contains(&name)).then(|| command.to_owned())
 }
 
 /// The words of a command line, quotes kept, split where the shell would.
@@ -209,16 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn monitors_run_again_and_nothing_else_does() {
-        assert_eq!(line("btop", None, None).as_deref(), Some("btop"));
-        assert_eq!(line("htop -d 10 -u john", None, None).as_deref(), Some("htop -d 10 -u john"));
-        assert_eq!(line("/usr/bin/top -o cpu", None, None).as_deref(), Some("/usr/bin/top -o cpu"));
-        assert_eq!(line("sudo nvtop", None, None), None);
-        assert_eq!(line("htop | tee log", None, None), None);
-        assert_eq!(line("npm run dev", None, None), None);
-        assert_eq!(line("rm -rf build", None, None), None);
-        assert_eq!(line("vim notes.md", None, None), None);
+    fn agents_come_back_as_programs() {
         assert_eq!(line("  ", Some("claude"), None), None);
-        assert_eq!(line("claude-max", Some("claude"), Some("1-2")).as_deref(), Some("claude-max --resume 1-2"));
+        assert_eq!(
+            line("claude-max", Some("claude"), Some("1-2")),
+            Some((Kind::Program, "claude-max --resume 1-2".to_owned()))
+        );
+        assert_eq!(line("claude\nmore", Some("claude"), Some("1-2")), None);
     }
 }

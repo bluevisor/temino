@@ -79,7 +79,7 @@ impl Ui<'_> {
                     y,
                     width,
                     "Tabs",
-                    &[Row::TabsTop, Row::Extended, Row::Notifications, Row::ResumePrograms],
+                    &[Row::TabsTop, Row::Extended, Row::Notifications, Row::ResumePrograms, Row::ResumeServers],
                     values,
                 )
             }

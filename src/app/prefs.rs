@@ -296,7 +296,8 @@ impl App {
             tabs_top: self.strip == TabStrip::Top,
             extended: self.extended,
             notifications: crate::notify::enabled(),
-            resume_programs: persist::resume_programs(),
+            resume_programs: crate::resume::Kind::Program.enabled(),
+            resume_servers: crate::resume::Kind::Server.enabled(),
             zoom: self.zoom_percent(),
             points: self.zoom * BASE_FONT_SIZE,
             line_spacing: crate::text::LINE_SPACINGS
@@ -420,6 +421,7 @@ impl App {
             }
             Action::Extended(on) => self.set_extended(on),
             Action::ResumePrograms(on) => crate::save_setting("resume_programs", if on { "on" } else { "off" }),
+            Action::ResumeServers(on) => crate::save_setting("resume_servers", if on { "on" } else { "off" }),
             Action::Notifications(on) => {
                 crate::save_setting("notifications", if on { "on" } else { "off" });
                 if on {
