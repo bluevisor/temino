@@ -174,6 +174,13 @@ impl App {
                 self.close_window();
                 return;
             }
+            // Closing Settings while it's showing goes back to the tab it was opened from.
+            let from =
+                if id == SETTINGS { self.settings_from.take().filter(|_| tab_index == self.active) } else { None };
+            if let Some(index) = from.and_then(|pane| self.tabs.iter().position(|t| t.root.contains(pane))) {
+                self.switch_tab(index);
+                return;
+            }
             self.switch_tab(if tab_index < self.active || self.active >= self.tabs.len() {
                 self.active.saturating_sub(1).min(self.tabs.len() - 1)
             } else {
