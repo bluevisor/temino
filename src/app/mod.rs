@@ -445,6 +445,8 @@ pub struct App {
     installed: [bool; KINDS.len()],
     /// Which of fetch::FETCHES are installed, as of opening Settings.
     fetches_installed: [bool; FETCHES.len()],
+    /// Temino is the system's terminal, as of the Settings tab opening.
+    default_terminal: Option<bool>,
     update: Option<UpdateOffer>,
     /// Per frame: the update pill and card's hit areas, and the card.
     update_hits: Vec<(Rect, UpdateAction)>,
@@ -609,6 +611,7 @@ impl App {
             blur: crate::setting("blur").as_deref() == Some("on"),
             installed: [false; KINDS.len()],
             fetches_installed: [false; FETCHES.len()],
+            default_terminal: None,
             update: None,
             update_hits: Vec::new(),
             update_card: Rect::default(),

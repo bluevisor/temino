@@ -23,6 +23,7 @@ fn sample() -> Values {
         installed: [true, true, false],
         fetch: 1,
         fetches_installed: [true, false, true],
+        default_terminal: Some(false),
         tabs_top: false,
         extended: false,
         notifications: true,
@@ -76,6 +77,7 @@ fn every_control_can_be_clicked() {
     expected.extend((0..KINDS.len()).map(Action::Shell));
     expected.extend((0..=FETCHES.len()).map(Action::Fetch));
     expected.push(Action::FetchConfig);
+    expected.push(Action::DefaultTerminal(true));
     expected.extend([
         Action::TabsTop(false),
         Action::TabsTop(true),
