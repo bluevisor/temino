@@ -26,6 +26,7 @@ fn sample() -> Values {
         tabs_top: false,
         extended: false,
         notifications: true,
+        resume_programs: false,
         zoom: 100.0,
         points: 15.4,
         line_spacing: 1,
@@ -94,6 +95,7 @@ fn every_control_can_be_clicked() {
         Action::TabsTop(true),
         Action::Extended(true),
         Action::Notifications(false),
+        Action::ResumePrograms(true),
     ]);
     expected.extend((0..PROVIDERS.len()).map(Action::Provider));
     expected.extend(Field::ALL.map(Action::Edit));

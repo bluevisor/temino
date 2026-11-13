@@ -74,7 +74,14 @@ impl Ui<'_> {
                     shell.push(Row::FetchConfig);
                 }
                 y = self.section(x, y, width, "Shell", &shell, values);
-                self.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Notifications], values)
+                self.section(
+                    x,
+                    y,
+                    width,
+                    "Tabs",
+                    &[Row::TabsTop, Row::Extended, Row::Notifications, Row::ResumePrograms],
+                    values,
+                )
             }
             Section::Ai => {
                 let provider = PROVIDERS[values.provider];

@@ -46,15 +46,33 @@ impl App {
                 pane.restore_history(&format!("{}/{index}", pane_history_dir()));
             }
         }
+        // Read once: a crash before the next quit mustn't run these again
+        // in panes that by then hold something else.
+        let resumes = std::fs::read_to_string(resume_path()).unwrap_or_default();
+        let _ = std::fs::remove_file(resume_path());
+        if resume_programs() {
+            let panes = self.saved_panes();
+            for (index, resume) in read_resumes(&resumes) {
+                if let Some(pane) = panes.get(index).copied().and_then(|id| self.pane(id)) {
+                    match resume {
+                        Resume::Run(line) => pane.run_when_ready(line),
+                        Resume::Type(line) => pane.type_when_ready(line),
+                    }
+                }
+            }
+        }
         self.switch_tab(active);
         Ok(())
     }
-    /// Every shell pane, tab by tab, in the order the tabs file lists them.
+    /// Every shell pane, tab by tab, in the order the tabs file lists them:
+    /// viewers and tabs of viewers alone left out, as `save_tabs` leaves
+    /// them out, so the numbers match the panes they reopen as.
     pub(super) fn saved_panes(&self) -> Vec<u64> {
         let mut leaves = Vec::new();
-        for tab in self.tabs.iter().filter(|tab| tab.focus != SETTINGS) {
+        for tab in self.tabs.iter().filter(|tab| tab.focus != SETTINGS && self.has_shell(&tab.root)) {
             tab.root.leaves(&mut leaves);
         }
+        leaves.retain(|&id| !self.is_viewer(id));
         leaves
     }
     /// Each pane's finished blocks and own history, for `restore_tabs` to
@@ -72,6 +90,17 @@ impl App {
             if let Some(pane) = self.pane(id) {
                 pane.save_history(&format!("{history}/{index}"));
             }
+        }
+        let resumes: Vec<(usize, Resume)> = if resume_programs() {
+            let panes = self.saved_panes();
+            panes.iter().enumerate().filter_map(|(index, &id)| Some((index, self.pane(id)?.resume()?))).collect()
+        } else {
+            Vec::new()
+        };
+        if resumes.is_empty() {
+            let _ = std::fs::remove_file(resume_path());
+        } else {
+            crate::write_private(&resume_path(), write_resumes(&resumes));
         }
         let dir = sessions_dir();
         let _ = std::fs::remove_dir_all(&dir);
@@ -212,6 +241,44 @@ pub(super) fn node_has_shell(node: &Node, is_viewer: &impl Fn(u64) -> bool) -> b
     let mut leaves = Vec::new();
     node.leaves(&mut leaves);
     leaves.iter().any(|&id| !is_viewer(id))
+}
+
+/// Settings ▸ Terminal ▸ Reopen running programs: off unless turned on.
+pub(super) fn resume_programs() -> bool {
+    crate::setting("resume_programs").as_deref() == Some("on")
+}
+
+/// What each pane was running at the last quit, for `restore_tabs`.
+pub(super) fn resume_path() -> String {
+    format!("{}/resume", crate::settings_dir())
+}
+
+/// A line a pane: its number in `saved_panes`, `R` (run) or `T` (type),
+/// and the command line.
+pub(super) fn write_resumes(resumes: &[(usize, Resume)]) -> String {
+    resumes
+        .iter()
+        .map(|(index, resume)| match resume {
+            Resume::Run(line) => format!("{index}\tR\t{line}\n"),
+            Resume::Type(line) => format!("{index}\tT\t{line}\n"),
+        })
+        .collect()
+}
+
+pub(super) fn read_resumes(text: &str) -> Vec<(usize, Resume)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let index = fields.next()?.parse().ok()?;
+            let kind = fields.next()?;
+            let line = fields.next().filter(|line| !line.trim().is_empty())?.to_owned();
+            match kind {
+                "R" => Some((index, Resume::Run(line))),
+                "T" => Some((index, Resume::Type(line))),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Where each pane's output is kept between launches.
@@ -384,6 +451,22 @@ mod tests {
             }
         });
         assert_eq!(result.err().as_deref(), Some("no pty"));
+    }
+
+    #[test]
+    fn what_panes_ran_is_written_and_read_back() {
+        let resumes = vec![
+            (0, Resume::Run("claude-max --resume 1234-abcd".to_owned())),
+            (3, Resume::Type("npm run dev -- --port 3000".to_owned())),
+        ];
+        let text = write_resumes(&resumes);
+        assert_eq!(text, "0\tR\tclaude-max --resume 1234-abcd\n3\tT\tnpm run dev -- --port 3000\n");
+        assert_eq!(read_resumes(&text), resumes);
+        // Damaged or unknown lines are skipped, not run.
+        assert_eq!(
+            read_resumes("x\tR\tls\n1\tZ\tls\n2\tR\t \n4\tT\tvim a\tb\n"),
+            [(4, Resume::Type("vim a\tb".to_owned()))]
+        );
     }
 
     #[test]

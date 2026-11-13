@@ -57,6 +57,8 @@ const TITLE_COMMANDS: usize = 3;
 const AGENT_SCAN: Duration = Duration::from_millis(300);
 const AGENT_SCAN_LINES: usize = 10;
 const AGENT_QUIET: Duration = Duration::from_millis(1500);
+/// How long a new shell's prompt stays still before a queued command goes.
+const PROMPT_SETTLE: Duration = Duration::from_millis(300);
 const AGENT_ECHO: Duration = Duration::from_millis(400);
 /// How long after you press Enter output still counts as the agent
 /// answering.
@@ -219,6 +221,10 @@ pub struct Pane {
     /// A command to run once the shell is at its prompt, then its block.
     queued: Option<String>,
     queued_block: Option<u64>,
+    /// A command line to leave at the prompt once the shell is there.
+    prefill: Option<String>,
+    /// When the prompt will have been quiet long enough for those.
+    settle_at: Option<Instant>,
     /// What the running program last titled itself, whether it asked for
     /// you (a notification or bell) and when, and whether it reports
     /// progress: the clues to an agent's state.
@@ -291,6 +297,15 @@ struct Recap {
 
 /// What a tab's mark adds to a recap: a fact on its first line, and a
 /// line for the model writing the summary.
+/// What a pane brings back at launch of the program it ran at quit.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Resume {
+    /// Run this line: an agent picking up where it was.
+    Run(String),
+    /// Leave this line at the prompt.
+    Type(String),
+}
+
 pub struct MarkNote {
     pub fact: String,
     pub context: String,
@@ -361,6 +376,8 @@ impl Pane {
             wheel_rest: 0.0,
             queued: None,
             queued_block: None,
+            prefill: None,
+            settle_at: None,
             program_title: String::new(),
             notified_at: None,
             progress: false,
@@ -398,12 +415,55 @@ impl Pane {
         for notice in notices {
             self.notice(ctx, notice);
         }
-        if self.session.phase == Phase::Ready {
-            if let Some(command) = self.queued.take() {
-                self.session.submit(&command);
-                self.queued_block = self.session.blocks.last().map(|block| block.id);
-                self.pin_to_bottom();
+        // A new shell can draw its prompt again (a resize as the window
+        // lays out): a line sent before that closes its block at once and
+        // runs in another. Wait until the prompt has been still a moment.
+        let waiting = self.queued.is_some() || self.prefill.is_some();
+        self.settle_at = (waiting && self.session.phase == Phase::Ready).then(|| Instant::now() + PROMPT_SETTLE);
+    }
+
+    /// The queued command runs, or the line is left at the prompt, once
+    /// the prompt has settled; true when it did.
+    fn release_queued(&mut self, now: Instant) -> bool {
+        if self.settle_at.is_none_or(|at| now < at) {
+            return false;
+        }
+        self.settle_at = None;
+        if self.session.phase != Phase::Ready {
+            return false;
+        }
+        if let Some(command) = self.queued.take() {
+            self.session.submit(&command);
+            self.queued_block = self.session.blocks.last().map(|block| block.id);
+            self.pin_to_bottom();
+        } else if let Some(line) = self.prefill.take() {
+            if self.editor.text.is_empty() {
+                self.editor.set(&line);
+                self.hint = None;
             }
+        }
+        true
+    }
+
+    /// Leaves `line` at the prompt, for you to run with Enter, as soon as
+    /// the shell is there.
+    pub fn type_when_ready(&mut self, line: String) {
+        self.prefill = Some(line);
+    }
+
+    /// What to bring back here at the next launch, for the program running
+    /// now: Claude Code resumes its conversation; anything else waits at
+    /// the prompt, since running it again on its own could do harm.
+    pub fn resume(&self) -> Option<Resume> {
+        let block = self.session.active().filter(|block| block.kind == BlockKind::Command)?;
+        let command = block.command.trim();
+        if command.is_empty() || command.contains('\n') {
+            return None;
+        }
+        let claude = self.session.foreground_group().and_then(agent::claude_session_id);
+        match claude.and_then(|id| agent::resume_line(command, &id)) {
+            Some(line) => Some(Resume::Run(line)),
+            None => Some(Resume::Type(command.to_owned())),
         }
     }
 
@@ -469,7 +529,7 @@ impl Pane {
 
     /// Advances animations; true when the pane needs a new frame.
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut dirty = self.session.tick(now) | self.take_answer();
+        let mut dirty = self.session.tick(now) | self.take_answer() | self.release_queued(now);
         if let Some(recap) = &mut self.recap {
             if recap.summary_at.is_none() && recap.summary().is_some() {
                 recap.summary_at = Some(now);
@@ -520,7 +580,7 @@ impl Pane {
     }
 
     pub fn next_wakeup(&self) -> Option<Instant> {
-        let mut times = vec![self.session.deadline(), self.reflow_at];
+        let mut times = vec![self.session.deadline(), self.reflow_at, self.settle_at];
         times.push(self.bell.map(|at| at + Duration::from_millis(200)));
         if self.asking.is_some() {
             times.push(Some(Instant::now() + Duration::from_millis(100)));

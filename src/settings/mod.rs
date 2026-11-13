@@ -83,6 +83,8 @@ pub struct Values {
     pub extended: bool,
     /// Desktop notifications for panes out of sight.
     pub notifications: bool,
+    /// What panes ran at quit comes back at launch.
+    pub resume_programs: bool,
     /// As a percentage of the default size, and the terminal font's points.
     pub zoom: f32,
     pub points: f32,
@@ -194,6 +196,7 @@ pub enum Action {
     TabsTop(bool),
     Extended(bool),
     Notifications(bool),
+    ResumePrograms(bool),
     /// Smaller (-1), the default (0) or bigger (+1).
     Zoom(i32),
     Updates(bool),
@@ -362,6 +365,7 @@ enum Row {
     TabsTop,
     Extended,
     Notifications,
+    ResumePrograms,
     Updates,
     Analytics,
     CheckForUpdates,
@@ -525,6 +529,11 @@ impl Ui<'_> {
                 "Desktop notifications",
                 "When an agent waits or finishes, or a program asks, in a tab you can't see".to_owned(),
             ),
+            Row::ResumePrograms => (
+                "Reopen running programs",
+                "At launch, Claude Code picks up its conversation; anything else waits at the prompt for Enter"
+                    .to_owned(),
+            ),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::Analytics => (
                 "Share anonymous usage data",
@@ -665,6 +674,9 @@ impl Ui<'_> {
             Row::Extended => self.toggle(right, rect.y, values.extended, Action::Extended(!values.extended)),
             Row::Notifications => {
                 self.toggle(right, rect.y, values.notifications, Action::Notifications(!values.notifications))
+            }
+            Row::ResumePrograms => {
+                self.toggle(right, rect.y, values.resume_programs, Action::ResumePrograms(!values.resume_programs))
             }
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::Analytics => self.toggle(right, rect.y, values.analytics, Action::Analytics(!values.analytics)),
