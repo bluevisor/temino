@@ -282,15 +282,16 @@ impl Pane {
                 Some(rest) if !shift => self.editor.insert(&rest),
                 _ => self.editor.end(shift),
             },
-            // AI mode recalls what was asked, the shell what was run.
+            // AI mode recalls what was asked, the shell what was run, both
+            // only in this pane (Ctrl+R and the grey suggestion search all).
             Some(Named::Up) => {
                 if !self.editor.vertical(false, shift) {
-                    self.editor.browse(if self.ai { &ctx.asked } else { &ctx.history }, true);
+                    self.editor.browse(if self.ai { &self.asked_here.entries } else { &self.ran.entries }, true);
                 }
             }
             Some(Named::Down) => {
                 if !self.editor.vertical(true, shift) {
-                    self.editor.browse(if self.ai { &ctx.asked } else { &ctx.history }, false);
+                    self.editor.browse(if self.ai { &self.asked_here.entries } else { &self.ran.entries }, false);
                 }
             }
             // Tab on an empty line switches between the shell and AI mode;
@@ -408,6 +409,7 @@ impl Pane {
             return;
         }
         ctx.history.push(&command);
+        self.ran.push(&command);
         self.hint = None;
         self.editor.take();
         match self.shell_swap(&command) {
@@ -447,6 +449,7 @@ impl Pane {
             return;
         }
         ctx.asked.push(&request);
+        self.asked_here.push(&request);
         self.editor.take();
         let id = self.session.ask(&request);
         crate::analytics::bump(crate::analytics::Counter::AiQueries);

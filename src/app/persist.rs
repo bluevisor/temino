@@ -37,11 +37,13 @@ impl App {
         if self.tabs.is_empty() {
             return self.new_tab();
         }
-        if crate::setting("restore_output").as_deref() != Some("off") {
-            for (index, id) in self.saved_panes().into_iter().enumerate() {
-                if let Some(pane) = self.pane(id) {
+        let restore_output = crate::setting("restore_output").as_deref() != Some("off");
+        for (index, id) in self.saved_panes().into_iter().enumerate() {
+            if let Some(pane) = self.pane(id) {
+                if restore_output {
                     pane.session.restore_blocks(&format!("{}/{index}", sessions_dir()));
                 }
+                pane.restore_history(&format!("{}/{index}", pane_history_dir()));
             }
         }
         self.switch_tab(active);
@@ -55,10 +57,21 @@ impl App {
         }
         leaves
     }
-    /// Each pane's finished blocks, for `restore_tabs` to bring back.
+    /// Each pane's finished blocks and own history, for `restore_tabs` to
+    /// bring back. The history is kept even with output restore off: it's
+    /// what you typed, not what programs printed.
     pub(super) fn save_sessions(&mut self) {
         if !self.primary {
             return;
+        }
+        let history = pane_history_dir();
+        let _ = std::fs::remove_dir_all(&history);
+        crate::create_private_dir(&crate::settings_dir());
+        crate::create_private_dir(&history);
+        for (index, id) in self.saved_panes().into_iter().enumerate() {
+            if let Some(pane) = self.pane(id) {
+                pane.save_history(&format!("{history}/{index}"));
+            }
         }
         let dir = sessions_dir();
         let _ = std::fs::remove_dir_all(&dir);
@@ -204,6 +217,11 @@ pub(super) fn node_has_shell(node: &Node, is_viewer: &impl Fn(u64) -> bool) -> b
 /// Where each pane's output is kept between launches.
 pub(super) fn sessions_dir() -> String {
     format!("{}/sessions", crate::settings_dir())
+}
+
+/// Where each pane's own Up/Down history is kept between launches.
+pub(super) fn pane_history_dir() -> String {
+    format!("{}/pane_history", crate::settings_dir())
 }
 
 pub(super) fn tabs_path() -> String {

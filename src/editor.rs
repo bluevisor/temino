@@ -378,9 +378,9 @@ impl Editor {
         true
     }
 
-    /// Up/Down through history; the current text is kept as a draft.
-    pub fn browse(&mut self, history: &History, older: bool) -> bool {
-        let entries = &history.entries;
+    /// Up/Down through `entries` (a pane's own history); the current text
+    /// is kept as a draft.
+    pub fn browse(&mut self, entries: &[String], older: bool) -> bool {
         let next = match (&self.browsing, older) {
             (None, true) => entries.len().checked_sub(1),
             (None, false) => None,
@@ -462,9 +462,21 @@ impl History {
         Self::read("ai_history", false)
     }
 
+    /// One pane's own history, what its Up and Down recall: in memory, and
+    /// written down with the pane's session at quit (`save_to`).
+    pub fn local() -> History {
+        History { entries: Vec::new(), path: String::new() }
+    }
+
+    /// A pane's history as `save_to` wrote it; None when there's no file.
+    pub fn load_from(path: &str) -> Option<History> {
+        let text = std::fs::read_to_string(path).ok()?;
+        Some(History { entries: Self::clean(text.lines().map(unescape).collect()), path: String::new() })
+    }
+
     fn read(name: &str, seed: bool) -> History {
         let path = format!("{}/{name}", crate::settings_dir());
-        let mut entries: Vec<String> = match std::fs::read_to_string(&path) {
+        let entries: Vec<String> = match std::fs::read_to_string(&path) {
             Ok(text) => text.lines().map(unescape).collect(),
             Err(_) if seed => {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
@@ -474,12 +486,17 @@ impl History {
             }
             Err(_) => Vec::new(),
         };
+        History { entries: Self::clean(entries), path }
+    }
+
+    /// Blank lines and repeats dropped (the newest copy stays), cut to the limit.
+    fn clean(mut entries: Vec<String>) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         entries.reverse();
         entries.retain(|entry| !entry.trim().is_empty() && seen.insert(entry.clone()));
         entries.truncate(Self::LIMIT);
         entries.reverse();
-        History { entries, path }
+        entries
     }
 
     pub fn push(&mut self, entry: &str) {
@@ -492,13 +509,15 @@ impl History {
         if self.entries.len() > Self::LIMIT {
             self.entries.remove(0);
         }
-        self.save();
+        if !self.path.is_empty() {
+            crate::create_private_dir(&crate::settings_dir());
+            self.save_to(&self.path);
+        }
     }
 
-    fn save(&self) {
+    pub fn save_to(&self, path: &str) {
         let text: String = self.entries.iter().map(|e| e.replace('\\', "\\\\").replace('\n', "\\n") + "\n").collect();
-        crate::create_private_dir(&crate::settings_dir());
-        crate::write_private(&self.path, text);
+        crate::write_private(path, text);
     }
 }
 
@@ -869,32 +888,32 @@ mod tests {
     fn history_browsing_keeps_the_draft() {
         let history = past(&["ls", "pwd"]);
         let mut editor = typed("dra");
-        assert!(editor.browse(&history, true));
+        assert!(editor.browse(&history.entries, true));
         assert_eq!(editor.text, "pwd");
-        assert!(editor.browse(&history, true));
+        assert!(editor.browse(&history.entries, true));
         assert_eq!(editor.text, "ls");
         // Past the oldest: stays there, but the key is still used.
-        assert!(editor.browse(&history, true));
+        assert!(editor.browse(&history.entries, true));
         assert_eq!(editor.text, "ls");
-        assert!(editor.browse(&history, false));
+        assert!(editor.browse(&history.entries, false));
         assert_eq!(editor.text, "pwd");
-        assert!(editor.browse(&history, false));
+        assert!(editor.browse(&history.entries, false));
         assert_eq!((editor.text.as_str(), editor.cursor), ("dra", 3));
         // Not browsing: Down is not ours.
-        assert!(!editor.browse(&history, false));
-        assert!(!Editor::new().browse(&past(&[]), true));
+        assert!(!editor.browse(&history.entries, false));
+        assert!(!Editor::new().browse(&[], true));
     }
 
     #[test]
     fn a_switch_of_history_starts_from_its_newest_entry() {
         let (ran, asked) = (past(&["ls", "pwd"]), past(&["what is here", "undo that"]));
         let mut editor = Editor::new();
-        editor.browse(&ran, true);
-        editor.browse(&ran, true);
+        editor.browse(&ran.entries, true);
+        editor.browse(&ran.entries, true);
         assert_eq!(editor.text, "ls");
         editor.take();
         editor.stop_browsing();
-        assert!(editor.browse(&asked, true));
+        assert!(editor.browse(&asked.entries, true));
         assert_eq!(editor.text, "undo that");
     }
 
@@ -902,13 +921,13 @@ mod tests {
     fn editing_a_recalled_entry_stops_browsing() {
         let history = past(&["one", "two"]);
         let mut editor = Editor::new();
-        editor.browse(&history, true);
+        editor.browse(&history.entries, true);
         editor.insert("!");
         assert_eq!(editor.text, "two!");
         // Up starts again from the newest entry, with the edit as the draft.
-        editor.browse(&history, true);
+        editor.browse(&history.entries, true);
         assert_eq!(editor.text, "two");
-        editor.browse(&history, false);
+        editor.browse(&history.entries, false);
         assert_eq!(editor.text, "two!");
     }
 
@@ -940,6 +959,20 @@ mod tests {
             let saved = entry.replace('\\', "\\\\").replace('\n', "\\n");
             assert_eq!(unescape(&saved), entry);
         }
+    }
+
+    #[test]
+    fn a_panes_history_comes_back_as_it_was_saved() {
+        let path = std::env::temp_dir().join(format!("temino-pane-history-{}", std::process::id()));
+        let path = path.to_str().unwrap();
+        assert!(History::load_from(path).is_none());
+        let mut history = History::local();
+        for entry in ["ls", "cd src\nls", "ls", "for x in a\nb"] {
+            history.push(entry);
+        }
+        history.save_to(path);
+        assert_eq!(History::load_from(path).unwrap().entries, ["cd src\nls", "ls", "for x in a\nb"]);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

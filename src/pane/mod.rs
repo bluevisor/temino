@@ -179,6 +179,10 @@ pub struct Pane {
     pub id: u64,
     pub session: Session,
     editor: Editor,
+    /// Commands run and requests asked in this pane: what its Up and Down
+    /// recall, so one pane's history doesn't mix into another's.
+    ran: History,
+    asked_here: History,
     completion: Option<Completion>,
     /// The last completion hint worked out, keyed by cwd and editor text.
     hint: Option<(String, Option<String>)>,
@@ -372,6 +376,8 @@ impl Pane {
             needs_since: None,
             git_changes: None,
             git_asked: None,
+            ran: History::local(),
+            asked_here: History::local(),
             watcher: None,
             typed: String::new(),
             typed_prompt: None,
@@ -569,6 +575,27 @@ impl Pane {
             }
         }
         recent
+    }
+
+    /// Writes this pane's own history to `path` (commands) and `path.ai`.
+    pub fn save_history(&self, path: &str) {
+        self.ran.save_to(path);
+        self.asked_here.save_to(&format!("{path}.ai"));
+    }
+
+    /// Reads what `save_history` wrote. With no file yet (saved by a build
+    /// that kept one history for every pane), the commands of the pane's
+    /// restored blocks stand in.
+    pub fn restore_history(&mut self, path: &str) {
+        let blocks = |kind: BlockKind| {
+            let mut history = History::local();
+            for block in self.session.blocks.iter().filter(|b| b.kind == kind) {
+                history.push(&block.command);
+            }
+            history
+        };
+        self.ran = History::load_from(path).unwrap_or_else(|| blocks(BlockKind::Command));
+        self.asked_here = History::load_from(&format!("{path}.ai")).unwrap_or_else(|| blocks(BlockKind::Ai));
     }
 
     /// Moves the pane; the grid follows now, finished blocks rewrap shortly.
