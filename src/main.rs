@@ -31,6 +31,7 @@ mod json;
 mod keys;
 mod llm;
 mod notify;
+mod opener;
 mod pane;
 mod picture;
 mod platform;
@@ -180,11 +181,18 @@ fn main() {
         let frames = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(3);
         std::process::exit(app::selftest(path, width, height, frames));
     }
+    // Opened as the system's terminal (`temino -e htop`): a new tab in the
+    // Temino already running, or in this one once it's up.
+    let launch = opener::from_args(&args[1..]);
+    if launch.as_ref().is_some_and(opener::hand_to_running) {
+        std::process::exit(0);
+    }
     store::install_panic_hook();
     crash::install();
 
     let (sender, receiver) = mpsc::channel();
     platform::app_new("application/x-vnd.bluevisor-Temino");
+    opener::install();
     platform::window_new("Temino", WIDTH, HEIGHT, sender.clone());
     // Command+N: another window with a core thread of its own, fresh.
     platform::on_new_window(|receiver, sender, cwd| app::run(receiver, sender, WIDTH, HEIGHT, app::Start::Fresh(cwd)));
@@ -197,6 +205,9 @@ fn main() {
         .name("temino core".into())
         .spawn(move || app::run(receiver, sender, WIDTH, HEIGHT, start))
         .expect("core thread");
+    if let Some(open) = launch {
+        opener::open(open);
+    }
     platform::app_run();
     std::process::exit(0);
 }

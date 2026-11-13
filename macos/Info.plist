@@ -13,5 +13,15 @@
 <key>NSHighResolutionCapable</key><true/>
 <key>NSCameraUsageDescription</key><string>A program running in Temino wants to use the camera.</string>
 <key>NSMicrophoneUsageDescription</key><string>A program running in Temino wants to use the microphone.</string>
+<key>CFBundleDocumentTypes</key><array><dict>
+	<key>CFBundleTypeName</key><string>Shell Script</string>
+	<key>CFBundleTypeRole</key><string>Shell</string>
+	<key>LSHandlerRank</key><string>Alternate</string>
+	<key>LSItemContentTypes</key><array><string>public.unix-executable</string><string>com.apple.terminal.shell-script</string></array>
+</dict></array>
+<key>CFBundleURLTypes</key><array><dict>
+	<key>CFBundleURLName</key><string>Terminal Links</string>
+	<key>CFBundleURLSchemes</key><array><string>ssh</string><string>telnet</string><string>x-man-page</string></array>
+</dict></array>
 <key>NSAppleEventsUsageDescription</key><string>A program running in Temino wants to control another app.</string>
 </dict></plist>

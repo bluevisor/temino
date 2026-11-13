@@ -76,6 +76,8 @@ pub struct Values {
     /// and which of FETCHES are installed.
     pub fetch: usize,
     pub fetches_installed: [bool; FETCHES.len()],
+    /// Temino is the system's terminal; None where there's no such choice.
+    pub default_terminal: Option<bool>,
     pub tabs_top: bool,
     /// The side tab list says, under the active tab, what each pane is doing.
     pub extended: bool,
@@ -189,6 +191,8 @@ pub enum Action {
     Fetch(usize),
     /// Open the picked fetch's config file.
     FetchConfig,
+    /// Make Temino the system's terminal (true), or give it back.
+    DefaultTerminal(bool),
     TabsTop(bool),
     Extended(bool),
     Notifications(bool),
@@ -307,6 +311,9 @@ impl Page {
         if values.fetch > 0 {
             shell.push(Row::FetchConfig);
         }
+        if values.default_terminal.is_some() {
+            shell.push(Row::DefaultTerminal);
+        }
         y = ui.section(x, y, width, "Shell", &shell, values);
         y = ui.section(x, y, width, "Tabs", &[Row::TabsTop, Row::Extended, Row::Notifications], values);
         let provider = PROVIDERS[values.provider];
@@ -380,6 +387,7 @@ enum Row {
     Shell,
     Fetch,
     FetchConfig,
+    DefaultTerminal,
     TabsTop,
     Extended,
     Notifications,
@@ -529,6 +537,7 @@ impl Ui<'_> {
             Row::FetchConfig => {
                 ("Fetch config", format!("What {} shows, and how", FETCHES[values.fetch.saturating_sub(1)].name))
             }
+            Row::DefaultTerminal => ("Default terminal", crate::opener::DETAIL.to_owned()),
             Row::TabsTop => ("Tab list", "Down the side, or across the top".to_owned()),
             Row::Extended => ("Extended tab list", {
                 // On Linux the command modifier is Ctrl+Shift already.
@@ -679,6 +688,10 @@ impl Ui<'_> {
                 self.segments(right, control_y, &labels, Some(values.fetch), Action::Fetch);
             }
             Row::FetchConfig => self.button(right, control_y, "Edit Config", Action::FetchConfig),
+            Row::DefaultTerminal => {
+                let on = values.default_terminal == Some(true);
+                self.toggle(right, rect.y, on, Action::DefaultTerminal(!on));
+            }
             Row::TabsTop => {
                 let labels = ["Side".to_owned(), "Top".to_owned()];
                 self.segments(right, control_y, &labels, Some(values.tabs_top as usize), |i| Action::TabsTop(i == 1));

@@ -243,6 +243,7 @@ impl App {
     pub(super) fn open_settings(&mut self) {
         self.installed = KINDS.map(|kind| shells::find(kind).is_some());
         self.fetches_installed = fetch::installed();
+        self.default_terminal = crate::opener::is_default();
         if let Some(index) = self.tabs.iter().position(|tab| tab.focus == SETTINGS) {
             self.switch_tab(index);
             return;
@@ -293,6 +294,7 @@ impl App {
             installed: self.installed,
             fetch: fetch::chosen().map_or(0, |index| index + 1),
             fetches_installed: self.fetches_installed,
+            default_terminal: self.default_terminal,
             tabs_top: self.strip == TabStrip::Top,
             extended: self.extended,
             notifications: crate::notify::enabled(),
@@ -417,6 +419,22 @@ impl App {
                 self.check_for_updates();
             }
             Action::Extended(on) => self.set_extended(on),
+            Action::DefaultTerminal(on) => {
+                match crate::opener::set_default(on) {
+                    Ok(()) if on => self.ctx.show_toast("Temino is the default terminal"),
+                    Ok(()) => self.ctx.show_toast("Temino is no longer the default terminal"),
+                    Err(error) => {
+                        crate::store::log(&format!("default terminal: {error}"));
+                        self.ctx.show_toast(&format!("Couldn't change the default terminal: {error}"));
+                        return;
+                    }
+                }
+                // macOS applies it a few seconds later: show what was asked
+                // for, and read it back next time Settings opens.
+                if self.default_terminal.is_some() {
+                    self.default_terminal = Some(on);
+                }
+            }
             Action::Notifications(on) => {
                 crate::save_setting("notifications", if on { "on" } else { "off" });
                 if on {
