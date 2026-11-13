@@ -148,22 +148,59 @@ pub fn find_urls(chars: &[char]) -> Vec<(usize, usize)> {
     found
 }
 
-pub fn git_branch(path: &str) -> Option<String> {
+/// The git repository a folder is in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repo {
+    /// What it's called: its folder's name, or for a linked worktree
+    /// (`git worktree add`) the name of the repository it belongs to.
+    pub name: String,
+    /// Its top folder.
+    pub root: String,
+    /// The branch checked out, or the commit when none is.
+    pub branch: Option<String>,
+}
+
+/// The repository `path` is in, if any: found by its `.git`, a folder in a
+/// repository's top folder or a file (`gitdir: …`) in a worktree's.
+pub fn git_repo(path: &str) -> Option<Repo> {
     let mut dir = std::path::PathBuf::from(path);
     loop {
         let git = dir.join(".git");
-        if git.is_dir() {
-            let head = std::fs::read_to_string(git.join("HEAD")).ok()?;
-            let head = head.trim();
-            return Some(match head.strip_prefix("ref: refs/heads/") {
-                Some(branch) => branch.to_owned(),
-                None => head.chars().take(7).collect(),
+        let folder = || dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let found = if git.is_dir() {
+            Some((git, folder()))
+        } else if git.is_file() {
+            let link = std::fs::read_to_string(&git).ok()?;
+            let target = std::path::PathBuf::from(link.trim().strip_prefix("gitdir:")?.trim());
+            let target = if target.is_absolute() { target } else { dir.join(target) };
+            // `<repo>/.git/worktrees/<name>`: the repository's own name.
+            let text = target.to_string_lossy().into_owned();
+            let name = match text.rsplit_once("/.git/worktrees/") {
+                Some((repo, _)) => repo.rsplit('/').next().unwrap_or_default().to_owned(),
+                None => folder(),
+            };
+            Some((target, name))
+        } else {
+            None
+        };
+        if let Some((git_dir, name)) = found {
+            let branch = std::fs::read_to_string(git_dir.join("HEAD")).ok().map(|head| {
+                let head = head.trim();
+                match head.strip_prefix("ref: refs/heads/") {
+                    Some(branch) => branch.to_owned(),
+                    None => head.chars().take(7).collect(),
+                }
             });
+            return Some(Repo { name, root: dir.to_string_lossy().into_owned(), branch });
         }
         if !dir.pop() {
             return None;
         }
     }
+}
+
+pub fn git_branch(path: &str) -> Option<String> {
+    git_repo(path)?.branch
 }
 
 /// A UTF-8 `LANG` for the shell when nothing in `env` picks a locale.

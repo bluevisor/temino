@@ -149,6 +149,17 @@ pub fn title_state(title: &str) -> Option<AgentState> {
     }
 }
 
+/// What an agent's title says it's working on: Claude Code's title past
+/// its spinner ("⠐ Fixing the build" is "Fixing the build"). None for a
+/// bare name.
+pub fn title_task(title: &str) -> Option<String> {
+    title_state(title)?;
+    let task = title.trim_start().chars().skip(1).collect::<String>();
+    let task = one_line(&task);
+    let bare = task.is_empty() || task.eq_ignore_ascii_case("claude code") || task.starts_with("Action Required");
+    (!bare).then_some(task)
+}
+
 /// Whether a title looks like an agent's own, for agents run under an
 /// alias we can't recognize by name.
 pub fn is_agent_title(title: &str) -> bool {
@@ -200,6 +211,8 @@ pub struct Report {
     pub queue: Vec<String>,
     /// The session's name.
     pub name: Option<String>,
+    /// What it did last this turn, as a few words ("Editing main.rs").
+    pub activity: Option<String>,
     /// Whether the session says it's working: true from the moment a turn
     /// starts until it ends, however quiet the screen and title are.
     pub busy: bool,
@@ -254,6 +267,7 @@ fn watch(shared: Arc<Mutex<Watch>>) {
                 queued: transcript.queued(),
                 queue: transcript.queue.iter().filter_map(|text| prompt_text(text)).collect(),
                 name: session.name,
+                activity: transcript.activity.clone(),
                 busy: session.busy,
             }
         });
@@ -313,6 +327,8 @@ struct Transcript {
     /// How far it's been read, up to the end of its last whole line.
     offset: u64,
     prompt: Option<String>,
+    /// The last tool it called since your last prompt, described.
+    activity: Option<String>,
     /// Subagent tool calls not yet answered, whether each runs in the
     /// background (answered at once, reporting back later), and its task.
     subagents: VecDeque<(String, bool, String)>,
@@ -371,6 +387,9 @@ impl Transcript {
         match entry.str_at("type") {
             Some("assistant") => {
                 for item in content.map(Value::array).unwrap_or_default() {
+                    if item.str_at("type") == Some("tool_use") {
+                        self.activity = describe_tool(item.str_at("name").unwrap_or_default(), item.get("input"));
+                    }
                     if item.str_at("type") == Some("tool_use") && matches!(item.str_at("name"), Some("Agent" | "Task"))
                     {
                         let input = item.get("input");
@@ -419,11 +438,48 @@ impl Transcript {
                 }
                 if let Some(prompt) = prompt_text(&text) {
                     self.prompt = Some(prompt);
+                    self.activity = None;
                 }
             }
             _ => {}
         }
     }
+}
+
+/// A tool call in a few words, the way you'd say what the agent is doing:
+/// "Editing chrome.rs", "Running cargo test". None for bookkeeping tools.
+fn describe_tool(name: &str, input: Option<&Value>) -> Option<String> {
+    let field = |key: &str| input.and_then(|input| input.str_at(key)).map(one_line).filter(|v| !v.is_empty());
+    let file = || {
+        field("file_path").or_else(|| field("notebook_path")).or_else(|| field("path")).map(|path| {
+            let path = path.trim_end_matches('/');
+            path.rsplit('/').next().unwrap_or(path).to_owned()
+        })
+    };
+    let (verb, what) = match name {
+        "Read" => ("Reading", file()),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ("Editing", file()),
+        "Bash" => ("Running", field("description").or_else(|| field("command"))),
+        "Grep" | "Glob" => ("Searching for", field("pattern")),
+        "WebFetch" => ("Reading", field("url")),
+        "WebSearch" => ("Searching the web for", field("query")),
+        "Agent" | "Task" => ("Delegating:", field("description").or_else(|| field("subagent_type"))),
+        "TodoWrite" | "TaskCreate" | "TaskUpdate" => return Some("Updating its plan".to_owned()),
+        "AskUserQuestion" => return Some("Asking you a question".to_owned()),
+        "ExitPlanMode" => return Some("Showing its plan".to_owned()),
+        "" | "ToolSearch" => return None,
+        // MCP tools: mcp__server__tool, said as "Using server tool".
+        other => {
+            let pretty = other.strip_prefix("mcp__").unwrap_or(other).replace("__", " ").replace('_', " ");
+            return Some(format!("Using {pretty}"));
+        }
+    };
+    Some(match what {
+        // "Running Run the tests" reads badly: a Bash description is already a phrase.
+        Some(what) if name == "Bash" && field("description").is_some() => what,
+        Some(what) => format!("{verb} {what}"),
+        None => verb.trim_end_matches([':', ' ']).trim_end_matches(" for").to_owned(),
+    })
 }
 
 /// What you typed, from a user turn: the slash command run, or the text
@@ -492,6 +548,9 @@ mod tests {
         assert_eq!(title_state("✳ Fixing the build"), Some(AgentState::Idle));
         assert_eq!(title_state("✋  Action Required (temino)"), Some(AgentState::Waiting));
         assert_eq!(title_state("zsh"), None);
+        assert_eq!(title_task("⠐ Fixing the build").as_deref(), Some("Fixing the build"));
+        assert_eq!(title_task("✳ Claude Code"), None);
+        assert_eq!(title_task("zsh"), None);
         assert_eq!(screen_state("✻ Thinking… (esc to interrupt)"), Some(AgentState::Running));
         assert_eq!(screen_state("Do you want to proceed?\n❯ 1. Yes\n  2. No"), Some(AgentState::Waiting));
         assert_eq!(screen_state("> "), None);
@@ -535,5 +594,28 @@ mod tests {
         transcript.line(r#"{"type":"queue-operation","operation":"remove","content":"then push"}"#);
         assert_eq!(transcript.queued(), 0);
         assert_eq!(project_dir("/Users/a/my.app"), "-Users-a-my-app");
+    }
+
+    #[test]
+    fn tool_calls_say_what_the_agent_is_doing() {
+        let call = |name: &str, input: &str| describe_tool(name, json::parse(input).as_ref());
+        assert_eq!(call("Edit", r#"{"file_path":"/x/src/app/chrome.rs"}"#).as_deref(), Some("Editing chrome.rs"));
+        assert_eq!(call("Read", r#"{"file_path":"/x/README.md"}"#).as_deref(), Some("Reading README.md"));
+        assert_eq!(call("Bash", r#"{"command":"cargo test --quiet"}"#).as_deref(), Some("Running cargo test --quiet"));
+        assert_eq!(call("Bash", r#"{"command":"x","description":"Run the tests"}"#).as_deref(), Some("Run the tests"));
+        assert_eq!(call("Grep", r#"{"pattern":"fn header"}"#).as_deref(), Some("Searching for fn header"));
+        assert_eq!(call("Grep", "{}").as_deref(), Some("Searching"));
+        assert_eq!(call("mcp__github__create_pr", "{}").as_deref(), Some("Using github create pr"));
+        assert_eq!(call("ToolSearch", "{}"), None);
+
+        let mut transcript = Transcript::default();
+        transcript.line(r#"{"type":"user","message":{"content":"tidy up"}}"#);
+        transcript.line(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a","name":"Edit","input":{"file_path":"/a/b.rs"}}]}}"#,
+        );
+        assert_eq!(transcript.activity.as_deref(), Some("Editing b.rs"));
+        // A new prompt starts a new turn: nothing done in it yet.
+        transcript.line(r#"{"type":"user","message":{"content":"now push"}}"#);
+        assert_eq!(transcript.activity, None);
     }
 }

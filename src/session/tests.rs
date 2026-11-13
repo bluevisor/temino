@@ -145,3 +145,26 @@ fn stale_timers_never_wake() {
     session.phase = Phase::Prompt;
     assert_eq!(session.deadline(), None);
 }
+
+#[test]
+fn repos_are_named_and_worktrees_by_their_repository() {
+    let base = std::env::temp_dir().join(format!("temino-repo-test-{}", std::process::id()));
+    let main = base.join("temino");
+    let tree = base.join("temino-feature");
+    std::fs::create_dir_all(main.join(".git/worktrees/temino-feature")).unwrap();
+    std::fs::create_dir_all(main.join("src/app")).unwrap();
+    std::fs::create_dir_all(tree.join("src")).unwrap();
+    std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(main.join(".git/worktrees/temino-feature/HEAD"), "ref: refs/heads/header\n").unwrap();
+    let gitdir = main.join(".git/worktrees/temino-feature");
+    std::fs::write(tree.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+
+    let repo = git_repo(&main.join("src/app").to_string_lossy()).unwrap();
+    assert_eq!((repo.name.as_str(), repo.branch.as_deref()), ("temino", Some("main")));
+    assert_eq!(repo.root, main.to_string_lossy());
+    let repo = git_repo(&tree.join("src").to_string_lossy()).unwrap();
+    assert_eq!((repo.name.as_str(), repo.branch.as_deref()), ("temino", Some("header")));
+    assert_eq!(repo.root, tree.to_string_lossy());
+    assert_eq!(git_branch(&tree.to_string_lossy()).as_deref(), Some("header"));
+    let _ = std::fs::remove_dir_all(&base);
+}

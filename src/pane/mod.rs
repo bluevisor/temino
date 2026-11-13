@@ -265,6 +265,8 @@ pub struct Pane {
     /// How many files `git status` lists in the folder, by folder; and what
     /// it was last asked for (folder and last command), and when.
     pub git_changes: Option<(String, usize)>,
+    /// The repository the folder is in, as of the folder it was found for.
+    repo: Option<(String, Option<crate::session::Repo>)>,
     git_asked: Option<(String, Option<u64>, Instant)>,
     /// Command+F: the search bar and its matches, and the last query.
     find: Option<Find>,
@@ -293,6 +295,24 @@ pub struct MarkNote {
 }
 
 /// What the header over an agent's pane says.
+/// Where a pane works, as its header names it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Place {
+    /// The repository's name, else the folder's: what the header shows
+    /// biggest.
+    pub name: String,
+    /// The rest of the way: the folder under the repository's top
+    /// ("src/app"), or outside any, the folders above ("~/Downloads").
+    pub within: Option<String>,
+    pub branch: Option<String>,
+    /// Files git lists as changed, once it has said.
+    pub changes: usize,
+    /// The whole path, shortened (`~/…`).
+    pub path: String,
+    /// It's in a git repository: `name` is the repository's.
+    pub repo: bool,
+}
+
 pub struct AgentInfo {
     /// The agent, as its entry in agent::AGENTS.
     pub program: Option<&'static str>,
@@ -312,9 +332,12 @@ pub struct AgentInfo {
     /// The recap, while one is up: the header shows it in place of the
     /// prompt.
     pub recap: Option<String>,
-    /// The folder it runs in, and its git branch.
-    pub cwd: String,
-    pub branch: Option<String>,
+    /// Where it works: the repository (or folder) and branch.
+    pub place: Place,
+    /// What it did last this turn ("Editing main.rs").
+    pub activity: Option<String>,
+    /// What the agent's title says the session is about.
+    pub task: Option<String>,
     /// Whether the header is extended.
     pub open: bool,
 }
@@ -367,6 +390,7 @@ impl Pane {
             agent_unseen: false,
             header_open: false,
             header_reach: 0.0,
+            repo: None,
             program_now: None,
             agent_now: None,
             needs_since: None,

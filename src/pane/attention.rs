@@ -140,8 +140,9 @@ impl Pane {
             turn: self.turn.map(|start| now.duration_since(start)).or(self.last_turn),
             uptime: now.duration_since(started),
             recap: self.recap.as_ref().map(Recap::line),
-            cwd: self.session.cwd.clone(),
-            branch: self.session.branch.clone(),
+            place: self.place(),
+            activity: report.activity,
+            task: agent::title_task(&self.program_title),
             open: self.header_open,
         })
     }
@@ -265,7 +266,7 @@ impl Pane {
     /// A line on an idle shell for the extended sidebar: its folder when
     /// not `base` (the tab's), the last command, how it ended and how long
     /// ago, and the git branch with its count of changed files.
-    pub fn idle_line(&self, base: &str, now: Instant) -> String {
+    pub fn idle_line(&self, base: &str, now: Instant, branch: bool) -> String {
         let mut parts = Vec::new();
         let cwd = &self.session.cwd;
         if cwd != base {
@@ -289,13 +290,42 @@ impl Pane {
             None if parts.is_empty() => parts.push(format!("shell · {}", self.session.shell_name)),
             None => {}
         }
-        if let Some(branch) = &self.session.branch {
+        if let Some(branch) = self.session.branch.as_ref().filter(|_| branch) {
             match self.git_changes.as_ref().filter(|(dir, _)| dir == cwd) {
                 Some((_, n)) if *n > 0 => parts.push(format!("{branch} ●{n}")),
                 _ => parts.push(branch.clone()),
             }
         }
         parts.join(" · ")
+    }
+    /// Looks for the repository again when the folder changed.
+    pub fn refresh_place(&mut self) {
+        if self.repo.as_ref().is_none_or(|(dir, _)| *dir != self.session.cwd) {
+            let cwd = self.session.cwd.clone();
+            self.repo = Some((cwd.clone(), crate::session::git_repo(&cwd)));
+        }
+    }
+    /// Where it works, for its header (see `refresh_place`).
+    pub fn place(&self) -> Place {
+        let cwd = &self.session.cwd;
+        let path = ui::short_path(cwd);
+        let repo = self.repo.as_ref().filter(|(dir, _)| dir == cwd).and_then(|(_, repo)| repo.as_ref());
+        let changes = self.git_changes.as_ref().filter(|(dir, _)| dir == cwd).map_or(0, |(_, n)| *n);
+        let Some(repo) = repo else {
+            let name = folder_name(cwd);
+            let parent = path.strip_suffix(&name).map(|p| p.trim_end_matches('/')).filter(|p| !p.is_empty());
+            return Place { name, within: parent.map(str::to_owned), branch: None, changes: 0, path, repo: false };
+        };
+        let within = cwd.strip_prefix(&repo.root).map(|rest| rest.trim_matches('/')).filter(|rest| !rest.is_empty());
+        Place {
+            name: repo.name.clone(),
+            within: within.map(str::to_owned),
+            // The shell's word on the branch is fresher than the file read.
+            branch: self.session.branch.clone().or_else(|| repo.branch.clone()),
+            changes,
+            path,
+            repo: true,
+        }
     }
     /// Whether the last command failed, for the sidebar's red dot.
     pub fn last_failed(&self) -> bool {
