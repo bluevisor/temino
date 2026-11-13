@@ -162,6 +162,17 @@ impl Scene {
         self.origin = (x, y);
     }
 
+    /// The point nearest (x, y) that sits on a whole physical pixel. A grid
+    /// of cells placed from it tiles exactly. Placed from a point half a
+    /// pixel off (zoom 1.1 puts one there every tenth pixel), each row
+    /// rounds on its own and one can land a pixel away from its neighbor,
+    /// showing as a thin line through block characters.
+    pub fn snap(&self, x: f32, y: f32) -> (f32, f32) {
+        let s = self.scale;
+        let (ox, oy) = self.origin;
+        (((x + ox) * s).round() / s - ox, ((y + oy) * s).round() / s - oy)
+    }
+
     fn clip(&self) -> [f32; 4] {
         *self.clips.last().unwrap_or(&[0.0, 0.0, self.width, self.height])
     }
@@ -302,6 +313,32 @@ mod tests {
         let first = rects[0].bounds;
         let second = rects[1].bounds;
         assert_eq!(first[1] + first[3], second[1], "rows do not share an edge");
+    }
+
+    /// Rows of cell-sized glyphs (block characters) must step by exactly
+    /// one cell wherever the grid starts, or a one-pixel line shows between
+    /// two of them. At zoom 1.1 a grid starting on a logical pixel ending in
+    /// 5 starts half a physical pixel off, the case this covers.
+    #[test]
+    fn glyph_rows_tile_from_a_half_pixel_origin() {
+        let scale = 1.1;
+        let (cell_w, cell_h) = (10.0 / scale, 25.0 / scale);
+        for start in 0..400 {
+            let mut scene = Scene::new();
+            scene.reset(1600.0, 4000.0, scale, Color::TRANSPARENT);
+            scene.set_origin(280.0, 40.0);
+            let (x0, y0) = scene.snap(14.0, start as f32);
+            for row in 0..120 {
+                let rect = Rect::new(x0 + row as f32 * cell_w, y0 + row as f32 * cell_h, cell_w, cell_h);
+                scene.glyph(rect, [0.0; 4], Color::hex(0xffffff));
+            }
+            let glyphs = &scene.layers[LAYER_CONTENT].glyphs;
+            assert_eq!(glyphs.len(), 120);
+            for pair in glyphs.windows(2) {
+                assert_eq!(pair[1].rect[0] - pair[0].rect[0], 10.0, "columns apart, grid at y {start}");
+                assert_eq!(pair[1].rect[1] - pair[0].rect[1], 25.0, "rows apart, grid at y {start}");
+            }
+        }
     }
 
     /// A faded group keeps its colors and loses only opacity, glyphs from
