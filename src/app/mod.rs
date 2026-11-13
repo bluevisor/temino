@@ -526,6 +526,7 @@ impl App {
             text,
             theme,
             history: History::load(),
+            asked: History::load_asked(),
             commands: Commands::new(),
             sender,
             user_host: user_host(),

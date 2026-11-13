@@ -96,6 +96,8 @@ pub struct Ctx {
     pub text: TextSystem,
     pub theme: Theme,
     pub history: History,
+    /// Requests made in AI mode: what Up and Down recall there.
+    pub asked: History,
     pub commands: Commands,
     pub sender: Sender<Msg>,
     pub user_host: String,
