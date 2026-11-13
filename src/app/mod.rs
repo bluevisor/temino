@@ -15,7 +15,7 @@ use crate::editor::History;
 use crate::fetch::{self, FETCHES};
 use crate::gpu::Gpu;
 use crate::keys::Named;
-use crate::pane::{AgentInfo, Ctx, MarkNote, Pane, Resume};
+use crate::pane::{AgentInfo, Ctx, MarkNote, Pane};
 use crate::picture::Picture;
 use crate::platform::{self, buttons, Cursor, KeyEvent, UiEvent};
 use crate::remote;

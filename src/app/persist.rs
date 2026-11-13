@@ -52,12 +52,9 @@ impl App {
         let _ = std::fs::remove_file(resume_path());
         if resume_programs() {
             let panes = self.saved_panes();
-            for (index, resume) in read_resumes(&resumes) {
+            for (index, line) in read_resumes(&resumes) {
                 if let Some(pane) = panes.get(index).copied().and_then(|id| self.pane(id)) {
-                    match resume {
-                        Resume::Run(line) => pane.run_when_ready(line),
-                        Resume::Type(line) => pane.type_when_ready(line),
-                    }
+                    pane.run_when_ready(line);
                 }
             }
         }
@@ -91,7 +88,7 @@ impl App {
                 pane.save_history(&format!("{history}/{index}"));
             }
         }
-        let resumes: Vec<(usize, Resume)> = if resume_programs() {
+        let resumes: Vec<(usize, String)> = if resume_programs() {
             let panes = self.saved_panes();
             panes.iter().enumerate().filter_map(|(index, &id)| Some((index, self.pane(id)?.resume()?))).collect()
         } else {
@@ -253,30 +250,16 @@ pub(super) fn resume_path() -> String {
     format!("{}/resume", crate::settings_dir())
 }
 
-/// A line a pane: its number in `saved_panes`, `R` (run) or `T` (type),
-/// and the command line.
-pub(super) fn write_resumes(resumes: &[(usize, Resume)]) -> String {
-    resumes
-        .iter()
-        .map(|(index, resume)| match resume {
-            Resume::Run(line) => format!("{index}\tR\t{line}\n"),
-            Resume::Type(line) => format!("{index}\tT\t{line}\n"),
-        })
-        .collect()
+/// A line a pane: its number in `saved_panes`, then the command line.
+pub(super) fn write_resumes(resumes: &[(usize, String)]) -> String {
+    resumes.iter().map(|(index, line)| format!("{index}\t{line}\n")).collect()
 }
 
-pub(super) fn read_resumes(text: &str) -> Vec<(usize, Resume)> {
+pub(super) fn read_resumes(text: &str) -> Vec<(usize, String)> {
     text.lines()
         .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
-            let index = fields.next()?.parse().ok()?;
-            let kind = fields.next()?;
-            let line = fields.next().filter(|line| !line.trim().is_empty())?.to_owned();
-            match kind {
-                "R" => Some((index, Resume::Run(line))),
-                "T" => Some((index, Resume::Type(line))),
-                _ => None,
-            }
+            let (index, line) = line.split_once('\t')?;
+            Some((index.parse().ok()?, line.to_owned())).filter(|(_, line)| !line.trim().is_empty())
         })
         .collect()
 }
@@ -455,18 +438,12 @@ mod tests {
 
     #[test]
     fn what_panes_ran_is_written_and_read_back() {
-        let resumes = vec![
-            (0, Resume::Run("claude-max --resume 1234-abcd".to_owned())),
-            (3, Resume::Type("npm run dev -- --port 3000".to_owned())),
-        ];
+        let resumes = vec![(0, "claude-max --resume 1234-abcd".to_owned()), (3, "claude -v --resume 9-f".to_owned())];
         let text = write_resumes(&resumes);
-        assert_eq!(text, "0\tR\tclaude-max --resume 1234-abcd\n3\tT\tnpm run dev -- --port 3000\n");
+        assert_eq!(text, "0\tclaude-max --resume 1234-abcd\n3\tclaude -v --resume 9-f\n");
         assert_eq!(read_resumes(&text), resumes);
-        // Damaged or unknown lines are skipped, not run.
-        assert_eq!(
-            read_resumes("x\tR\tls\n1\tZ\tls\n2\tR\t \n4\tT\tvim a\tb\n"),
-            [(4, Resume::Type("vim a\tb".to_owned()))]
-        );
+        // Damaged lines are skipped, not run.
+        assert_eq!(read_resumes("x\tls\n2\t \nclaude\n4\tclaude\t-r 1\n"), [(4, "claude\t-r 1".to_owned())]);
     }
 
     #[test]

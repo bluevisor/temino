@@ -36,7 +36,7 @@ impl AgentState {
 }
 
 /// Agent programs, by the name they're run as.
-const AGENTS: [&str; 16] = [
+const AGENTS: [&str; 17] = [
     "claude",
     "claude-code",
     "codex",
@@ -54,10 +54,13 @@ const AGENTS: [&str; 16] = [
     "droid",
     "kiro-cli",
     "haikucode",
+    // Pi, Mario Zechner's coding agent.
+    "pi",
 ];
 
 /// Words that run the next word as the program.
-const LAUNCHERS: [&str; 10] = ["env", "npx", "bunx", "pnpx", "exec", "command", "nohup", "time", "sudo", "uvx"];
+pub(crate) const LAUNCHERS: [&str; 10] =
+    ["env", "npx", "bunx", "pnpx", "exec", "command", "nohup", "time", "sudo", "uvx"];
 
 /// Other programs that get a header over their pane (their name and how
 /// long they've run), by the name they're run as: `htop`, `lazygit`.
@@ -125,6 +128,7 @@ pub fn agent_brand(program: &str) -> (&'static str, u32) {
         "droid" => ("Droid", 0xEE6018),
         "kiro-cli" => ("Kiro", 0x9046FF),
         "haikucode" => ("Haiku Code", 0x9A9A9A),
+        "pi" => ("Pi", 0x9A9A9A),
         _ => ("Agent", 0x9A9A9A),
     }
 }
@@ -310,66 +314,6 @@ fn claude_session(group: i32) -> Option<ClaudeSession> {
 /// runs one.
 pub fn claude_session_id(group: i32) -> Option<String> {
     claude_session(group).map(|session| session.id)
-}
-
-/// The words of a command line, quotes kept, split where the shell would.
-fn shell_words(line: &str) -> Vec<&str> {
-    let mut words = Vec::new();
-    let (mut start, mut quote, mut escaped) = (None, None, false);
-    for (at, c) in line.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if c == '\\' && quote != Some('\'') {
-            escaped = true;
-            start.get_or_insert(at);
-        } else if let Some(q) = quote {
-            if c == q {
-                quote = None;
-            }
-        } else if c == '"' || c == '\'' {
-            quote = Some(c);
-            start.get_or_insert(at);
-        } else if c.is_whitespace() {
-            if let Some(from) = start.take() {
-                words.push(&line[from..at]);
-            }
-        } else {
-            start.get_or_insert(at);
-        }
-    }
-    if let Some(from) = start {
-        words.push(&line[from..]);
-    }
-    words
-}
-
-/// The line that brings back Claude Code session `id` the way `command`
-/// started it (`claude-max` → `claude-max --resume <id>`): its own resume,
-/// continue and print flags and a quoted prompt are left off, so the
-/// conversation picks up instead of starting over or asking again.
-pub fn resume_line(command: &str, id: &str) -> Option<String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        return None;
-    }
-    let mut kept = Vec::new();
-    let mut words = shell_words(command).into_iter().peekable();
-    while let Some(word) = words.next() {
-        match word {
-            "--resume" | "-r" | "--session-id" => {
-                if words.peek().is_some_and(|next| !next.starts_with('-')) {
-                    words.next();
-                }
-            }
-            "--continue" | "-c" | "--fork-session" | "--print" | "-p" => {}
-            _ if word.starts_with("--resume=") || word.starts_with("--session-id=") => {}
-            _ if word.starts_with('"') || word.starts_with('\'') => {}
-            _ => kept.push(word),
-        }
-    }
-    if kept.is_empty() {
-        return None;
-    }
-    Some(format!("{} --resume {id}", kept.join(" ")))
 }
 
 /// A transcript read so far.
@@ -563,27 +507,6 @@ mod tests {
         assert_eq!(screen_state("> "), None);
         assert_eq!(screen_state("approve bash: rm -rf target  (Y)es  (N)o"), Some(AgentState::Waiting));
         assert_eq!(screen_state("(Esc to interrupt · Enter queues)"), Some(AgentState::Running));
-    }
-
-    #[test]
-    fn claude_resumes_its_session_the_way_it_was_started() {
-        let id = "aab4bdc0-7e49-429e-9e90-19435c1ed9e6";
-        assert_eq!(resume_line("claude-max", id).unwrap(), format!("claude-max --resume {id}"));
-        assert_eq!(
-            resume_line("claude --model opus --resume old-id -c", id).unwrap(),
-            format!("claude --model opus --resume {id}")
-        );
-        assert_eq!(resume_line("claude -r", id).unwrap(), format!("claude --resume {id}"));
-        assert_eq!(
-            resume_line("FOO=1 claude --session-id=x -p \"fix the 'build'\" --verbose", id).unwrap(),
-            format!("FOO=1 claude --verbose --resume {id}")
-        );
-        assert_eq!(resume_line("claude 'what next?'", id).unwrap(), format!("claude --resume {id}"));
-        // An id that isn't one, or nothing left to run, isn't resumed.
-        assert_eq!(resume_line("claude", "x; rm -rf ~"), None);
-        assert_eq!(resume_line("claude", ""), None);
-        assert_eq!(resume_line("\"hi\"", id), None);
-        assert_eq!(shell_words(r#"a "b c" 'd \e' f\ g"#), ["a", "\"b c\"", "'d \\e'", "f\\ g"]);
     }
 
     #[test]

@@ -531,8 +531,7 @@ impl Ui<'_> {
             ),
             Row::ResumePrograms => (
                 "Reopen running programs",
-                "At launch, Claude Code picks up its conversation; anything else waits at the prompt for Enter"
-                    .to_owned(),
+                "At launch, coding agents pick up their conversation and monitors like btop start again".to_owned(),
             ),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::Analytics => (

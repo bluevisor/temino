@@ -221,9 +221,7 @@ pub struct Pane {
     /// A command to run once the shell is at its prompt, then its block.
     queued: Option<String>,
     queued_block: Option<u64>,
-    /// A command line to leave at the prompt once the shell is there.
-    prefill: Option<String>,
-    /// When the prompt will have been quiet long enough for those.
+    /// When the prompt will have been quiet long enough for `queued`.
     settle_at: Option<Instant>,
     /// What the running program last titled itself, whether it asked for
     /// you (a notification or bell) and when, and whether it reports
@@ -297,15 +295,6 @@ struct Recap {
 
 /// What a tab's mark adds to a recap: a fact on its first line, and a
 /// line for the model writing the summary.
-/// What a pane brings back at launch of the program it ran at quit.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Resume {
-    /// Run this line: an agent picking up where it was.
-    Run(String),
-    /// Leave this line at the prompt.
-    Type(String),
-}
-
 pub struct MarkNote {
     pub fact: String,
     pub context: String,
@@ -376,7 +365,6 @@ impl Pane {
             wheel_rest: 0.0,
             queued: None,
             queued_block: None,
-            prefill: None,
             settle_at: None,
             program_title: String::new(),
             notified_at: None,
@@ -418,12 +406,12 @@ impl Pane {
         // A new shell can draw its prompt again (a resize as the window
         // lays out): a line sent before that closes its block at once and
         // runs in another. Wait until the prompt has been still a moment.
-        let waiting = self.queued.is_some() || self.prefill.is_some();
-        self.settle_at = (waiting && self.session.phase == Phase::Ready).then(|| Instant::now() + PROMPT_SETTLE);
+        let waiting = self.queued.is_some() && self.session.phase == Phase::Ready;
+        self.settle_at = waiting.then(|| Instant::now() + PROMPT_SETTLE);
     }
 
-    /// The queued command runs, or the line is left at the prompt, once
-    /// the prompt has settled; true when it did.
+    /// The queued command runs once the prompt has settled; true when it
+    /// did.
     fn release_queued(&mut self, now: Instant) -> bool {
         if self.settle_at.is_none_or(|at| now < at) {
             return false;
@@ -432,39 +420,24 @@ impl Pane {
         if self.session.phase != Phase::Ready {
             return false;
         }
-        if let Some(command) = self.queued.take() {
-            self.session.submit(&command);
-            self.queued_block = self.session.blocks.last().map(|block| block.id);
-            self.pin_to_bottom();
-        } else if let Some(line) = self.prefill.take() {
-            if self.editor.text.is_empty() {
-                self.editor.set(&line);
-                self.hint = None;
-            }
-        }
+        let Some(command) = self.queued.take() else { return false };
+        self.session.submit(&command);
+        self.queued_block = self.session.blocks.last().map(|block| block.id);
+        self.pin_to_bottom();
         true
     }
 
-    /// Leaves `line` at the prompt, for you to run with Enter, as soon as
-    /// the shell is there.
-    pub fn type_when_ready(&mut self, line: String) {
-        self.prefill = Some(line);
-    }
-
-    /// What to bring back here at the next launch, for the program running
-    /// now: Claude Code resumes its conversation; anything else waits at
-    /// the prompt, since running it again on its own could do harm.
-    pub fn resume(&self) -> Option<Resume> {
+    /// The line that brings back, at the next launch, what's running here:
+    /// a coding agent's conversation, or a monitor. Anything else isn't
+    /// run again: Up recalls it.
+    pub fn resume(&self) -> Option<String> {
         let block = self.session.active().filter(|block| block.kind == BlockKind::Command)?;
-        let command = block.command.trim();
-        if command.is_empty() || command.contains('\n') {
-            return None;
-        }
         let claude = self.session.foreground_group().and_then(agent::claude_session_id);
-        match claude.and_then(|id| agent::resume_line(command, &id)) {
-            Some(line) => Some(Resume::Run(line)),
-            None => Some(Resume::Type(command.to_owned())),
-        }
+        let program = match claude {
+            Some(_) => Some("claude"),
+            None => agent::agent_program(&block.command).or_else(|| agent::title_program(&self.program_title)),
+        };
+        crate::resume::line(&block.command, program, claude.as_deref())
     }
 
     /// Runs `command` as if typed, as soon as the shell is at its prompt.
