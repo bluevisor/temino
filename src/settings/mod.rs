@@ -83,6 +83,9 @@ pub struct Values {
     pub extended: bool,
     /// Desktop notifications for panes out of sight.
     pub notifications: bool,
+    /// What panes ran at quit comes back at launch; dev servers too.
+    pub resume_programs: bool,
+    pub resume_servers: bool,
     /// As a percentage of the default size, and the terminal font's points.
     pub zoom: f32,
     pub points: f32,
@@ -194,6 +197,8 @@ pub enum Action {
     TabsTop(bool),
     Extended(bool),
     Notifications(bool),
+    ResumePrograms(bool),
+    ResumeServers(bool),
     /// Smaller (-1), the default (0) or bigger (+1).
     Zoom(i32),
     Updates(bool),
@@ -362,6 +367,8 @@ enum Row {
     TabsTop,
     Extended,
     Notifications,
+    ResumePrograms,
+    ResumeServers,
     Updates,
     Analytics,
     CheckForUpdates,
@@ -525,6 +532,15 @@ impl Ui<'_> {
                 "Desktop notifications",
                 "When an agent waits or finishes, or a program asks, in a tab you can't see".to_owned(),
             ),
+            Row::ResumePrograms => (
+                "Reopen running programs",
+                "At launch, coding agents pick up their conversation; monitors, tmux, logs, ssh and editors start again"
+                    .to_owned(),
+            ),
+            Row::ResumeServers => (
+                "Restart dev servers",
+                "At launch, npm run dev, docker compose up and the like start again".to_owned(),
+            ),
             Row::Updates => ("Check for updates daily", "At launch, from GitHub releases".to_owned()),
             Row::Analytics => (
                 "Share anonymous usage data",
@@ -665,6 +681,12 @@ impl Ui<'_> {
             Row::Extended => self.toggle(right, rect.y, values.extended, Action::Extended(!values.extended)),
             Row::Notifications => {
                 self.toggle(right, rect.y, values.notifications, Action::Notifications(!values.notifications))
+            }
+            Row::ResumePrograms => {
+                self.toggle(right, rect.y, values.resume_programs, Action::ResumePrograms(!values.resume_programs))
+            }
+            Row::ResumeServers => {
+                self.toggle(right, rect.y, values.resume_servers, Action::ResumeServers(!values.resume_servers))
             }
             Row::Updates => self.toggle(right, rect.y, values.updates, Action::Updates(!values.updates)),
             Row::Analytics => self.toggle(right, rect.y, values.analytics, Action::Analytics(!values.analytics)),
