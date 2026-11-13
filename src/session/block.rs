@@ -249,10 +249,12 @@ impl Block {
             return Some(Link { url: link.uri().to_owned(), cells });
         }
         let wraps = |l: i32| grid[Line(l)][Column(columns - 1)].flags.contains(Flags::WRAPLINE);
-        while first > top && wraps(first - 1) {
+        // Only the rows near the pointer: this runs on every pointer move
+        // and frame, and one unbroken megabyte of JSON wraps to thousands.
+        while first > top && target.0 - first < LINK_ROWS && wraps(first - 1) {
             first -= 1;
         }
-        while last < bottom && wraps(last) {
+        while last < bottom && last - target.0 < LINK_ROWS && wraps(last) {
             last += 1;
         }
         let mut chars = Vec::new();
@@ -460,6 +462,31 @@ mod tests {
         assert_eq!(block.link_at(0, 12), None);
         assert_eq!(block.link_at(0, 20), None);
         assert_eq!(block.link_at(99, 0), None);
+    }
+
+    #[test]
+    fn a_link_deep_in_one_huge_wrapped_line_is_found_quickly() {
+        // A megabyte of JSON on one line, as an API prints it.
+        let mut block = block(BlockKind::Command, "curl", 150, 40);
+        let unit = br#"{"DEVICE NUM":"9BE3A9A3CA604D7B","STATE":"DISCONNECTED","SPEED":0.0},"#;
+        let mut output = Vec::new();
+        while output.len() < 500_000 {
+            output.extend_from_slice(unit);
+        }
+        let before = output.len();
+        output.extend_from_slice(b" https://example.com/a/b ");
+        while output.len() < 1_000_000 {
+            output.extend_from_slice(unit);
+        }
+        block.feed(&output);
+        block.finished = Some(Instant::now());
+        let (line, column) = ((before + 5) / 150, (before + 5) % 150);
+        let started = Instant::now();
+        let link = block.link_at(line, column).expect("the link under the pointer");
+        let took = started.elapsed();
+        assert_eq!(link.url, "https://example.com/a/b");
+        assert_eq!(block.link_at(line + 100, 3), None);
+        assert!(took < Duration::from_millis(50), "{took:?}");
     }
 
     #[test]
