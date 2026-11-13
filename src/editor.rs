@@ -404,6 +404,12 @@ impl Editor {
         }
     }
 
+    /// Forgets the place in history: the next Up starts from the newest
+    /// entry (of another history, after a switch between the shell and AI).
+    pub fn stop_browsing(&mut self) {
+        self.browsing = None;
+    }
+
     /// The rest of the newest history entry starting with the text, shown
     /// as ghost text after the caret (fish/Warp-style).
     pub fn suggestion<'a>(&self, history: &'a History) -> Option<&'a str> {
@@ -447,15 +453,26 @@ impl History {
 
     /// Temino's own history, seeded from ~/.bash_history the first time.
     pub fn load() -> History {
-        let path = format!("{}/history", crate::settings_dir());
+        Self::read("history", true)
+    }
+
+    /// What was asked in AI mode, kept apart: a request in plain words is
+    /// no command to suggest at the shell prompt.
+    pub fn load_asked() -> History {
+        Self::read("ai_history", false)
+    }
+
+    fn read(name: &str, seed: bool) -> History {
+        let path = format!("{}/{name}", crate::settings_dir());
         let mut entries: Vec<String> = match std::fs::read_to_string(&path) {
             Ok(text) => text.lines().map(unescape).collect(),
-            Err(_) => {
+            Err(_) if seed => {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
                 std::fs::read_to_string(format!("{home}/.bash_history"))
                     .map(|text| text.lines().filter(|l| !l.starts_with('#')).map(str::to_owned).collect())
                     .unwrap_or_default()
             }
+            Err(_) => Vec::new(),
         };
         let mut seen = std::collections::HashSet::new();
         entries.reverse();
@@ -866,6 +883,19 @@ mod tests {
         // Not browsing: Down is not ours.
         assert!(!editor.browse(&history, false));
         assert!(!Editor::new().browse(&past(&[]), true));
+    }
+
+    #[test]
+    fn a_switch_of_history_starts_from_its_newest_entry() {
+        let (ran, asked) = (past(&["ls", "pwd"]), past(&["what is here", "undo that"]));
+        let mut editor = Editor::new();
+        editor.browse(&ran, true);
+        editor.browse(&ran, true);
+        assert_eq!(editor.text, "ls");
+        editor.take();
+        editor.stop_browsing();
+        assert!(editor.browse(&asked, true));
+        assert_eq!(editor.text, "undo that");
     }
 
     #[test]

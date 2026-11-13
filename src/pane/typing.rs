@@ -282,14 +282,15 @@ impl Pane {
                 Some(rest) if !shift => self.editor.insert(&rest),
                 _ => self.editor.end(shift),
             },
+            // AI mode recalls what was asked, the shell what was run.
             Some(Named::Up) => {
                 if !self.editor.vertical(false, shift) {
-                    self.editor.browse(&ctx.history, true);
+                    self.editor.browse(if self.ai { &ctx.asked } else { &ctx.history }, true);
                 }
             }
             Some(Named::Down) => {
                 if !self.editor.vertical(true, shift) {
-                    self.editor.browse(&ctx.history, false);
+                    self.editor.browse(if self.ai { &ctx.asked } else { &ctx.history }, false);
                 }
             }
             // Tab on an empty line switches between the shell and AI mode;
@@ -297,13 +298,17 @@ impl Pane {
             Some(Named::Tab) if self.editor.text.is_empty() && self.session.phase == Phase::Ready => {
                 self.ai = !self.ai;
                 self.hint = None;
+                self.editor.stop_browsing();
             }
             Some(Named::Tab) if self.ai => {}
             Some(Named::Tab) => match self.editor.suggestion(&ctx.history).map(str::to_owned) {
                 Some(rest) if !shift => self.editor.insert(&rest),
                 _ => self.tab(ctx),
             },
-            Some(Named::Escape) if self.ai && self.editor.text.is_empty() => self.ai = false,
+            Some(Named::Escape) if self.ai && self.editor.text.is_empty() => {
+                self.ai = false;
+                self.editor.stop_browsing();
+            }
             Some(Named::Escape) => {
                 self.selected = None;
                 self.selection = None;
@@ -441,6 +446,7 @@ impl Pane {
         if request.is_empty() || self.asking.is_some() {
             return;
         }
+        ctx.asked.push(&request);
         self.editor.take();
         let id = self.session.ask(&request);
         crate::analytics::bump(crate::analytics::Counter::AiQueries);

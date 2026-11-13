@@ -22,17 +22,27 @@ pub struct Provider {
     /// Where its key is kept, and the environment variable read without one.
     key_setting: &'static str,
     key_env: &'static str,
+    /// What its requests carry to keep a model from thinking first, comma
+    /// and all; empty where the API has no such switch or refuses it.
+    no_thinking: &'static str,
 }
 
 const fn provider(id: &'static str, name: &'static str, url: &'static str, model: &'static str) -> Provider {
-    Provider { id, name, url, model, key_setting: "", key_env: "" }
+    Provider { id, name, url, model, key_setting: "", key_env: "", no_thinking: "" }
 }
+
+/// The gateways' switch (Vercel, OpenRouter): without it their thinking
+/// models reason past any limit an answer of a few lines is given.
+const REASONING_OFF: &str = r#""reasoning":{"enabled":false},"#;
+/// llama.cpp's, for a server of one's own (Gemma 4, Qwen 3).
+const TEMPLATE_THINKING_OFF: &str = r#""chat_template_kwargs":{"enable_thinking":false},"#;
 
 pub const PROVIDERS: [Provider; 5] = [
     provider("off", "Off", "", ""),
     Provider {
         key_setting: "llm_key_vercel",
         key_env: "AI_GATEWAY_API_KEY",
+        no_thinking: REASONING_OFF,
         ..provider("vercel", "Vercel", "https://ai-gateway.vercel.sh/v1", "anthropic/claude-haiku-5.5")
     },
     Provider {
@@ -43,6 +53,7 @@ pub const PROVIDERS: [Provider; 5] = [
     Provider {
         key_setting: "llm_key_openrouter",
         key_env: "OPENROUTER_API_KEY",
+        no_thinking: REASONING_OFF,
         ..provider("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "anthropic/claude-haiku-5.5")
     },
     Provider { key_setting: "llm_key", ..provider("custom", "Custom", "", "") },
@@ -198,19 +209,43 @@ pub fn complete(system: &str, prompt: &str, max_tokens: u32) -> Result<String, S
 
 /// One request; None when the model answered nothing.
 fn ask(base: &str, model: &str, system: &str, prompt: &str, max_tokens: u32) -> Result<Option<String>, String> {
-    // Thinking models (Gemma 4, Qwen 3) otherwise spend the whole budget
-    // reasoning and answer nothing; llama.cpp's templates take this switch.
-    // Hosted APIs pass it on to models that may refuse it, or refuse it.
-    let hosted = PROVIDERS.iter().any(|p| !p.url.is_empty() && p.url == base);
-    let thinking = if hosted { "" } else { r#""chat_template_kwargs":{"enable_thinking":false},"# };
-    let body = format!(
-        r#"{{"model":{},"temperature":0.2,{thinking}"max_tokens":{max_tokens},"messages":[{{"role":"system","content":{}}},{{"role":"user","content":{}}}]}}"#,
+    let url = format!("{base}/chat/completions");
+    let switch = no_thinking(base);
+    let sent = curl(&url, Some(&body(model, system, prompt, max_tokens, switch)), 60);
+    // A model that can't stop thinking refuses the switch: ask it plainly.
+    let sent = match sent {
+        Err(error) if !switch.is_empty() && refused(&error) => {
+            curl(&url, Some(&body(model, system, prompt, max_tokens, "")), 60)
+        }
+        sent => sent,
+    };
+    answer(&sent.inspect_err(|_| forget_model())?)
+}
+
+/// What keeps a model at `base` from thinking first. Thinking models
+/// otherwise spend the whole limit reasoning and answer nothing. Each API
+/// has its own switch, and a hosted one refuses another's.
+fn no_thinking(base: &str) -> &'static str {
+    match PROVIDERS.iter().find(|p| !p.url.is_empty() && p.url == base) {
+        Some(hosted) => hosted.no_thinking,
+        None => TEMPLATE_THINKING_OFF,
+    }
+}
+
+/// Whether curl's error says the server turned the request itself down
+/// (400, 422), rather than the key, the model's name or the network.
+fn refused(error: &str) -> bool {
+    error.ends_with("error: 400") || error.ends_with("error: 422")
+}
+
+/// A chat completion request; `switch` is one of the thinking switches, or empty.
+fn body(model: &str, system: &str, prompt: &str, max_tokens: u32, switch: &str) -> String {
+    format!(
+        r#"{{"model":{},"temperature":0.2,{switch}"max_tokens":{max_tokens},"messages":[{{"role":"system","content":{}}},{{"role":"user","content":{}}}]}}"#,
         quote(model),
         quote(system),
         quote(prompt),
-    );
-    let reply = curl(&format!("{base}/chat/completions"), Some(&body), 60).inspect_err(|_| forget_model())?;
-    answer(&reply)
+    )
 }
 
 /// The answer in a chat completion's reply; None when it's empty, as when
@@ -308,6 +343,24 @@ mod tests {
         assert_eq!(answer(null), Ok(None));
         assert_eq!(answer("<think>hm</think> Logs"), Err("unreadable reply".to_owned()));
         assert!(answer(r#"{"error":{"message":"no such model"}}"#).is_err());
+    }
+
+    #[test]
+    fn each_server_gets_the_thinking_switch_its_api_takes() {
+        assert_eq!(no_thinking("https://ai-gateway.vercel.sh/v1"), REASONING_OFF);
+        assert_eq!(no_thinking("https://openrouter.ai/api/v1"), REASONING_OFF);
+        // OpenAI turns down a parameter it doesn't know.
+        assert_eq!(no_thinking("https://api.openai.com/v1"), "");
+        assert_eq!(no_thinking("http://localhost:8080/v1"), TEMPLATE_THINKING_OFF);
+        for switch in [REASONING_OFF, TEMPLATE_THINKING_OFF, ""] {
+            let body = json::parse(&body("m", "be \"brief\"", "hi\nthere", 400, switch)).expect("valid JSON");
+            assert_eq!(body.str_at("model"), Some("m"));
+            assert_eq!(body.get("messages").unwrap().array()[1].str_at("content"), Some("hi\nthere"));
+            assert_eq!(body.get("reasoning").is_some(), switch == REASONING_OFF);
+        }
+        assert!(refused("curl: (22) The requested URL returned error: 400"));
+        assert!(!refused("curl: (22) The requested URL returned error: 401"));
+        assert!(!refused("curl: (28) Operation timed out after 60001 milliseconds"));
     }
 
     #[test]
