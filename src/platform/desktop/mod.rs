@@ -501,6 +501,12 @@ extern "C" fn viewer_event(id: u64, kind: i32, text: *const std::ffi::c_char) {
     } else {
         unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy().into_owned()
     };
+    // Not a viewer's news: the keyboard had strayed from the terminal and
+    // was given back (settle_keyboard in viewer.m). Logged to find the cause.
+    if kind == 8 {
+        crate::store::log(&format!("keyboard was with {text}, not the focused terminal: given back"));
+        return;
+    }
     let event = match kind {
         0 => ViewerEvent::Focused,
         1 => ViewerEvent::Title(text),
