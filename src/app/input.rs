@@ -552,6 +552,12 @@ impl App {
         self.save_tabs();
     }
     pub(super) fn mouse_moved(&mut self, x: f32, y: f32, pressed: i32) {
+        let edge_hover = |px, py| {
+            self.sidebar_edge().contains(px, py) || self.dividers.iter().any(|d| d.grab_area().contains(px, py))
+        };
+        if edge_hover(self.mouse.0, self.mouse.1) || edge_hover(x, y) {
+            self.dirty = true;
+        }
         self.mouse = (x, y);
         // A choice under the pointer previews, and one left stops (see `preview`).
         let previewable = matches!(self.pane_at(x, y), Some((SETTINGS, _)))

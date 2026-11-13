@@ -1,10 +1,7 @@
 use super::*;
 
-/// A tab's background, in the sidebar or the strip: a tab with a color is
-/// tinted with it all over, lightly, with the color whole in a rail down
-/// its leading edge; the current tab is raised and drawn round with
-/// a clear border, in its color if it has one. Any other tab lifts a
-/// little under the pointer.
+/// A quiet tinted surface and a leading rail identify each tab. Selection
+/// raises the surface without adding another competing outline.
 pub(super) fn draw_tab_background(
     scene: &mut Scene,
     theme: &Theme,
@@ -14,23 +11,18 @@ pub(super) fn draw_tab_background(
     dragged: bool,
     hovered: bool,
 ) {
-    let (fill, border) = match (color, current) {
-        (Some(color), true) => (theme.raised.mix(color, 0.12), color.mix(theme.text, 0.15)),
-        (Some(color), false) => (color.alpha(if hovered || dragged { 0.17 } else { 0.1 }), Color::TRANSPARENT),
-        (None, true) => (theme.raised.mix(theme.text, 0.06), theme.text_dim),
-        (None, false) if hovered || dragged => (theme.panel(HOVER_LIFT), Color::TRANSPARENT),
+    let fill = match (color, current) {
+        (Some(color), true) => theme.raised.mix(color, 0.10),
+        (Some(color), false) => color.alpha(if hovered || dragged { 0.10 } else { 0.045 }),
+        (None, true) => theme.raised.mix(theme.text, 0.04),
+        (None, false) if hovered || dragged => theme.panel(HOVER_LIFT),
         (None, false) => return,
     };
     let fill = if dragged { fill.mix(theme.text, 0.06) } else { fill };
-    let width = if current { 1.5 } else { 1.0 };
-    scene.quad(Quad::new(rect, fill).radius(6.0).border(width, border));
-    // The color itself, whole, in a rail down the leading edge: the tint
-    // alone turns muddy on a dark background.
-    if let Some(color) = color {
-        // Inset as on a one-line row, however tall: under a row grown by
-        // its pane lines the rail runs the whole height, not a short dash.
-        let inset = (rect.h * 0.22).round().min(9.0);
-        scene.quad(Quad::new(Rect::new(rect.x + 3.0, rect.y + inset, 3.0, rect.h - 2.0 * inset), color).radius(1.5));
+    scene.quad(Quad::new(rect, fill).radius(6.0));
+    if let Some(rail) = color.or(current.then_some(theme.accent)) {
+        let inset = 9.0_f32.min(rect.h / 4.0);
+        scene.quad(Quad::new(Rect::new(rect.x + 3.0, rect.y + inset, 3.0, rect.h - 2.0 * inset), rail).radius(1.5));
     }
 }
 
@@ -43,10 +35,10 @@ pub(super) fn draw_sidebar_icon(scene: &mut Scene, button: Rect, color: Color) {
     scene.fill(Rect::new(frame.x + 5.0, frame.y + 1.0, 1.25, h - 2.0), color);
 }
 
-/// A tab's number in a circle `size` across, ringed and colored by what its
-/// agent is doing: a faint ring at rest, a turning dot while it works, amber
+/// A tab's number in a slot `size` across, marked by what its agent is
+/// doing: a plain number at rest, a turning dot while it works, amber
 /// while it waits on you, green when it finished a turn you haven't seen.
-/// Past 9 there is no number, only the circle. `t` drives the motion.
+/// Multiple digits shrink to fit the number slot. `t` drives the motion.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_tab_number(
     scene: &mut Scene,
@@ -66,10 +58,7 @@ pub(super) fn draw_tab_number(
     let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU / 1.4).sin();
     let color = match agent {
         None => theme.text_faint,
-        Some(AgentState::Idle) => {
-            scene.quad(Quad::new(circle, clear).radius(r).border(1.0, theme.text_faint.alpha(0.7)));
-            theme.text_dim
-        }
+        Some(AgentState::Idle) => theme.text_faint,
         Some(AgentState::Running) => {
             scene.quad(Quad::new(circle, theme.accent.alpha(0.12)).radius(r).border(1.5, theme.accent.alpha(0.3)));
             let angle = t * std::f32::consts::TAU / 1.1;
@@ -147,7 +136,7 @@ pub(super) fn draw_done_pop(scene: &mut Scene, circle: Rect, age: f32) {
 pub(super) fn agent_color(theme: &Theme, state: AgentState, t: f32) -> Color {
     let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU / 1.4).sin();
     match state {
-        AgentState::Idle => theme.text_faint,
+        AgentState::Idle => theme.text_faint.alpha(0.65),
         AgentState::Running => theme.accent.alpha(0.55 + 0.45 * pulse),
         AgentState::Waiting => Color::hex(AGENT_WAITING).alpha(0.7 + 0.3 * pulse),
         AgentState::Done => Color::hex(AGENT_DONE),
@@ -299,7 +288,7 @@ pub(super) enum Lit {
     /// It is, and it's the tab's only pane: there's nothing to tell it
     /// from, so it only keeps a thin line.
     Soft,
-    /// It is, among several: a tinted ground over a bright line.
+    /// It is, among several: a subtle tint over a bright hairline.
     Full,
 }
 
@@ -307,24 +296,23 @@ pub(super) enum Lit {
 /// one of several.
 fn header_ground(theme: &Theme, ground: Color, focus: Lit) -> Color {
     if focus == Lit::Full {
-        ground.mix(theme.accent, 0.14)
+        ground.mix(theme.accent, 0.035)
     } else {
         ground
     }
 }
 
-/// The edge under a header at `bottom`: a hairline; while its pane is
-/// focused, a line in `lit`, 2 points among several panes and a thin, dimmer
-/// one alone.
+/// The edge under a header at `bottom`: a hairline, brighter in `lit`
+/// while its pane is focused among several, and dimmer when alone.
 fn draw_header_edge(scene: &mut Scene, theme: &Theme, bar: Rect, bottom: f32, focus: Lit, lit: Color) {
     match focus {
-        Lit::Full => scene.fill(Rect::new(bar.x, bottom - 2.0, bar.w, 2.0), lit),
+        Lit::Full => scene.fill(Rect::new(bar.x, bottom - 1.0, bar.w, 1.0), lit),
         Lit::Soft => scene.fill(Rect::new(bar.x, bottom - 1.0, bar.w, 1.0), theme.divider.mix(lit, 0.55)),
         Lit::Off => scene.fill(Rect::new(bar.x, bottom - 1.0, bar.w, 1.0), theme.divider),
     }
 }
 
-/// The bar over an agent's pane. Left: the agent's mark and name, then a
+/// The bar over an agent's pane. Left: the agent's mark and folder, then a
 /// dot and what it's doing, with the turn's clock; then your last prompt.
 /// Right: its subagents, the prompts queued behind this turn, its
 /// session's name and how long it has run, and the toggle that extends it
@@ -355,37 +343,39 @@ pub(super) fn draw_agent_header(
     let font = 12.0;
     let baseline = (bar.y + bar.h / 2.0 + text.ui_ascent(font) * 0.36).round();
     let cy = bar.y + bar.h / 2.0;
-    let mut x = bar.x + 10.0;
-    if let Some(program) = info.program {
-        let (name, brand) = agent::agent_brand(program);
-        x = draw_agent_icon(scene, text, program, Color::hex(brand), theme.text, x, cy) + 6.0;
-        text.draw_text(scene, name, x, baseline, UI_BOLD, font, theme.text);
-        x += text.measure(name, UI_BOLD, font) + 12.0;
-        scene.fill(Rect::new(x, cy - 7.0, 1.0, 14.0), theme.divider);
-        x += 12.0;
-    }
-    scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), color).radius(4.0));
-    x += 16.0;
-    let summary = agent_summary(info);
-    let ink = match info.state {
-        AgentState::Waiting => Color::hex(AGENT_WAITING),
-        AgentState::Done => Color::hex(AGENT_DONE),
-        _ => theme.text,
-    };
-    text.draw_text(scene, &summary, x, baseline, UI_BOLD, font, ink);
-    x += text.measure(&summary, UI_BOLD, font) + 14.0;
-    // The folder it works in, kept to a third of the bar.
-    if !info.cwd.is_empty() {
-        let path = text.elide(&ui::short_path(&info.cwd), UI, font, (bar.w / 3.0).max(0.0));
-        text.draw_text(scene, &path, x, baseline, UI, font, theme.text_dim);
-        x += text.measure(&path, UI, font) + 14.0;
-    }
-    // The toggle at the right end: a triangle pointing the way it goes.
+    // Reserve the toggle and clock first; other fields yield before these.
     let toggle = if hover { theme.text } else { theme.text_faint };
     draw_triangle(scene, bar.right() - 16.0, cy, if info.open { -1.0 } else { 1.0 }, toggle);
-    // The right side, laid out from the edge in: the subagents whenever
-    // they fit, the rest only while the prompt keeps some room.
-    let mut right = bar.right() - 32.0;
+    let mut right = (bar.right() - 32.0).max(bar.x);
+    let uptime = format!("up {}", ui::short_duration(info.uptime));
+    if bar.w >= 320.0 {
+        let w = text.measure(&uptime, UI, 11.0);
+        text.draw_text(scene, &uptime, right - w, baseline, UI, 11.0, theme.text_faint);
+        right -= w + 16.0;
+    }
+    let mut x = bar.x + 12.0;
+    scene.push_clip(Rect::new(x, bar.y, (right - x).max(0.0), bar.h));
+    if let Some(program) = info.program {
+        let (_, brand) = agent::agent_brand(program);
+        x = draw_agent_icon(scene, text, program, Color::hex(brand), theme.text, x, cy) + 8.0;
+    }
+    let summary = agent_summary(info);
+    let status_w = text.measure(&summary, UI, font) + 28.0;
+    let identity = if info.cwd.is_empty() {
+        info.program.map(|program| agent::agent_brand(program).0).unwrap_or("Terminal").to_owned()
+    } else {
+        ui::short_path(&info.cwd)
+    };
+    let identity_room = (right - x - status_w).max(0.0).min(bar.w * 0.36);
+    let shown = text.elide(&identity, UI_BOLD, font, identity_room);
+    text.draw_text(scene, &shown, x, baseline, UI_BOLD, font, theme.text);
+    x += text.measure(&shown, UI_BOLD, font) + 16.0;
+    scene.quad(Quad::new(Rect::new(x, cy - 3.0, 6.0, 6.0), color).radius(3.0));
+    x += 12.0;
+    let ink = if info.state == AgentState::Idle { theme.text_faint } else { color };
+    let shown = text.elide(&summary, UI, font, (right - x).max(0.0));
+    text.draw_text(scene, &shown, x, baseline, UI, font, ink);
+    x += text.measure(&shown, UI, font) + 16.0;
     let subagents = (info.subagents > 0)
         .then(|| format!("{} subagent{}", info.subagents, if info.subagents == 1 { "" } else { "s" }));
     let queued = (info.queued > 0).then(|| format!("{} queued", info.queued));
@@ -393,19 +383,17 @@ pub(super) fn draw_agent_header(
         let w = text.measure(chip, UI, 11.0);
         if right - w - 12.0 > x {
             let pill = Rect::new(right - w - 12.0, cy - 9.0, w + 12.0, 18.0);
-            scene.quad(Quad::new(pill, theme.accent.alpha(0.16)).radius(9.0));
+            scene.quad(Quad::new(pill, theme.accent.alpha(0.12)).radius(9.0));
             text.draw_text(scene, chip, pill.x + 6.0, baseline, UI, 11.0, theme.accent);
             right = pill.x - 12.0;
         }
     }
-    let uptime = format!("up {}", ui::short_duration(info.uptime));
-    for chip in info.name.iter().chain(std::iter::once(&uptime)) {
-        let w = text.measure(chip, UI, 11.0);
-        if right - w < x + 160.0 {
-            break;
+    if let Some(name) = &info.name {
+        let w = text.measure(name, UI, 11.0);
+        if right - w > x + 160.0 {
+            text.draw_text(scene, name, right - w, baseline, UI, 11.0, theme.text_faint);
+            right -= w + 14.0;
         }
-        text.draw_text(scene, chip, right - w, baseline, UI, 11.0, theme.text_faint);
-        right -= w + 14.0;
     }
     // Coming back to the pane, its recap stands in for the prompt. Opened,
     // the prompt shows whole underneath, so the bar doesn't repeat it.
@@ -415,10 +403,11 @@ pub(super) fn draw_agent_header(
         _ => None,
     };
     if let Some((line, ink)) = line {
-        let room = right - x - 14.0;
+        let room = (right - x - 14.0).max(0.0);
         let shown = text.elide(&line, UI, font, room);
         text.draw_text(scene, &shown, x, baseline, UI, font, ink);
     }
+    scene.pop_clip();
     reach
 }
 
