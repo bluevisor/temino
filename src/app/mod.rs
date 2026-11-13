@@ -350,6 +350,8 @@ pub struct App {
     active: usize,
     /// The pane focused before this one, for Command+` with nothing waiting.
     last_focus: Option<u64>,
+    /// The pane focused when Settings was switched to, so closing it goes back there.
+    settings_from: Option<u64>,
     strip: TabStrip,
     /// The sidebar's width when not compact, and whether it is compact;
     /// or extended, its rows grown to say what each pane is doing.
@@ -547,6 +549,7 @@ impl App {
             tabs: Vec::new(),
             active: 0,
             last_focus: None,
+            settings_from: None,
             strip: match std::env::var("TEMINO_TABS").ok().or_else(|| crate::setting("tabs")).as_deref() {
                 Some("top") => TabStrip::Top,
                 _ => TabStrip::Left,
