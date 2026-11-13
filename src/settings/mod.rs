@@ -110,6 +110,8 @@ pub struct Values {
     pub fields: [String; Field::ALL.len()],
     /// The field being typed in, its text, and whether that's all selected.
     pub editing: Option<(Field, String, bool)>,
+    /// A choice under the pointer shows as if picked (see `Preview`).
+    pub previewing: bool,
 }
 
 /// A setting typed in rather than picked: the model server, model and keys.
@@ -238,6 +240,9 @@ pub struct Page {
     /// Asked to scroll to Remote Control (from the account menu); set
     /// again once drawn there, for one more frame.
     pub to_remote: bool,
+    /// The sample's height in the font and spacing in use: kept while a
+    /// preview shows, so the page doesn't jump under the pointer.
+    sample_height: f32,
     pub redraw: bool,
 }
 
@@ -284,7 +289,11 @@ impl Page {
         let x = rect.x + ((rect.w - width) / 2.0).max(PAD);
         let top = rect.y + PAD - self.scroll;
         scene.push_clip(rect);
-        let mut ui = Ui { scene, text, theme, hits: &mut self.hits, mouse, clip: rect };
+        if !values.previewing || self.sample_height == 0.0 {
+            self.sample_height = preview::sample_height(text);
+        }
+        let sample_height = self.sample_height;
+        let mut ui = Ui { scene, text, theme, hits: &mut self.hits, mouse, clip: rect, sample_height };
 
         let mut y = top;
         ui.text.draw_text(ui.scene, "Settings", x, y + 24.0, UI_BOLD, 22.0, theme.text);
@@ -442,6 +451,8 @@ struct Ui<'a> {
     mouse: (f32, f32),
     /// The visible part of the page: controls outside it can't be clicked.
     clip: Rect,
+    /// The sample row's height (Page::sample_height).
+    sample_height: f32,
 }
 
 impl Ui<'_> {
@@ -474,7 +485,7 @@ impl Ui<'_> {
     /// The sample grows with the terminal's font and line spacing.
     fn row_height(&self, row: Row) -> f32 {
         match row {
-            Row::Sample => preview::sample_height(self.text),
+            Row::Sample => self.sample_height,
             _ => row.height(),
         }
     }
