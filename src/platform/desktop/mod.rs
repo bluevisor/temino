@@ -49,6 +49,7 @@ extern "C" {
     fn temino_blur(view: *mut std::ffi::c_void, on: bool);
     fn temino_hotkey(keycode: u32, modifiers: u32);
     fn temino_toggle_window();
+    fn temino_mono_font_files(out: *mut u8, capacity: usize) -> usize;
     fn temino_emoji(
         text: *const std::ffi::c_char,
         size: f32,
@@ -90,6 +91,20 @@ pub fn emoji(text: &str, size: f32, max_width: f32, max_height: f32) -> Option<(
     }
     out.truncate(width as usize * height as usize * 4);
     Some((width as usize, height as usize, out))
+}
+
+/// The files of every fixed-pitch face CoreText knows, including fonts
+/// macOS downloads on demand and fonts apps such as Adobe's activate.
+#[cfg(target_os = "macos")]
+pub fn mono_font_files() -> Vec<String> {
+    let mut out = vec![0u8; 64 * 1024];
+    let mut needed = unsafe { temino_mono_font_files(out.as_mut_ptr(), out.len()) };
+    if needed > out.len() {
+        out.resize(needed, 0);
+        needed = unsafe { temino_mono_font_files(out.as_mut_ptr(), out.len()) }.min(out.len());
+    }
+    out.truncate(needed);
+    String::from_utf8_lossy(&out).lines().filter(|line| !line.is_empty()).map(str::to_owned).collect()
 }
 
 /// What the core thread asks of the window thread.
