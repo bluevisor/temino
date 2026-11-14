@@ -43,6 +43,7 @@ fn sample() -> Values {
         provider: PROVIDERS.len() - 1,
         fields: Default::default(),
         editing: None,
+        previewing: false,
     }
 }
 
@@ -342,14 +343,13 @@ fn the_sample_terminal_sits_above_font_and_follows_line_spacing() {
     let mut text = TextSystem::new(14.0);
     text.set_leading(LINE_SPACINGS[0].1);
     let tight = font_name_at(&mut text);
-    let lines = 4.0;
-    let before = text.cell.height;
+    let before = preview::sample_height(&text);
     text.set_leading(LINE_SPACINGS[3].1);
-    let grown = text.cell.height - before;
+    let grown = preview::sample_height(&text) - before;
     assert!(grown > 0.0);
     // Only the sample, above Font, grows with the line spacing.
     let airy = font_name_at(&mut text);
-    assert!((airy.y - tight.y - lines * grown).abs() < 0.01, "{} vs {}", airy.y - tight.y, lines * grown);
+    assert!((airy.y - tight.y - grown).abs() < 0.01, "{} vs {}", airy.y - tight.y, grown);
 }
 
 #[test]
@@ -382,4 +382,45 @@ fn a_previewed_cursor_shape_is_drawn_but_not_picked() {
     assert_eq!((cursor::shape(), cursor::picked()), (other, picked));
     cursor::preview(None);
     assert_eq!(cursor::shape(), picked);
+}
+
+/// Hovering a font or a line spacing previews it in the sample, but the
+/// sample keeps its size: the rows under the pointer don't move.
+#[test]
+fn a_preview_does_not_move_the_page() {
+    let mut scene = Scene::new();
+    let mut text = TextSystem::new(14.0);
+    let theme = Theme::dark();
+    let mut page = Page::default();
+    let rect = Rect::new(200.0, 0.0, 900.0, 8000.0);
+    let mut layout = |page: &mut Page, text: &mut TextSystem, previewing: bool| {
+        scene.reset(1100.0, 8000.0, 1.0, theme.background);
+        let values = Values { previewing, ..sample() };
+        page.draw(&mut scene, text, &theme, rect, &values, (0.0, 0.0));
+        page.hits.iter().map(|&(r, _)| (r.x, r.y)).collect::<Vec<_>>()
+    };
+    let before = layout(&mut page, &mut text, false);
+    let leading = text.leading();
+    text.set_leading(leading + 6.0);
+    assert_eq!(layout(&mut page, &mut text, true), before, "a preview moved the page");
+    // Picked for real, the sample grows to fit.
+    assert_ne!(layout(&mut page, &mut text, false), before);
+}
+
+/// Picking another font keeps the sample's size: its box follows the
+/// font size and line spacing, not the font's own line height.
+#[test]
+fn another_font_does_not_resize_the_sample() {
+    let mut text = TextSystem::new(14.0);
+    let before = preview::sample_height(&text);
+    let pitch = text.cell.height;
+    // Any installed monospaced family with a different line height.
+    let other = crate::fonts::families().into_iter().find(|family| {
+        let mut probe = TextSystem::new(14.0);
+        probe.set_mono(Some(family)).is_ok() && probe.cell.height != pitch
+    });
+    let Some(family) = other else { return };
+    text.set_mono(Some(&family)).unwrap();
+    assert_ne!(text.cell.height, pitch);
+    assert_eq!(preview::sample_height(&text), before, "{family} resized the sample");
 }

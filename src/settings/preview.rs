@@ -53,9 +53,16 @@ const SAMPLE: [&[(&str, Option<usize>)]; 4] = [
 const SAMPLE_PAD: f32 = 12.0;
 const SAMPLE_MARGIN: f32 = 14.0;
 
-/// How tall the sample row is in the terminal's font and line spacing.
+/// The sample's line pitch, in ems before line spacing: roomy enough for
+/// the tallest monospaced fonts (Monaco's lines are 1.34 em).
+const SAMPLE_LINE: f32 = 1.35;
+
+/// How tall the sample row is for the terminal's size and line spacing.
+/// Not its font: fonts' lines run from 1.1 to 1.35 em, and picking one
+/// mustn't resize the box and move the page under the pointer.
 pub(super) fn sample_height(text: &TextSystem) -> f32 {
-    2.0 * (SAMPLE_PAD + SAMPLE_MARGIN) + SAMPLE.len() as f32 * text.cell.height
+    let lines = SAMPLE.len() as f32 * (text.cell.size * SAMPLE_LINE * text.leading()).round();
+    2.0 * (SAMPLE_PAD + SAMPLE_MARGIN) + lines
 }
 
 impl Ui<'_> {
@@ -73,7 +80,9 @@ impl Ui<'_> {
         self.scene.push_clip(screen);
         let cell = self.text.cell;
         let x = screen.x + SAMPLE_PAD;
-        let mut y = screen.y + SAMPLE_PAD;
+        // The lines centered in the box, which doesn't fit itself to the font.
+        let room = screen.h - 2.0 * SAMPLE_PAD - SAMPLE.len() as f32 * cell.height;
+        let mut y = screen.y + SAMPLE_PAD + (room / 2.0).round();
         let mut end = x;
         for line in SAMPLE {
             let mut pen = x;

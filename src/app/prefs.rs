@@ -312,6 +312,7 @@ impl App {
             provider: crate::llm::PROVIDERS.iter().position(|&p| p == crate::llm::chosen()).unwrap_or(0),
             fields: Field::ALL.map(|field| crate::setting(&field.key()).unwrap_or_default()),
             editing: self.field.clone(),
+            previewing: self.previewing.is_some(),
             remote: Some(crate::relay::signed_in()),
             remote_account: ["account_login", "account_name"]
                 .into_iter()
