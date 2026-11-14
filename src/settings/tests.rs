@@ -286,14 +286,13 @@ fn the_sample_terminal_sits_above_font_and_follows_line_spacing() {
     let mut text = TextSystem::new(14.0);
     text.set_leading(LINE_SPACINGS[0].1);
     let tight = font_name_at(&mut text);
-    let lines = 4.0;
-    let before = text.cell.height;
+    let before = preview::sample_height(&text);
     text.set_leading(LINE_SPACINGS[3].1);
-    let grown = text.cell.height - before;
+    let grown = preview::sample_height(&text) - before;
     assert!(grown > 0.0);
     // Only the sample, above Font, grows with the line spacing.
     let airy = font_name_at(&mut text);
-    assert!((airy.y - tight.y - lines * grown).abs() < 0.01, "{} vs {}", airy.y - tight.y, lines * grown);
+    assert!((airy.y - tight.y - grown).abs() < 0.01, "{} vs {}", airy.y - tight.y, grown);
 }
 
 #[test]
@@ -349,4 +348,22 @@ fn a_preview_does_not_move_the_page() {
     assert_eq!(layout(&mut page, &mut text, true), before, "a preview moved the page");
     // Picked for real, the sample grows to fit.
     assert_ne!(layout(&mut page, &mut text, false), before);
+}
+
+/// Picking another font keeps the sample's size: its box follows the
+/// font size and line spacing, not the font's own line height.
+#[test]
+fn another_font_does_not_resize_the_sample() {
+    let mut text = TextSystem::new(14.0);
+    let before = preview::sample_height(&text);
+    let pitch = text.cell.height;
+    // Any installed monospaced family with a different line height.
+    let other = crate::fonts::families().into_iter().find(|family| {
+        let mut probe = TextSystem::new(14.0);
+        probe.set_mono(Some(family)).is_ok() && probe.cell.height != pitch
+    });
+    let Some(family) = other else { return };
+    text.set_mono(Some(&family)).unwrap();
+    assert_ne!(text.cell.height, pitch);
+    assert_eq!(preview::sample_height(&text), before, "{family} resized the sample");
 }
