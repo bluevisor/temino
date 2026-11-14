@@ -51,6 +51,32 @@ extern void temino_debug_line(const char* text);
 @end
 
 
+// The files of every fixed-pitch face CoreText knows: the font folders,
+// fonts macOS downloaded on demand and fonts apps activate (Adobe Fonts),
+// as newline-separated paths in `out` (up to `capacity` bytes). Returns
+// the bytes the whole list needs, so a short buffer can be grown.
+size_t
+temino_mono_font_files(char* out, size_t capacity)
+{
+	@autoreleasepool {
+		NSMutableOrderedSet<NSString*>* paths = [NSMutableOrderedSet orderedSet];
+		NSArray<NSString*>* names =
+			[[NSFontManager sharedFontManager] availableFontNamesWithTraits:NSFixedPitchFontMask];
+		for (NSString* name in names) {
+			CTFontDescriptorRef descriptor = CTFontDescriptorCreateWithNameAndSize((__bridge CFStringRef)name, 12);
+			NSURL* url = CFBridgingRelease(CTFontDescriptorCopyAttribute(descriptor, kCTFontURLAttribute));
+			CFRelease(descriptor);
+			if (url.isFileURL && url.path != nil)
+				[paths addObject:url.path];
+		}
+		NSData* list = [[paths.array componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+		if (list.length <= capacity)
+			memcpy(out, list.bytes, list.length);
+		return list.length;
+	}
+}
+
+
 // Draws `text` (an emoji, with any modifiers and joiners) in Apple Color
 // Emoji at `size` pixels, shrunk to fit max_width x max_height, into `out`
 // as premultiplied RGBA rows (up to `capacity` bytes). False when the font
