@@ -82,16 +82,23 @@ impl Pane {
         self.copy(ctx, false);
     }
     pub fn paste_clipboard(&mut self) {
-        // An image on the clipboard is pasted inline into the terminal;
-        // otherwise paste the text.
-        if let Some((width, height, bytes)) = platform::clipboard_image() {
-            let Some(picture) = crate::picture::Picture::new(width, height, bytes) else {
+        // Text wins: apps like Excel and Keynote put a picture of the
+        // selection beside its text. Only a clipboard with no text is
+        // read (and decoded) as an image.
+        let text = platform::clipboard_get().filter(|text| !text.is_empty());
+        // A program taking bracketed paste (Claude Code) reads the image
+        // from the clipboard itself; `paste` signals it with an empty paste.
+        let program_takes_paste =
+            self.session.active().is_some_and(|block| block.term.mode().contains(TermMode::BRACKETED_PASTE));
+        if text.is_none() && !program_takes_paste {
+            if let Some((width, height, bytes)) = platform::clipboard_image() {
+                if let Some(picture) = crate::picture::Picture::new(width, height, bytes) {
+                    self.session.paste_picture(picture);
+                }
                 return;
-            };
-            self.session.paste_picture(picture);
-            return;
+            }
         }
-        self.paste(platform::clipboard_get());
+        self.paste(text);
     }
     pub fn clear(&mut self) {
         self.clear_blocks();
