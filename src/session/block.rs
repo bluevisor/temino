@@ -207,7 +207,8 @@ impl Block {
     }
 
     /// The link under output cell (`line`, `column`): an OSC 8 hyperlink,
-    /// or a URL in the text, followed across soft-wrapped lines.
+    /// or a URL or existing path in the text, followed across soft-wrapped
+    /// lines (and, for a path, across rows a program broke it over).
     pub fn link_at(&self, line: usize, column: usize) -> Option<Link> {
         let grid = self.term.grid();
         let columns = grid.columns();
@@ -218,6 +219,17 @@ impl Block {
             return None;
         }
         let output_line = |l: i32| (l - top) as usize;
+        // The cells at grid points `at`, as (output line, first, last column) runs.
+        let runs = |at: &[(i32, usize)]| {
+            let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+            for &(l, c) in at {
+                match cells.last_mut() {
+                    Some(run) if run.0 == output_line(l) => run.2 = c,
+                    _ => cells.push((output_line(l), c, c)),
+                }
+            }
+            cells
+        };
         let mut first = target.0;
         let mut last = target.0;
         if let Some(link) = grid[target][Column(column)].hyperlink() {
@@ -274,31 +286,81 @@ impl Block {
         let (start, end, url) = match url {
             Some((start, end)) => (start, end, chars[start..end].iter().collect()),
             None => {
-                // A file or folder that exists, named absolutely, from ~,
-                // or from where the command ran.
                 let (start, end) = find_path(&chars, index)?;
-                let name: String = chars[start..end].iter().collect();
-                let path = if let Some(rest) = name.strip_prefix("~/") {
-                    format!("{}/{rest}", std::env::var("HOME").ok()?)
-                } else if name.starts_with('/') {
-                    name
-                } else {
-                    format!("{}/{name}", self.cwd)
-                };
-                if !std::path::Path::new(&path).exists() {
-                    return None;
+                match self.existing_path(&chars[start..end]) {
+                    Some(path) => (start, end, path),
+                    None => {
+                        let (at, path) = self.hard_wrapped_path(target.0, column)?;
+                        return Some(Link { url: path, cells: runs(&at) });
+                    }
                 }
-                (start, end, path)
             }
         };
-        let mut cells: Vec<(usize, usize, usize)> = Vec::new();
-        for &(l, c) in &at[start..end] {
-            match cells.last_mut() {
-                Some(run) if run.0 == output_line(l) => run.2 = c,
-                _ => cells.push((output_line(l), c, c)),
+        Some(Link { url, cells: runs(&at[start..end]) })
+    }
+
+    /// `name` as the full path of a file or folder that exists, named
+    /// absolutely, from ~, or from where the command ran.
+    fn existing_path(&self, name: &[char]) -> Option<String> {
+        let name: String = name.iter().collect();
+        let path = if let Some(rest) = name.strip_prefix("~/") {
+            format!("{}/{rest}", std::env::var("HOME").ok()?)
+        } else if name.starts_with('/') {
+            name
+        } else {
+            format!("{}/{name}", self.cwd)
+        };
+        std::path::Path::new(&path).exists().then_some(path)
+    }
+
+    /// A path a program broke over several rows itself, with a real line
+    /// break and the next row indented, as Claude Code does with one wider
+    /// than its text. The rows' words are read end to end, and the longest
+    /// run of rows through the pointer that names a file that exists wins.
+    /// Returns the cells it covers and the full path.
+    fn hard_wrapped_path(&self, target: i32, column: usize) -> Option<(Vec<(i32, usize)>, String)> {
+        const ROWS: i32 = 4;
+        let grid = self.term.grid();
+        let columns = grid.columns();
+        let first = (target - ROWS).max(-(grid.history_size() as i32));
+        let last = (target + ROWS).min(grid.screen_lines() as i32 - 1);
+        // Each row without its indentation and trailing blanks.
+        let mut chars = Vec::new();
+        let mut at = Vec::new();
+        let mut row_starts = Vec::new();
+        for l in first..=last {
+            let row: Vec<(char, usize)> = (0..columns)
+                .map(|c| (&grid[Line(l)][Column(c)], c))
+                .filter(|(cell, _)| !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER))
+                .map(|(cell, c)| (cell.c, c))
+                .collect();
+            let from = row.iter().position(|(ch, _)| !ch.is_whitespace()).unwrap_or(row.len());
+            let to = row.iter().rposition(|(ch, _)| !ch.is_whitespace()).map_or(from, |i| i + 1);
+            row_starts.push(chars.len());
+            for &(ch, c) in &row[from..to] {
+                chars.push(ch);
+                at.push((l, c));
             }
         }
-        Some(Link { url, cells })
+        let index = at.iter().position(|&(l, c)| l == target && c == column)?;
+        let (start, end) = find_path(&chars, index)?;
+        // Where the word may be cut: a row start inside it.
+        let cuts: Vec<usize> = row_starts.into_iter().filter(|&s| s > start && s < end).collect();
+        let mut froms: Vec<usize> = cuts.iter().copied().filter(|&s| s <= index).collect();
+        froms.insert(0, start);
+        let mut tos: Vec<usize> = cuts.iter().copied().filter(|&s| s > index).collect();
+        tos.push(end);
+        let mut spans: Vec<(usize, usize)> =
+            froms.iter().flat_map(|&from| tos.iter().map(move |&to| (from, to))).collect();
+        // Most rows first; a span within the pointer's own row was tried already.
+        let row_of = |i: usize| at[i].0;
+        spans.retain(|&(from, to)| row_of(from) != row_of(to - 1));
+        spans.sort_by_key(|&(from, to)| std::cmp::Reverse(row_of(to - 1) - row_of(from)));
+        spans.into_iter().find_map(|(from, to)| {
+            let (s, e) = find_path(&chars[from..to], index - from)?;
+            let path = self.existing_path(&chars[from + s..from + e])?;
+            Some((at[from + s..from + e].to_vec(), path))
+        })
     }
 
     pub fn output_text(&mut self) -> String {

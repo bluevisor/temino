@@ -85,6 +85,41 @@ fn local_files_are_links() {
 }
 
 #[test]
+fn paths_a_program_broke_over_rows_are_one_link() {
+    // As Claude Code prints a path wider than its text: cut mid-word, a real
+    // line break, and the rest indented under the paragraph.
+    let theme = Theme::dark();
+    let mut session = Session::new(GridSize { columns: 40, lines: 10 });
+    session.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07", &theme);
+    session.submit("claude");
+    let full = format!("{}/src/session/block.rs", env!("CARGO_MANIFEST_DIR"));
+    let (head, tail) = full.split_at(full.len() - 12);
+    let output = format!("\x1b]133;C\x07Previews: {head}\r\n  {tail}\r\n  Does it print?\r\n");
+    session.feed(output.as_bytes(), &theme);
+    let block = session.blocks.last_mut().unwrap();
+    let (rows, last) = (block.output_lines(), head.chars().count() + 10);
+    assert!(rows >= 3);
+    // The head may soft-wrap too: find the row the indented tail is on.
+    let tail_row = (0..rows).find(|&l| block.text_between((l, 0), (l, 40)).starts_with("  ")).unwrap();
+    let from_head = block.link_at(0, 12).expect("the head names the whole path");
+    let from_tail = block.link_at(tail_row, 4).expect("so does the tail");
+    assert_eq!(from_head, from_tail);
+    assert_eq!(from_head.url, full);
+    assert_eq!(from_head.cells.first(), Some(&(0, 10, 39.min(last - 1))));
+    assert_eq!(from_head.cells.last(), Some(&(tail_row, 2, 13)));
+    // The words on the next row aren't glued on: no such file.
+    assert_eq!(block.link_at(tail_row + 1, 3), None);
+    // Halves that join into nothing that exists aren't a link.
+    let mut session = Session::new(GridSize { columns: 40, lines: 10 });
+    session.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07", &theme);
+    session.submit("claude");
+    session.feed(b"\x1b]133;C\x07see /tmp/no-such-\r\n  file-here\r\n", &theme);
+    let block = session.blocks.last().unwrap();
+    assert_eq!(block.link_at(0, 8), None);
+    assert_eq!(block.link_at(1, 4), None);
+}
+
+#[test]
 fn links_follow_soft_wraps() {
     let theme = Theme::dark();
     let mut session = Session::new(GridSize { columns: 20, lines: 10 });
