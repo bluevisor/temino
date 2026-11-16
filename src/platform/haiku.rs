@@ -295,6 +295,12 @@ pub fn clipboard_get() -> Option<String> {
     Some(text)
 }
 
+/// Image data on the clipboard (RGBA). Haiku's clipboard bridge carries
+/// text only, so a paste here is always text.
+pub fn clipboard_image() -> Option<(usize, usize, Vec<u8>)> {
+    None
+}
+
 /// Starts `argv` on a new pseudo-terminal; returns (team id, master fd).
 pub fn spawn(argv: &[String], env: &[String], cwd: &str, columns: u16, rows: u16) -> io::Result<(i32, i32)> {
     let to_c = |items: &[String]| -> Vec<CString> {
