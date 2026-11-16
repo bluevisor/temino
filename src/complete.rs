@@ -203,6 +203,112 @@ pub fn complete(text: &str, cursor: usize, cwd: &str, commands: &mut Commands) -
     Some(Completion { start, end: cursor, candidates, selected: 0 })
 }
 
+/// Whether the paths a history entry would fill in exist from `cwd`, so the
+/// grey suggestion never offers a folder or file that isn't there. Only the
+/// words from `typed` (bytes already typed) on are checked: what the
+/// suggestion adds. A word is taken as a path when it starts with `/`, `~`,
+/// `./` or `../`, ends with `/` (how Tab writes folders), follows `cd` or
+/// `pushd`, or has a `/` anywhere outside commands whose arguments often
+/// do without being paths (`git checkout feature/x`, `docker pull org/app`).
+/// Options, URLs, globs and variables are left alone.
+pub fn paths_exist(entry: &str, typed: usize, cwd: &str) -> bool {
+    const SLASHED_NAMES: &[&str] = &[
+        "git", "docker", "podman", "kubectl", "helm", "brew", "npm", "npx", "pnpm", "yarn", "bun", "pip", "pip3", "uv",
+        "cargo", "go", "gh", "nix",
+    ];
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
+    let mut command: Option<String> = None;
+    let mut previous: Option<String> = None;
+    for (start, end, separator) in words(entry) {
+        let word = unescape(&entry[start..end]);
+        if command.is_none() {
+            command = Some(word.clone());
+        }
+        let after_cd = matches!(previous.as_deref(), Some("cd" | "pushd"));
+        let check = end > typed
+            && !word.is_empty()
+            && !word.starts_with('-')
+            && !word.contains("://")
+            && !word.contains(['*', '?', '[', '{', '$', '`', '=', '<', '>'])
+            && {
+                let explicit = word.starts_with(['/', '~']) || word.starts_with("./") || word.starts_with("../");
+                let slashed = word.contains('/')
+                    && !command.as_deref().is_some_and(|c| SLASHED_NAMES.contains(&c.rsplit('/').next().unwrap_or(c)));
+                explicit || word.ends_with('/') || after_cd || slashed
+            };
+        if check {
+            let path = if word == "~" {
+                home.clone()
+            } else if let Some(rest) = word.strip_prefix("~/") {
+                format!("{home}/{rest}")
+            } else if word.starts_with('~') {
+                // Another user's home (~alice): not worth resolving.
+                previous = Some(word);
+                continue;
+            } else if word.starts_with('/') {
+                word.clone()
+            } else {
+                format!("{cwd}/{word}")
+            };
+            if !std::path::Path::new(&path).exists() {
+                return false;
+            }
+        }
+        // A new command starts after |, ;, & or (.
+        if separator {
+            command = None;
+            previous = None;
+        } else {
+            previous = Some(word);
+        }
+    }
+    true
+}
+
+/// The shell words of `text` as (start, end, ends a command), split like
+/// `word_start` does: at unescaped spaces and operators, quotes kept whole.
+fn words(text: &str) -> Vec<(usize, usize, bool)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    let mut quote = None;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (quote, c) {
+            (_, '\\') if quote != Some('\'') => {
+                escaped = true;
+                start.get_or_insert(i);
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                start.get_or_insert(i);
+            }
+            (None, ' ' | '\t' | '\n' | '|' | ';' | '&' | '(') => {
+                let ends = c != ' ' && c != '\t';
+                if let Some(s) = start.take() {
+                    out.push((s, i, ends));
+                } else if ends {
+                    if let Some(last) = out.last_mut() {
+                        last.2 = true;
+                    }
+                }
+            }
+            (None, _) => {
+                start.get_or_insert(i);
+            }
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, text.len(), false));
+    }
+    out
+}
+
 /// What Tab would add to the end of `text`, for showing in grey: the rest
 /// of the only match, or of what every match shares.
 pub fn hint(text: &str, cwd: &str, commands: &mut Commands) -> Option<String> {
@@ -451,5 +557,40 @@ mod tests {
         // Already complete: the trailing space isn't hinted.
         assert_eq!(hint("cat readme.md", dir.path(), &mut commands), None);
         assert_eq!(hint("cat zzz", dir.path(), &mut commands), None);
+    }
+
+    #[test]
+    fn history_suggestions_name_only_paths_that_exist_here() {
+        let dir = Scratch::new("paths", &["src/main.rs", "docs/", "run.sh"]);
+        let cwd = dir.path();
+        let ok = |entry: &str, typed: &str| paths_exist(entry, typed.len(), cwd);
+        // Folders and files, relative to where the pane is.
+        assert!(ok("cd src/", "cd s"));
+        assert!(ok("cd docs", "cd "));
+        assert!(ok("vim src/main.rs", "vim"));
+        assert!(ok("./run.sh --fast", "./r"));
+        assert!(!ok("cd projects-old/", "cd p"), "no such folder here");
+        assert!(!ok("cd nowhere", "cd n"));
+        assert!(!ok("vim src/gone.rs", "vim s"));
+        assert!(!ok("cat notes/today.md | less", "cat"));
+        assert!(!ok("./build.sh", "./"));
+        assert!(ok(&format!("cd {cwd}/docs/"), "cd /"));
+        assert!(!ok(&format!("ls {cwd}/nope/"), "ls"));
+        // A path the user typed all of is theirs to keep.
+        assert!(ok("cd nowhere && ls", "cd nowhere &"));
+        // Not paths: options, URLs, globs, variables, slashed names.
+        assert!(ok("git checkout feature/login", "git ch"));
+        assert!(ok("docker pull org/app:latest", "docker"));
+        assert!(ok("curl https://example.com/a/b", "curl"));
+        assert!(ok("ls --color=auto *.rs $HOME/x", "ls"));
+        assert!(ok("make -j8 test", "make"));
+        // Each command after an operator has its own first word.
+        assert!(!ok("git status && cd gone/", "git"));
+        assert!(ok("cd src && git checkout fix/x", "cd"));
+        // Quoted and escaped names.
+        assert!(!ok("cd 'my dir'", "cd"));
+        let spaced = Scratch::new("spaced", &["my dir/"]);
+        assert!(paths_exist("cd 'my dir'", 2, spaced.path()));
+        assert!(paths_exist(r"cd my\ dir/", 2, spaced.path()));
     }
 }
