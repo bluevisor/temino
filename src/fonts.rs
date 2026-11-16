@@ -206,7 +206,7 @@ fn faces_in(path: &str, data: &[u8], listed: bool) -> Vec<Face> {
     (0..count)
         .filter_map(|index| {
             let face = ttf_parser::Face::parse(data, index).ok()?;
-            if !face.is_monospaced() && !(listed && even_widths(&face)) {
+            if !(face.is_monospaced() || listed && even_widths(&face)) {
                 return None;
             }
             let name = |id| face.names().into_iter().filter(|n| n.name_id == id).find_map(name_text);

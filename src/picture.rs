@@ -44,33 +44,67 @@ impl Picture {
         Picture::new(w as usize, h as usize, image.into_raw())
     }
 
-    /// Scaled to `w` x `h` (box filter down, nearest up): premultiplied RGBA.
+    /// Scaled to `w` x `h` (area-weighted down, nearest up): premultiplied
+    /// RGBA. Down, each pixel averages exactly the source it covers,
+    /// fractions included: whole-pixel boxes alternate sizes at ratios
+    /// like 96 to 56 and step a photo's edges.
     pub fn scaled(&self, w: usize, h: usize) -> Vec<u8> {
-        let mut out = vec![0u8; w * h * 4];
-        for y in 0..h {
-            let y0 = y * self.height / h;
-            let y1 = ((y + 1) * self.height / h).max(y0 + 1).min(self.height);
-            for x in 0..w {
-                let x0 = x * self.width / w;
-                let x1 = ((x + 1) * self.width / w).max(x0 + 1).min(self.width);
-                let mut sum = [0u32; 4];
-                for sy in y0..y1 {
-                    for sx in x0..x1 {
-                        let i = (sy * self.width + sx) * 4;
-                        for (total, &value) in sum.iter_mut().zip(&self.rgba[i..i + 4]) {
-                            *total += value as u32;
-                        }
+        let (columns, rows) = (spans(self.width, w), spans(self.height, h));
+        // Across, then down, in floats.
+        let mut across = vec![0f32; w * self.height * 4];
+        for y in 0..self.height {
+            for (x, span) in columns.iter().enumerate() {
+                let o = (y * w + x) * 4;
+                for &(sx, weight) in span {
+                    let i = (y * self.width + sx) * 4;
+                    for c in 0..4 {
+                        across[o + c] += self.rgba[i + c] as f32 * weight;
                     }
                 }
-                let n = ((y1 - y0) * (x1 - x0)) as u32;
+            }
+        }
+        let mut out = vec![0u8; w * h * 4];
+        for (y, span) in rows.iter().enumerate() {
+            for x in 0..w {
+                let mut sum = [0f32; 4];
+                for &(sy, weight) in span {
+                    let i = (sy * w + x) * 4;
+                    for c in 0..4 {
+                        sum[c] += across[i + c] * weight;
+                    }
+                }
                 let o = (y * w + x) * 4;
                 for c in 0..4 {
-                    out[o + c] = (sum[c] / n) as u8;
+                    out[o + c] = (sum[c] + 0.5).clamp(0.0, 255.0) as u8;
                 }
             }
         }
         out
     }
+}
+
+/// For each of `to` pixels along an axis of `from`: the source pixels it
+/// takes and their weights (summing to 1). Up, the nearest one.
+fn spans(from: usize, to: usize) -> Vec<Vec<(usize, f32)>> {
+    if to >= from {
+        return (0..to).map(|i| vec![((i * from / to).min(from - 1), 1.0)]).collect();
+    }
+    let ratio = from as f32 / to as f32;
+    (0..to)
+        .map(|i| {
+            let (start, end) = (i as f32 * ratio, ((i + 1) as f32 * ratio).min(from as f32));
+            let mut span = Vec::new();
+            let mut s = start.floor() as usize;
+            while (s as f32) < end && s < from {
+                let covered = (end.min(s as f32 + 1.0) - start.max(s as f32)).max(0.0);
+                if covered > 0.0 {
+                    span.push((s, covered / (end - start)));
+                }
+                s += 1;
+            }
+            span
+        })
+        .collect()
 }
 
 /// How big the program asked for the image to be.
@@ -316,6 +350,17 @@ mod tests {
     #[test]
     fn scaling_averages() {
         let picture = Picture::new(2, 1, vec![255, 255, 255, 255, 0, 0, 0, 255]).unwrap();
-        assert_eq!(picture.scaled(1, 1), vec![127, 127, 127, 255]);
+        assert_eq!(picture.scaled(1, 1), vec![128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn scaling_down_weighs_partly_covered_pixels() {
+        // 3 to 2: each takes one whole pixel and half the middle one.
+        let rgba = [0u8, 0, 0, 255, 90, 90, 90, 255, 180, 180, 180, 255].to_vec();
+        let picture = Picture::new(3, 1, rgba).unwrap();
+        assert_eq!(picture.scaled(2, 1), vec![30, 30, 30, 255, 150, 150, 150, 255]);
+        // Up stays nearest: crisp pixel art.
+        let picture = Picture::new(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 255]).unwrap();
+        assert_eq!(picture.scaled(4, 1), vec![0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255]);
     }
 }

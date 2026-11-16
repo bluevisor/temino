@@ -570,10 +570,7 @@ pub fn clipboard_get() -> Option<String> {
 /// Image data on the clipboard (RGBA), if any: width, height, bytes.
 pub fn clipboard_image() -> Option<(usize, usize, Vec<u8>)> {
     with_clipboard(|clipboard| {
-        clipboard
-            .get_image()
-            .ok()
-            .map(|image| (image.width, image.height, image.bytes.into_owned()))
+        clipboard.get_image().ok().map(|image| (image.width, image.height, image.bytes.into_owned()))
     })
 }
 
