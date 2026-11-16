@@ -82,6 +82,15 @@ impl Pane {
         self.copy(ctx, false);
     }
     pub fn paste_clipboard(&mut self) {
+        // An image on the clipboard is pasted inline into the terminal;
+        // otherwise paste the text.
+        if let Some((width, height, bytes)) = platform::clipboard_image() {
+            let Some(picture) = crate::picture::Picture::new(width, height, bytes) else {
+                return;
+            };
+            self.session.paste_picture(picture);
+            return;
+        }
         self.paste(platform::clipboard_get());
     }
     pub fn clear(&mut self) {

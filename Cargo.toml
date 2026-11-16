@@ -34,7 +34,7 @@ ash = { version = "0.38", default-features = false, features = ["loaded", "debug
 [target.'cfg(not(target_os = "haiku"))'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
-arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3", default-features = false, features = ["wayland-data-control", "image-data"] }
 libc = "0.2"
 
 [build-dependencies]

@@ -567,6 +567,16 @@ pub fn clipboard_get() -> Option<String> {
     with_clipboard(|clipboard| clipboard.get_text().ok())
 }
 
+/// Image data on the clipboard (RGBA), if any: width, height, bytes.
+pub fn clipboard_image() -> Option<(usize, usize, Vec<u8>)> {
+    with_clipboard(|clipboard| {
+        clipboard
+            .get_image()
+            .ok()
+            .map(|image| (image.width, image.height, image.bytes.into_owned()))
+    })
+}
+
 /// The X11/Wayland primary selection (select to copy, middle-click to
 /// paste). Other systems have none.
 pub fn selection_set(text: &str) {
