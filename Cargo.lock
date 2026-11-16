@@ -2174,7 +2174,7 @@ dependencies = [
 
 [[package]]
 name = "temino"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "alacritty_terminal",
  "arboard",
