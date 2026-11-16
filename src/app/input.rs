@@ -355,6 +355,12 @@ impl App {
         if !on_field {
             self.finish_field();
         }
+        // So does a click off the box a tab's name is typed in, keeping
+        // the name, whatever else the click then does.
+        let on_rename = self.renaming.is_some() && self.rename_field.contains(x, y);
+        if !on_rename {
+            self.finish_rename();
+        }
         let in_settings = matches!(self.pane_at(x, y), Some((SETTINGS, _)));
         let action = if in_settings { self.settings.action_at(x, y) } else { None };
         // A click anywhere but a shortcut stops waiting for keys.
@@ -411,13 +417,6 @@ impl App {
         // A click elsewhere puts the card away, and goes on to what it hit.
         if let Some(offer) = self.update.as_mut().filter(|offer| offer.open && !offer.installing) {
             offer.open = false;
-        }
-        let on_renamed = self
-            .renaming
-            .as_ref()
-            .is_some_and(|rename| self.tab_hits.iter().any(|(r, i)| *i == rename.tab && r.contains(x, y)));
-        if !on_renamed {
-            self.finish_rename();
         }
         if self.sidebar_edge().contains(x, y) {
             self.pointer = Pointer::Sidebar;
@@ -482,9 +481,9 @@ impl App {
                     self.open_tab_menu(index, x, y + 2.0);
                 } else if pressed & buttons::TERTIARY != 0 {
                     self.close_tab(index);
-                } else if clicks == 2 && !on_renamed {
+                } else if clicks == 2 && !on_rename {
                     self.start_rename(index);
-                } else if !on_renamed {
+                } else if !on_rename {
                     self.switch_tab(index);
                     self.pointer = Pointer::Tab { index, x, y, dragging: false };
                 }

@@ -173,15 +173,26 @@ impl App {
         for tab in &mut self.tabs[from.min(to)..=from.max(to)] {
             tab.slide = tab.shown.map(|at| (at, now));
         }
-        self.active = if self.active == from {
-            to
-        } else if from < self.active && self.active <= to {
-            self.active - 1
-        } else if to <= self.active && self.active < from {
-            self.active + 1
-        } else {
-            self.active
-        };
+        // Whatever points at a tab by its place follows it.
+        let moved = |index| moved_place(index, from, to);
+        self.active = moved(self.active);
+        if let Some(rename) = self.renaming.as_mut() {
+            rename.tab = moved(rename.tab);
+        }
+        if let Some(menu) = self.tab_menu.as_mut() {
+            menu.tab = moved(menu.tab);
+        }
+    }
+    /// Opens `tab` just after the current one, the tabs below sliding down
+    /// to make room, and switches to it.
+    pub(super) fn open_tab(&mut self, tab: Tab) {
+        let at = (self.active + 1).min(self.tabs.len());
+        self.tabs.push(tab);
+        let last = self.tabs.len() - 1;
+        if at < last {
+            self.move_tab(last, at);
+        }
+        self.switch_tab(at);
     }
     pub(super) fn start_rename(&mut self, index: usize) {
         let Some(tab) = self.tabs.get(index) else { return };
@@ -575,8 +586,32 @@ pub(super) fn title_and_summary(reply: &str) -> Option<(String, Option<String>)>
     Some((title, summary))
 }
 
+/// Where the tab at `index` ends up when the one at `from` moves to `to`.
+fn moved_place(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < index && index <= to {
+        index - 1
+    } else if to <= index && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tabs_keep_their_place_around_one_moved() {
+        use super::moved_place;
+        // A new tab opened last (5) and put after tab 1: 2–4 shift down.
+        let after: Vec<usize> = (0..6).map(|i| moved_place(i, 5, 2)).collect();
+        assert_eq!(after, [0, 1, 3, 4, 5, 2]);
+        // Dragged down from 1 to 3.
+        let after: Vec<usize> = (0..5).map(|i| moved_place(i, 1, 3)).collect();
+        assert_eq!(after, [0, 3, 1, 2, 4]);
+        assert_eq!(moved_place(2, 2, 2), 2);
+    }
     #[test]
     fn two_quick_digits_pick_a_two_digit_tab() {
         use super::{tab_number, DIGIT_WINDOW};

@@ -184,6 +184,7 @@ impl App {
     pub(super) fn draw_tab_bar(&mut self, agents: &[Option<AgentState>]) {
         self.tab_hits.clear();
         self.close_hits.clear();
+        self.rename_field = Rect::default();
         self.new_tab_hit = Rect::default();
         self.collapse_hit = Rect::default();
         self.account_hit = Rect::default();
@@ -291,7 +292,7 @@ impl App {
         let left = self.strip == TabStrip::Left;
         let (font, number) = if left { (SIDEBAR_FONT, 22.0) } else { (12.0, 18.0) };
         let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
-        let Self { scene, ctx, tab_hits, close_hits, .. } = self;
+        let Self { scene, ctx, tab_hits, close_hits, rename_field, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         let ascent = text.ui_ascent(font);
         let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
@@ -332,6 +333,7 @@ impl App {
             // editing (closable is false), and `right` already stops
             // short of any badge or mark chip on the row.
             let field = Rect::new(x - 3.0, top, (right - x + 3.0).max(0.0), h);
+            *rename_field = field;
             scene.quad(Quad::new(field, theme.background).radius(3.0).border(1.0, theme.accent));
             scene.push_clip(field.inset(1.0, 0.0));
             let w = text.measure(name, UI, font);

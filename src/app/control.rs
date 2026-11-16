@@ -51,7 +51,7 @@ impl App {
                 tab.zoomed = false;
             }
             _ => {
-                self.tabs.push(Tab {
+                self.open_tab(Tab {
                     root: Node::Leaf(id),
                     focus: id,
                     zoomed: false,
@@ -63,7 +63,6 @@ impl App {
                     marked_at: None,
                     ai_title: AiTitle::default(),
                 });
-                self.switch_tab(self.tabs.len() - 1);
             }
         }
         self.set_focus(id);

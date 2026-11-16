@@ -385,6 +385,8 @@ pub struct App {
     /// Per frame: the tab bar's hit areas and the active tab's dividers.
     tab_hits: Vec<(Rect, usize)>,
     close_hits: Vec<(Rect, usize)>,
+    /// The box a tab's new name is typed in, while renaming.
+    rename_field: Rect,
     new_tab_hit: Rect,
     collapse_hit: Rect,
     /// The account button at the sidebar's foot.
@@ -579,6 +581,7 @@ impl App {
             pointer: Pointer::Idle,
             tab_hits: Vec::new(),
             close_hits: Vec::new(),
+            rename_field: Rect::default(),
             new_tab_hit: Rect::default(),
             collapse_hit: Rect::default(),
             account_hit: Rect::default(),
@@ -713,7 +716,7 @@ impl App {
                 pane.run_when_ready(command);
             }
         }
-        self.tabs.push(Tab {
+        self.open_tab(Tab {
             root: Node::Leaf(id),
             focus: id,
             zoomed: false,
@@ -726,7 +729,6 @@ impl App {
             ai_title: AiTitle::default(),
         });
         crate::analytics::bump(crate::analytics::Counter::TabsOpened);
-        self.switch_tab(self.tabs.len() - 1);
         self.save_tabs();
         Ok(())
     }
