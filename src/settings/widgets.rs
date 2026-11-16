@@ -161,6 +161,15 @@ impl Ui<'_> {
     }
 
     /// A row of joined buttons, right-aligned at `right`, `selected` lit.
+    fn segment_widths(&mut self, labels: &[String]) -> Vec<f32> {
+        labels.iter().map(|l| (self.text.measure(l, UI, 12.0) + 20.0).max(34.0)).collect()
+    }
+
+    /// How wide `segments` draws these labels, but for its frame.
+    pub(super) fn segments_width(&mut self, labels: &[String]) -> f32 {
+        self.segment_widths(labels).iter().sum()
+    }
+
     pub(super) fn segments(
         &mut self,
         right: f32,
@@ -171,7 +180,7 @@ impl Ui<'_> {
     ) -> f32 {
         let theme = self.theme;
         let size = 12.0;
-        let widths: Vec<f32> = labels.iter().map(|l| (self.text.measure(l, UI, size) + 20.0).max(34.0)).collect();
+        let widths = self.segment_widths(labels);
         let total: f32 = widths.iter().sum();
         let outer = Rect::new(right - total - 4.0, y, total + 4.0, CONTROL_HEIGHT);
         self.scene.quad(Quad::new(outer, self.well()).radius(7.0).border(1.0, theme.divider));

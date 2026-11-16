@@ -298,6 +298,8 @@ impl App {
             tabs_top: self.strip == TabStrip::Top,
             extended: self.extended,
             notifications: crate::notify::enabled(),
+            resume_programs: crate::resume::Kind::Program.enabled(),
+            resume_servers: crate::resume::Kind::Server.enabled(),
             zoom: self.zoom_percent(),
             points: self.zoom * BASE_FONT_SIZE,
             line_spacing: crate::text::LINE_SPACINGS
@@ -312,6 +314,7 @@ impl App {
             provider: crate::llm::PROVIDERS.iter().position(|&p| p == crate::llm::chosen()).unwrap_or(0),
             fields: Field::ALL.map(|field| crate::setting(&field.key()).unwrap_or_default()),
             editing: self.field.clone(),
+            previewing: self.previewing.is_some(),
             remote: Some(crate::relay::signed_in()),
             remote_account: ["account_login", "account_name"]
                 .into_iter()
@@ -327,7 +330,8 @@ impl App {
         // what it became. Opening the theme list, starting to type in
         // a field and checking for updates aren't changes.
         // Nor are opening the theme editor and picking a color in it.
-        let browsing = matches!(action, Action::ThemeEditor(_) | Action::Slot(_) | Action::RecordKey(_));
+        let browsing =
+            matches!(action, Action::ThemeEditor(_) | Action::Slot(_) | Action::RecordKey(_) | Action::Section(_));
         if !browsing && !matches!(action, Action::Edit(_) | Action::List(_) | Action::CheckForUpdates) {
             crate::analytics::bump(crate::analytics::Counter::SettingsChanges);
         }
@@ -435,6 +439,8 @@ impl App {
                     self.default_terminal = Some(on);
                 }
             }
+            Action::ResumePrograms(on) => crate::save_setting("resume_programs", if on { "on" } else { "off" }),
+            Action::ResumeServers(on) => crate::save_setting("resume_servers", if on { "on" } else { "off" }),
             Action::Notifications(on) => {
                 crate::save_setting("notifications", if on { "on" } else { "off" });
                 if on {
@@ -486,6 +492,7 @@ impl App {
                 crate::cursor::set_blinks(on);
                 self.ctx.blink_epoch = Instant::now();
             }
+            Action::Section(section) => self.settings.show(section),
             Action::LineSpacing(index) => {
                 let Some(&(name, leading)) = crate::text::LINE_SPACINGS.get(index) else { return };
                 crate::save_setting("line_spacing", &name.to_lowercase());

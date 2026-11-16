@@ -66,6 +66,10 @@ pub struct Link {
     pub cells: Vec<(usize, usize, usize)>,
 }
 
+/// How many wrapped rows above and below the pointer are read for the link
+/// under it. A URL or path longer than that isn't one to click.
+pub(super) const LINK_ROWS: i32 = 32;
+
 /// The path-like word around `index` in `chars`, without quotes or
 /// brackets around it, a `:line:column` after it, or sentence punctuation.
 pub fn find_path(chars: &[char], index: usize) -> Option<(usize, usize)> {
@@ -110,10 +114,7 @@ pub fn find_urls(chars: &[char]) -> Vec<(usize, usize)> {
     let mut i = 0;
     while i < chars.len() {
         let boundary = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
-        let scheme = SCHEMES.iter().find(|scheme| {
-            let scheme: Vec<char> = scheme.chars().collect();
-            chars[i..].starts_with(&scheme)
-        });
+        let scheme = SCHEMES.iter().find(|scheme| scheme.chars().eq(chars[i..].iter().take(scheme.len()).copied()));
         let Some(scheme) = scheme.filter(|_| boundary) else {
             i += 1;
             continue;

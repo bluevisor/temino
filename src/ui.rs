@@ -115,8 +115,11 @@ pub struct GridView<'a> {
     pub blink_on: bool,
 }
 
-pub fn draw_grid(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, view: GridView) {
+pub fn draw_grid(scene: &mut Scene, text: &mut TextSystem, theme: &Theme, mut view: GridView) {
     let cell = text.cell;
+    // Cells are whole physical pixels, so from a whole-pixel start every
+    // row and column tiles with no seam.
+    (view.x, view.y) = scene.snap(view.x, view.y);
     let term = &view.block.term;
     let grid = term.grid();
     let colors = term.colors();

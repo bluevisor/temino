@@ -36,7 +36,7 @@ impl AgentState {
 }
 
 /// Agent programs, by the name they're run as.
-const AGENTS: [&str; 16] = [
+const AGENTS: [&str; 17] = [
     "claude",
     "claude-code",
     "codex",
@@ -54,10 +54,13 @@ const AGENTS: [&str; 16] = [
     "droid",
     "kiro-cli",
     "haikucode",
+    // Pi, Mario Zechner's coding agent.
+    "pi",
 ];
 
 /// Words that run the next word as the program.
-const LAUNCHERS: [&str; 10] = ["env", "npx", "bunx", "pnpx", "exec", "command", "nohup", "time", "sudo", "uvx"];
+pub(crate) const LAUNCHERS: [&str; 10] =
+    ["env", "npx", "bunx", "pnpx", "exec", "command", "nohup", "time", "sudo", "uvx"];
 
 /// Other programs that get a header over their pane (their name and how
 /// long they've run), by the name they're run as: `htop`, `lazygit`.
@@ -125,6 +128,7 @@ pub fn agent_brand(program: &str) -> (&'static str, u32) {
         "droid" => ("Droid", 0xEE6018),
         "kiro-cli" => ("Kiro", 0x9046FF),
         "haikucode" => ("Haiku Code", 0x9A9A9A),
+        "pi" => ("Pi", 0x9A9A9A),
         _ => ("Agent", 0x9A9A9A),
     }
 }
@@ -304,6 +308,12 @@ fn claude_session(group: i32) -> Option<ClaudeSession> {
             .find(|&pid| pid != group && crate::platform::process_group(pid) == group)
             .and_then(read)
     })
+}
+
+/// The id of the Claude Code session process group `group` runs, if it
+/// runs one.
+pub fn claude_session_id(group: i32) -> Option<String> {
+    claude_session(group).map(|session| session.id)
 }
 
 /// A transcript read so far.

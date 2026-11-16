@@ -49,6 +49,7 @@ enum {
 	EVENT_FAILED = 5,
 	EVENT_CLOSE = 6,
 	EVENT_ADDRESS = 7,
+	EVENT_STRAY = 8,
 };
 
 // What a new browser shows (viewer::BLANK).
@@ -63,6 +64,9 @@ static TeminoViewerCallback sViewerCallback;
 // the pane's below. And each window's host for them, by window number.
 static NSMutableDictionary<NSNumber*, id>* sViewers;
 static NSMutableDictionary<NSNumber*, NSView*>* sViewerHosts;
+// The viewer the app gave the keyboard to in each window (by its number);
+// none when a terminal has it.
+static NSMutableDictionary<NSNumber*, NSNumber*>* sKeyboard;
 
 static NSView*
 host_for(uint64_t id)
@@ -631,6 +635,41 @@ focused_viewer(NSWindow* window)
 	return [responder isKindOfClass:NSView.class] ? viewer_around((NSView*)responder) : nil;
 }
 
+// The number the app knows `window` by, if it has viewers.
+static NSNumber*
+window_no(NSWindow* window)
+{
+	for (NSNumber* no in sViewerHosts)
+		if (((NSView*)sViewerHosts[no]).window == window)
+			return no;
+	return nil;
+}
+
+// A key is about to land in `window`. When the app has a terminal focused
+// but something else holds the keyboard (a viewer that kept or took it, or
+// the bare window after one went away), every key would only beep, and no
+// click gets it back: the terminal takes it here, and the log says who had it.
+static void
+settle_keyboard(NSWindow* window)
+{
+	NSNumber* no = window_no(window);
+	NSView* terminal = ((NSView*)sViewerHosts[no]).superview;
+	NSResponder* responder = window.firstResponder;
+	if (terminal == nil || responder == terminal)
+		return;
+	TeminoViewer* wanted = viewer_for([sKeyboard[no] unsignedLongLongValue]);
+	if (wanted != nil && !wanted.hidden) {
+		// The focused viewer's own keyboard, unless nothing has it.
+		if (responder != window)
+			return;
+		[window makeFirstResponder:wanted.focusView];
+		if (window.firstResponder != window)
+			return;
+	}
+	viewer_send((uint64_t)no.unsignedIntValue << 32, EVENT_STRAY, NSStringFromClass(responder.class));
+	[window makeFirstResponder:terminal];
+}
+
 static void
 viewer_take_focus(TeminoViewer* viewer)
 {
@@ -658,6 +697,7 @@ temino_viewer_init(void* view_handle, uint32_t window, TeminoViewerCallback call
 		if (first) {
 			sViewers = [NSMutableDictionary dictionary];
 			sViewerHosts = [NSMutableDictionary dictionary];
+			sKeyboard = [NSMutableDictionary dictionary];
 		}
 		sViewerHosts[@(window)] = host;
 		sViewerCallback = callback;
@@ -670,11 +710,15 @@ temino_viewer_init(void* view_handle, uint32_t window, TeminoViewerCallback call
 				NSView* content = event.window.contentView;
 				NSView* hit = [content hitTest:[content.superview convertPoint:event.locationInWindow fromView:nil]];
 				TeminoViewer* viewer = viewer_around(hit);
-				if (viewer != nil)
+				if (viewer != nil) {
+					sKeyboard[@((uint32_t)(viewer.viewerId >> 32))] = @(viewer.viewerId);
 					viewer_send(viewer.viewerId, EVENT_FOCUSED, nil);
+				}
 				return event;
 			}];
 		[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent*(NSEvent* event) {
+			if (event.window != nil)
+				settle_keyboard(event.window);
 			TeminoViewer* viewer = focused_viewer(event.window);
 			return viewer != nil && [viewer handleKey:event] ? nil : event;
 		}];
@@ -788,13 +832,14 @@ temino_viewer_focus(uint64_t id)
 	NSView* host = host_for(id);
 	NSWindow* window = host.window;
 	TeminoViewer* viewer = viewer_for(id);
+	sKeyboard[@((uint32_t)(id >> 32))] = viewer != nil ? @(id) : nil;
 	for (TeminoViewer* other in sViewers.allValues) {
 		if (other != viewer && other.window == window)
 			other.pendingFocus = NO;
 	}
 	if (viewer != nil)
 		viewer_take_focus(viewer);
-	else if (window != nil && focused_viewer(window) != nil)
+	else if (window != nil && host.superview != nil && window.firstResponder != host.superview)
 		[window makeFirstResponder:host.superview];
 }
 
@@ -806,4 +851,5 @@ temino_viewer_detach(uint32_t window)
 		if ((uint32_t)(id.unsignedLongLongValue >> 32) == window)
 			[sViewers removeObjectForKey:id];
 	[sViewerHosts removeObjectForKey:@(window)];
+	[sKeyboard removeObjectForKey:@(window)];
 }

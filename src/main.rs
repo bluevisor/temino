@@ -37,6 +37,7 @@ mod picture;
 mod platform;
 mod relay;
 mod remote;
+mod resume;
 mod scene;
 mod session;
 mod settings;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::resume::Kind;
 
 impl App {
     /// Reopens the tabs open at the last quit, each with its panes in their
@@ -37,28 +38,68 @@ impl App {
         if self.tabs.is_empty() {
             return self.new_tab();
         }
-        if crate::setting("restore_output").as_deref() != Some("off") {
-            for (index, id) in self.saved_panes().into_iter().enumerate() {
-                if let Some(pane) = self.pane(id) {
+        let restore_output = crate::setting("restore_output").as_deref() != Some("off");
+        for (index, id) in self.saved_panes().into_iter().enumerate() {
+            if let Some(pane) = self.pane(id) {
+                if restore_output {
                     pane.session.restore_blocks(&format!("{}/{index}", sessions_dir()));
                 }
+                pane.restore_history(&format!("{}/{index}", pane_history_dir()));
+            }
+        }
+        // Read once: a crash before the next quit mustn't run these again
+        // in panes that by then hold something else.
+        let resumes = std::fs::read_to_string(resume_path()).unwrap_or_default();
+        let _ = std::fs::remove_file(resume_path());
+        let panes = self.saved_panes();
+        for (index, kind, line) in read_resumes(&resumes) {
+            if let Some(pane) = panes.get(index).copied().filter(|_| kind.enabled()).and_then(|id| self.pane(id)) {
+                pane.run_when_ready(line);
             }
         }
         self.switch_tab(active);
         Ok(())
     }
-    /// Every shell pane, tab by tab, in the order the tabs file lists them.
+    /// Every shell pane, tab by tab, in the order the tabs file lists them:
+    /// viewers and tabs of viewers alone left out, as `save_tabs` leaves
+    /// them out, so the numbers match the panes they reopen as.
     pub(super) fn saved_panes(&self) -> Vec<u64> {
         let mut leaves = Vec::new();
-        for tab in self.tabs.iter().filter(|tab| tab.focus != SETTINGS) {
+        for tab in self.tabs.iter().filter(|tab| tab.focus != SETTINGS && self.has_shell(&tab.root)) {
             tab.root.leaves(&mut leaves);
         }
+        leaves.retain(|&id| !self.is_viewer(id));
         leaves
     }
-    /// Each pane's finished blocks, for `restore_tabs` to bring back.
+    /// Each pane's finished blocks and own history, for `restore_tabs` to
+    /// bring back. The history is kept even with output restore off: it's
+    /// what you typed, not what programs printed.
     pub(super) fn save_sessions(&mut self) {
         if !self.primary {
             return;
+        }
+        let history = pane_history_dir();
+        let _ = std::fs::remove_dir_all(&history);
+        crate::create_private_dir(&crate::settings_dir());
+        crate::create_private_dir(&history);
+        for (index, id) in self.saved_panes().into_iter().enumerate() {
+            if let Some(pane) = self.pane(id) {
+                pane.save_history(&format!("{history}/{index}"));
+            }
+        }
+        let resumes: Vec<(usize, Kind, String)> = self
+            .saved_panes()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, id)| {
+                let (kind, line) = self.pane(id)?.resume().filter(|(kind, _)| kind.enabled())?;
+                Some((index, kind, line))
+            })
+            .collect();
+        if resumes.is_empty() {
+            let _ = std::fs::remove_file(resume_path());
+        } else {
+            crate::write_private(&resume_path(), write_resumes(&resumes));
         }
         let dir = sessions_dir();
         let _ = std::fs::remove_dir_all(&dir);
@@ -201,9 +242,37 @@ pub(super) fn node_has_shell(node: &Node, is_viewer: &impl Fn(u64) -> bool) -> b
     leaves.iter().any(|&id| !is_viewer(id))
 }
 
+/// What each pane was running at the last quit, for `restore_tabs`.
+pub(super) fn resume_path() -> String {
+    format!("{}/resume", crate::settings_dir())
+}
+
+/// A line a pane: its number in `saved_panes`, the setting that brings
+/// it back (`Kind::code`), then the command line.
+pub(super) fn write_resumes(resumes: &[(usize, Kind, String)]) -> String {
+    resumes.iter().map(|(index, kind, line)| format!("{index}\t{}\t{line}\n", kind.code())).collect()
+}
+
+pub(super) fn read_resumes(text: &str) -> Vec<(usize, Kind, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let index = fields.next()?.parse().ok()?;
+            let kind = Kind::from_code(fields.next()?)?;
+            let line = fields.next().filter(|line| !line.trim().is_empty())?;
+            Some((index, kind, line.to_owned()))
+        })
+        .collect()
+}
+
 /// Where each pane's output is kept between launches.
 pub(super) fn sessions_dir() -> String {
     format!("{}/sessions", crate::settings_dir())
+}
+
+/// Where each pane's own Up/Down history is kept between launches.
+pub(super) fn pane_history_dir() -> String {
+    format!("{}/pane_history", crate::settings_dir())
 }
 
 pub(super) fn tabs_path() -> String {
@@ -366,6 +435,20 @@ mod tests {
             }
         });
         assert_eq!(result.err().as_deref(), Some("no pty"));
+    }
+
+    #[test]
+    fn what_panes_ran_is_written_and_read_back() {
+        let resumes = vec![
+            (0, Kind::Program, "claude-max --resume 1234-abcd".to_owned()),
+            (3, Kind::Server, "npm run dev".to_owned()),
+        ];
+        let text = write_resumes(&resumes);
+        assert_eq!(text, "0\tP\tclaude-max --resume 1234-abcd\n3\tS\tnpm run dev\n");
+        assert_eq!(read_resumes(&text), resumes);
+        // Damaged or unknown lines are skipped, not run.
+        let damaged = "x\tP\tls\n1\tZ\tls\n2\tP\t \nclaude\n4\tP\tvim a\tb\n";
+        assert_eq!(read_resumes(damaged), [(4, Kind::Program, "vim a\tb".to_owned())]);
     }
 
     #[test]

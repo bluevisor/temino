@@ -88,6 +88,9 @@ impl App {
             return;
         }
         let before = self.focused_id();
+        if self.tabs[index].focus == SETTINGS && before != Some(SETTINGS) {
+            self.settings_from = before;
+        }
         self.active = index;
         self.relayout();
         self.focus_moved(before);
