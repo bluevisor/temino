@@ -206,52 +206,34 @@ pub fn complete(text: &str, cursor: usize, cwd: &str, commands: &mut Commands) -
 /// Whether the paths a history entry would fill in exist from `cwd`, so the
 /// grey suggestion never offers a folder or file that isn't there. Only the
 /// words from `typed` (bytes already typed) on are checked: what the
-/// suggestion adds. A word is taken as a path when it starts with `/`, `~`,
-/// `./` or `../`, ends with `/` (how Tab writes folders), follows `cd` or
-/// `pushd`, or has a `/` anywhere outside commands whose arguments often
-/// do without being paths (`git checkout feature/x`, `docker pull org/app`).
-/// Options, URLs, globs and variables are left alone.
+/// suggestion adds. Rejecting one only costs a suggestion (file completion
+/// takes over), so anything that looks like a path is checked: see
+/// `path_in`. `--opt=value` and `NAME=value` have their value checked.
 pub fn paths_exist(entry: &str, typed: usize, cwd: &str) -> bool {
-    const SLASHED_NAMES: &[&str] = &[
-        "git", "docker", "podman", "kubectl", "helm", "brew", "npm", "npx", "pnpm", "yarn", "bun", "pip", "pip3", "uv",
-        "cargo", "go", "gh", "nix",
-    ];
     let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
     let mut command: Option<String> = None;
     let mut previous: Option<String> = None;
     for (start, end, separator) in words(entry) {
         let word = unescape(&entry[start..end]);
-        if command.is_none() {
+        let first = command.is_none();
+        if first {
             command = Some(word.clone());
         }
-        let after_cd = matches!(previous.as_deref(), Some("cd" | "pushd"));
-        let check = end > typed
-            && !word.is_empty()
-            && !word.starts_with('-')
-            && !word.contains("://")
-            && !word.contains(['*', '?', '[', '{', '$', '`', '=', '<', '>'])
-            && {
-                let explicit = word.starts_with(['/', '~']) || word.starts_with("./") || word.starts_with("../");
-                let slashed = word.contains('/')
-                    && !command.as_deref().is_some_and(|c| SLASHED_NAMES.contains(&c.rsplit('/').next().unwrap_or(c)));
-                explicit || word.ends_with('/') || after_cd || slashed
-            };
-        if check {
-            let path = if word == "~" {
-                home.clone()
-            } else if let Some(rest) = word.strip_prefix("~/") {
-                format!("{home}/{rest}")
-            } else if word.starts_with('~') {
-                // Another user's home (~alice): not worth resolving.
-                previous = Some(word);
-                continue;
-            } else if word.starts_with('/') {
-                word.clone()
-            } else {
-                format!("{cwd}/{word}")
-            };
-            if !std::path::Path::new(&path).exists() {
-                return false;
+        if end > typed {
+            let path = path_in(&word, first, command.as_deref().unwrap_or(""), previous.as_deref(), cwd);
+            if let Some(path) = path {
+                let path = if path == "~" {
+                    home.clone()
+                } else if let Some(rest) = path.strip_prefix("~/") {
+                    format!("{home}/{rest}")
+                } else if path.starts_with('/') {
+                    path
+                } else {
+                    format!("{cwd}/{path}")
+                };
+                if !std::path::Path::new(&path).exists() {
+                    return false;
+                }
             }
         }
         // A new command starts after |, ;, & or (.
@@ -263,6 +245,77 @@ pub fn paths_exist(entry: &str, typed: usize, cwd: &str) -> bool {
         }
     }
     true
+}
+
+/// The path `word` names, if it looks like one: it starts with `/`, `~/`,
+/// `./` or `../`; ends with `/` (how Tab writes folders); follows `cd` or
+/// `pushd`; has a `/` in it; or, as an argument, has a file extension
+/// (`notes.txt`, `main.go`). Commands whose arguments often have a slash
+/// without being paths (`git checkout feature/x`, `docker pull org/app`)
+/// count a slashed one only when its first folder is here or it has an
+/// extension. Host names (`ping example.com`) aren't files. Options, URLs,
+/// globs, variables and `user@host:` are left alone.
+fn path_in(word: &str, first: bool, command: &str, previous: Option<&str>, cwd: &str) -> Option<String> {
+    const SLASHED_NAMES: &[&str] = &[
+        "git", "docker", "podman", "kubectl", "helm", "brew", "npm", "npx", "pnpm", "yarn", "bun", "pip", "pip3", "uv",
+        "cargo", "go", "gh", "nix",
+    ];
+    const HOSTS: &[&str] = &[
+        "ssh",
+        "mosh",
+        "ping",
+        "ping6",
+        "curl",
+        "wget",
+        "dig",
+        "nslookup",
+        "host",
+        "whois",
+        "traceroute",
+        "telnet",
+        "nc",
+        "http",
+        "https",
+        "xh",
+        "open",
+    ];
+    let command = command.rsplit('/').next().unwrap_or(command);
+    // `--out=build/`, `-o=x`, `OUT=dist/`: the value.
+    let value = match word.split_once('=') {
+        Some((name, value))
+            if name.starts_with('-') || (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')) =>
+        {
+            value
+        }
+        Some(_) => return None,
+        None if word.starts_with('-') => return None,
+        None => word,
+    };
+    if value.is_empty()
+        || value.contains("://")
+        || value.contains(['*', '?', '[', '{', '$', '`', '<', '>', '@', ':', '='])
+        || (value.starts_with('~') && !value.starts_with("~/") && value != "~")
+    {
+        return None;
+    }
+    let extension = |name: &str| {
+        let last = name.trim_end_matches('/').rsplit('/').next().unwrap_or(name);
+        last.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty()
+                && (1..=5).contains(&ext.len())
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && ext.chars().any(|c| c.is_ascii_alphabetic())
+        })
+    };
+    let explicit = value.starts_with(['/', '~']) || value.starts_with("./") || value.starts_with("../");
+    let after_cd = matches!(previous, Some("cd" | "pushd")) && !first;
+    let slashed = value.contains('/')
+        && (!SLASHED_NAMES.contains(&command) || extension(value) || {
+            let folder = value.split('/').next().unwrap_or("");
+            !folder.is_empty() && std::path::Path::new(&format!("{cwd}/{folder}")).is_dir()
+        });
+    let named = !first && !value.contains('/') && extension(value) && !HOSTS.contains(&command);
+    (explicit || value.ends_with('/') || after_cd || slashed || named).then(|| value.to_owned())
 }
 
 /// The shell words of `text` as (start, end, ends a command), split like
@@ -592,5 +645,39 @@ mod tests {
         let spaced = Scratch::new("spaced", &["my dir/"]);
         assert!(paths_exist("cd 'my dir'", 2, spaced.path()));
         assert!(paths_exist(r"cd my\ dir/", 2, spaced.path()));
+    }
+
+    #[test]
+    fn file_names_and_option_values_are_paths_too() {
+        let dir = Scratch::new("params", &["notes.txt", "main.go", "src/lib.rs", "build/"]);
+        let cwd = dir.path();
+        let ok = |entry: &str, typed: &str| paths_exist(entry, typed.len(), cwd);
+        // A bare file name as an argument.
+        assert!(ok("cat notes.txt", "cat"));
+        assert!(!ok("cat todo.md", "cat"));
+        assert!(ok("go run main.go", "go"));
+        assert!(!ok("go run server.go", "go"));
+        assert!(!ok("python3 manage.py runserver", "py"));
+        // Option and assignment values.
+        assert!(ok("rustfmt --config-path=src/lib.rs", "rust"));
+        assert!(!ok("tool --config=conf/app.toml", "tool"));
+        assert!(!ok("OUT=dist/ make", "OUT"));
+        assert!(ok("OUT=build/ make", "OUT"));
+        // Slashed names under git and friends: paths when their folder is here
+        // or they have an extension; branches and images are not.
+        assert!(!ok("git add src/gone.rs", "git"));
+        assert!(!ok("git diff src/old", "git"));
+        assert!(ok("git add src/lib.rs", "git"));
+        assert!(!ok("git add docs/guide.md", "git"));
+        assert!(ok("git checkout feature/login", "git"));
+        assert!(ok("git checkout release/0.3.5", "git"));
+        assert!(ok("docker pull org/app:latest", "docker"));
+        // Not files: hosts, packages, versions, the command itself, addresses.
+        assert!(ok("ping example.com", "ping"));
+        assert!(ok("ssh me@box.local", "ssh"));
+        assert!(ok("scp notes.txt me@box:/tmp/", "scp"));
+        assert!(ok("pip install requests==2.31.0", "pip"));
+        assert!(ok("python3.12 -V", "py"));
+        assert!(ok("echo hello world", "echo"));
     }
 }
