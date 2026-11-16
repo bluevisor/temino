@@ -665,6 +665,21 @@ impl Session {
         }
     }
 
+    /// Paste an image from the clipboard into the block currently on screen,
+    /// inline at its cursor, as if a program had printed it. The cursor moves
+    /// below the image, so later output appears under it.
+    pub fn paste_picture(&mut self, picture: Arc<crate::picture::Picture>) {
+        let cell = (self.cell_width.max(1.0), self.cell_height.max(1.0));
+        let request = crate::picture::Request { picture, size: Default::default() };
+        if let Some(block) = self.active_mut() {
+            block.place_picture(request, cell);
+            return;
+        }
+        if let Some(block) = self.blocks.iter_mut().rev().find(|b| b.kind == BlockKind::Command) {
+            block.place_picture(request, cell);
+        }
+    }
+
     fn route(&mut self, data: &[u8], theme: &Theme) {
         if self.phase != Phase::Running {
             self.answer_queries(data, theme);

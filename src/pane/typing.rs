@@ -30,7 +30,7 @@ impl Pane {
                     true
                 }
                 (_, Some('v')) => {
-                    self.paste(platform::clipboard_get());
+                    self.paste_clipboard();
                     true
                 }
                 (_, Some('k')) => {
