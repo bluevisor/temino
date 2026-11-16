@@ -302,7 +302,7 @@ impl Pane {
                 self.editor.stop_browsing();
             }
             Some(Named::Tab) if self.ai => {}
-            Some(Named::Tab) => match self.editor.suggestion(&ctx.history).map(str::to_owned) {
+            Some(Named::Tab) => match self.history_suggestion(ctx) {
                 Some(rest) if !shift => self.editor.insert(&rest),
                 _ => self.tab(ctx),
             },
@@ -375,13 +375,14 @@ impl Pane {
         }
     }
     /// The grey text after the caret: the newest history entry that starts
-    /// with what's typed, or else what Tab would fill in for the last word.
+    /// with what's typed and names only paths that exist from this pane's
+    /// folder, or else what Tab would fill in for the last word.
     pub(super) fn suggestion(&mut self, ctx: &mut Ctx) -> Option<String> {
         if self.ai {
             return None;
         }
-        if let Some(rest) = self.editor.suggestion(&ctx.history) {
-            return Some(rest.to_owned());
+        if let Some(rest) = self.history_suggestion(ctx) {
+            return Some(rest);
         }
         let text = &self.editor.text;
         if text.trim().is_empty()
@@ -402,6 +403,29 @@ impl Pane {
         self.hint = Some((key, hint.clone()));
         hint
     }
+    /// The rest of the newest fitting history entry (see `suggestion`).
+    /// Checking paths touches the disk, so it's worked out once per text,
+    /// folder and history, not every frame.
+    pub(super) fn history_suggestion(&mut self, ctx: &Ctx) -> Option<String> {
+        let key = format!(
+            "{}\0{}\0{}\0{}\0{}",
+            self.session.cwd,
+            self.editor.text,
+            self.editor.cursor,
+            ctx.history.entries.len(),
+            ctx.history.entries.last().map_or("", String::as_str)
+        );
+        if let Some((cached, rest)) = &self.history_hint {
+            if *cached == key {
+                return rest.clone();
+            }
+        }
+        let (cwd, typed) = (&self.session.cwd, self.editor.text.len());
+        let rest =
+            self.editor.suggestion(&ctx.history, |entry| complete::paths_exist(entry, typed, cwd)).map(str::to_owned);
+        self.history_hint = Some((key, rest.clone()));
+        rest
+    }
     pub(super) fn submit(&mut self, ctx: &mut Ctx) {
         let command = self.editor.text.trim_end().to_owned();
         self.completion = None;
@@ -411,6 +435,7 @@ impl Pane {
         ctx.history.push(&command);
         self.ran.push(&command);
         self.hint = None;
+        self.history_hint = None;
         self.editor.take();
         match self.shell_swap(&command) {
             Some((name, line)) => {

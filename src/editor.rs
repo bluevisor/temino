@@ -410,9 +410,10 @@ impl Editor {
         self.browsing = None;
     }
 
-    /// The rest of the newest history entry starting with the text, shown
-    /// as ghost text after the caret (fish/Warp-style).
-    pub fn suggestion<'a>(&self, history: &'a History) -> Option<&'a str> {
+    /// The rest of the newest history entry starting with the text that
+    /// `fits` (its paths exist here), shown as ghost text after the caret
+    /// (fish/Warp-style).
+    pub fn suggestion<'a>(&self, history: &'a History, fits: impl Fn(&str) -> bool) -> Option<&'a str> {
         if self.text.trim().is_empty() || self.cursor != self.text.len() || self.text.contains('\n') {
             return None;
         }
@@ -420,7 +421,9 @@ impl Editor {
             .entries
             .iter()
             .rev()
-            .find(|entry| entry.len() > self.text.len() && entry.starts_with(&self.text) && !entry.contains('\n'))
+            .find(|entry| {
+                entry.len() > self.text.len() && entry.starts_with(&self.text) && !entry.contains('\n') && fits(entry)
+            })
             .map(|entry| &entry[self.text.len()..])
     }
 }
@@ -934,7 +937,7 @@ mod tests {
     #[test]
     fn suggestions_complete_from_the_newest_matching_entry() {
         let history = past(&["git status", "git stash pop", "git st\nmulti", "echo hi"]);
-        let at = |text: &str| typed(text).suggestion(&history).map(str::to_owned);
+        let at = |text: &str| typed(text).suggestion(&history, |_| true).map(str::to_owned);
         assert_eq!(at("git st").as_deref(), Some("ash pop"));
         assert_eq!(at("git stat").as_deref(), Some("us"));
         assert_eq!(at("git status"), None);
@@ -944,7 +947,10 @@ mod tests {
         // Only with the caret at the end.
         let mut editor = typed("git st");
         editor.cursor = 2;
-        assert_eq!(editor.suggestion(&history), None);
+        assert_eq!(editor.suggestion(&history, |_| true), None);
+        // An entry that doesn't fit gives way to an older one.
+        let older = typed("git st").suggestion(&history, |entry| entry != "git stash pop").map(str::to_owned);
+        assert_eq!(older.as_deref(), Some("atus"));
     }
 
     #[test]

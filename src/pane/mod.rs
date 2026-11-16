@@ -188,6 +188,8 @@ pub struct Pane {
     completion: Option<Completion>,
     /// The last completion hint worked out, keyed by cwd and editor text.
     hint: Option<(String, Option<String>)>,
+    /// The history suggestion, by the folder, text and history it's for.
+    history_hint: Option<(String, Option<String>)>,
     /// Where the pointer is over this pane, for underlining the link under it.
     pointer: Option<(f32, f32)>,
     /// A link pressed with a plain click: it opens if the button comes up
@@ -345,6 +347,7 @@ impl Pane {
             editor: Editor::new(),
             completion: None,
             hint: None,
+            history_hint: None,
             pointer: None,
             link_click: None,
             clicked_link: None,
