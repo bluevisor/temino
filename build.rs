@@ -1,17 +1,17 @@
 fn main() {
     println!("cargo:rerun-if-changed=src/haiku/shim.cpp");
-    for file in ["src/macos/shim.m", "src/macos/viewer.m", "src/macos/shim.h"] {
+    for file in ["src/macos/shim.m", "src/macos/viewer.m", "src/macos/opener.m", "src/macos/shim.h"] {
         println!("cargo:rerun-if-changed={file}");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         let mut shim = cc::Build::new();
-        shim.file("src/macos/shim.m").file("src/macos/viewer.m").flag("-fobjc-arc");
+        shim.file("src/macos/shim.m").file("src/macos/viewer.m").file("src/macos/opener.m").flag("-fobjc-arc");
         // A debug build's shim logs what the window is doing (debug_log!).
         if std::env::var("PROFILE").as_deref() == Ok("debug") {
             shim.define("TEMINO_DEBUG", None);
         }
         shim.compile("temino_macos");
-        for framework in ["AppKit", "Carbon", "Metal", "CoreText", "WebKit"] {
+        for framework in ["AppKit", "Carbon", "Metal", "CoreText", "WebKit", "UniformTypeIdentifiers"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
         // Run outside the bundle, AppKit takes the name (and the camera and

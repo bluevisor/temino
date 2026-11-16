@@ -7,3 +7,5 @@ Icon=temino
 Terminal=false
 Categories=System;TerminalEmulator;
 StartupWMClass=temino
+X-TerminalArgExec=-e
+X-TerminalArgDir=--working-directory

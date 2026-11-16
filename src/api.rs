@@ -225,7 +225,7 @@ fn wait(window: u32, pane: u64, block: u64, timeout: Duration) -> Result<String,
 }
 
 /// Asks window `no`'s core, and waits for its answer.
-fn ask(no: u32, method: &str, params: &str) -> Result<String, String> {
+pub fn ask(no: u32, method: &str, params: &str) -> Result<String, String> {
     let sender = crate::remote::window_sender(no).ok_or_else(|| format!("there's no window {no}"))?;
     let (reply, answer) = mpsc::channel();
     sender

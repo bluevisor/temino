@@ -73,6 +73,9 @@ impl Ui<'_> {
                 if values.fetch > 0 {
                     shell.push(Row::FetchConfig);
                 }
+                if values.default_terminal.is_some() {
+                    shell.push(Row::DefaultTerminal);
+                }
                 y = self.section(x, y, width, "Shell", &shell, values);
                 self.section(
                     x,
