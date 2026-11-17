@@ -8,6 +8,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <WebKit/WebKit.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -682,6 +683,65 @@ viewer_take_focus(TeminoViewer* viewer)
 		[viewer.window makeFirstResponder:viewer.focusView];
 }
 
+// MARK: Pointer shape
+
+// winit sets the pointer with one cursor rect over its whole view, and
+// WebKit won't change the pointer while any cursor rect holds it, so a page
+// never got its own hand or I-beam. winit's rect leaves out the viewers'
+// spots, so they pick their own pointers.
+
+static IMP sAddCursorRect;
+
+// `rect` less `hole`: up to four pieces.
+static NSArray<NSValue*>*
+rect_minus(NSRect rect, NSRect hole)
+{
+	NSRect cut = NSIntersectionRect(rect, hole);
+	if (NSIsEmptyRect(cut))
+		return @[ [NSValue valueWithRect:rect] ];
+	NSRect pieces[4] = {
+		NSMakeRect(NSMinX(rect), NSMinY(rect), NSWidth(rect), NSMinY(cut) - NSMinY(rect)),
+		NSMakeRect(NSMinX(rect), NSMaxY(cut), NSWidth(rect), NSMaxY(rect) - NSMaxY(cut)),
+		NSMakeRect(NSMinX(rect), NSMinY(cut), NSMinX(cut) - NSMinX(rect), NSHeight(cut)),
+		NSMakeRect(NSMaxX(cut), NSMinY(cut), NSMaxX(rect) - NSMaxX(cut), NSHeight(cut)),
+	};
+	NSMutableArray<NSValue*>* out = [NSMutableArray array];
+	for (int i = 0; i < 4; i++)
+		if (!NSIsEmptyRect(pieces[i]))
+			[out addObject:[NSValue valueWithRect:pieces[i]]];
+	return out;
+}
+
+// winit's view's addCursorRect:cursor:, around every shown viewer.
+static void
+winit_add_cursor_rect(NSView* self, SEL cmd, NSRect rect, NSCursor* cursor)
+{
+	NSArray<NSValue*>* pieces = @[ [NSValue valueWithRect:rect] ];
+	for (NSView* host in self.subviews) {
+		if (![host isKindOfClass:TeminoViewerHost.class])
+			continue;
+		for (NSView* viewer in host.subviews) {
+			if (viewer.hidden)
+				continue;
+			NSRect hole = [host convertRect:viewer.frame toView:self];
+			NSMutableArray<NSValue*>* left = [NSMutableArray array];
+			for (NSValue* piece in pieces)
+				[left addObjectsFromArray:rect_minus(piece.rectValue, hole)];
+			pieces = left;
+		}
+	}
+	for (NSValue* piece in pieces)
+		((void (*)(id, SEL, NSRect, NSCursor*))sAddCursorRect)(self, cmd, piece.rectValue, cursor);
+}
+
+// A viewer moved, showed, hid or went: winit's view redoes its rects.
+static void
+refresh_cursor_rects(NSView* host)
+{
+	if (host.superview != nil)
+		[host.window invalidateCursorRectsForView:host.superview];
+}
+
 void
 temino_viewer_init(void* view_handle, uint32_t window, TeminoViewerCallback callback)
 {
@@ -701,6 +761,12 @@ temino_viewer_init(void* view_handle, uint32_t window, TeminoViewerCallback call
 		}
 		sViewerHosts[@(window)] = host;
 		sViewerCallback = callback;
+		if (sAddCursorRect == NULL) {
+			SEL sel = @selector(addCursorRect:cursor:);
+			Method method = class_getInstanceMethod(object_getClass(view), sel);
+			sAddCursorRect = method_getImplementation(method);
+			class_replaceMethod(object_getClass(view), sel, (IMP)winit_add_cursor_rect, method_getTypeEncoding(method));
+		}
 		// The monitors are app-wide: they look at the window an event is in.
 		if (!first)
 			return;
@@ -794,6 +860,7 @@ temino_viewer_place(uint64_t id, double x, double y, double width, double height
 		viewer.hidden = !visible;
 		[CATransaction commit];
 	}
+	refresh_cursor_rects(viewer.superview);
 	if (visible && viewer.pendingFocus)
 		viewer_take_focus(viewer);
 }
@@ -820,8 +887,10 @@ temino_viewer_close(uint64_t id)
 	NSWindow* window = viewer.window;
 	if (focused_viewer(window) == viewer)
 		[window makeFirstResponder:viewer.superview.superview];
+	NSView* host = viewer.superview;
 	[viewer removeFromSuperview];
 	[sViewers removeObjectForKey:@(id)];
+	refresh_cursor_rects(host);
 }
 
 // Gives the keyboard to viewer `id`, or (its pane part 0) back to its
