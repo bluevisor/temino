@@ -552,6 +552,11 @@ abbreviated(NSString* path)
 	} else if ([key isEqual:@"l"] && !shift && self.webView != nil) {
 		[self focusAddress];
 		return YES;
+	} else if ([key isEqual:@"w"] && !shift) {
+		// A web view takes ⌘W for the page and never hands it on to the
+		// menu's Close Pane, so it goes straight to the app.
+		viewer_send(self.viewerId, EVENT_CLOSE, nil);
+		return YES;
 	} else if ([key isEqual:@"c"] && !shift)
 		action = @selector(copy:);
 	else if ([key isEqual:@"x"] && !shift)
