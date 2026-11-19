@@ -14,12 +14,14 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # macOS runs on the self-hosted Mac Pro below (intel-mac): GitHub's macOS
+  # runners cost ~10x Linux minutes and ran the same lint and tests.
   rust:
     name: Rust (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
