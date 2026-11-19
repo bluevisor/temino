@@ -75,7 +75,9 @@ impl App {
             UiEvent::Shell(index) => self.set_shell(index),
             UiEvent::Wheel { dy, x, y, precise, .. } => {
                 let (x, y) = (x / self.zoom, y / self.zoom);
-                if let Some((SETTINGS, _)) = self.pane_at(x, y) {
+                if self.strip == TabStrip::Left && self.tab_area().contains(x, y) {
+                    self.scroll_sidebar(dy * if precise { 48.0 } else { SIDEBAR_ROW });
+                } else if let Some((SETTINGS, _)) = self.pane_at(x, y) {
                     self.settings.wheel(dy, x, y);
                 } else if let Some((id, rect)) = self.pane_at(x, y) {
                     let Self { panes, ctx, .. } = self;
@@ -685,6 +687,16 @@ impl App {
         let cursor = panes.iter_mut().find(|p| p.id == id).map(|pane| pane.mouse_moved(ctx, x - rect.x, y - rect.y, 0));
         if let Some(cursor) = cursor {
             self.set_cursor(cursor);
+        }
+    }
+    /// Scrolls the sidebar's list `dy` points down (up when negative).
+    fn scroll_sidebar(&mut self, dy: f32) {
+        let scroll = (self.sidebar_scroll + dy).clamp(0.0, self.sidebar_scroll_max);
+        if scroll != self.sidebar_scroll {
+            self.sidebar_scroll = scroll;
+            // The row under the pointer is a different one now.
+            self.hover_tab = None;
+            self.dirty = true;
         }
     }
     pub(super) fn mouse_up(&mut self, x: f32, y: f32) {
