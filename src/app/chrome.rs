@@ -428,22 +428,33 @@ pub(super) fn draw_header_details(
     const PAD: f32 = 12.0;
     const LINE: f32 = 18.0;
     const LABEL: f32 = 20.0;
+    // A long pasted prompt (or task) shows its start, not the whole page.
+    const PROMPT_LINES: usize = 4;
     let width = bar.w - 2.0 * PAD;
     // Rows as drawn: an indent, the text, its font and size, its ink, and
     // the height it takes.
     let mut rows: Vec<(f32, String, crate::text::FontId, f32, Color, f32)> = Vec::new();
-    let mut wrapped = |rows: &mut Vec<_>, lead: &str, body: &str, ink: Color| {
+    // At most `limit` lines, the last ending in "…" when there was more.
+    let mut wrapped = |rows: &mut Vec<_>, lead: &str, body: &str, ink: Color, limit: usize| {
         let indent = text.measure(lead, UI, 12.0);
-        for (i, line) in wrap(text, body, UI, 12.0, width - indent).into_iter().enumerate() {
+        let mut lines = wrap(text, body, UI, 12.0, width - indent);
+        if lines.len() > limit {
+            lines.truncate(limit);
+            if let Some(last) = lines.last_mut() {
+                let room = (width - indent - text.measure("…", UI, 12.0)).max(0.0);
+                *last = format!("{}…", text.elide(last, UI, 12.0, room).trim_end_matches('…').trim_end());
+            }
+        }
+        for (i, line) in lines.into_iter().enumerate() {
             let line = if i == 0 { format!("{lead}{line}") } else { line };
             rows.push((if i == 0 { 0.0 } else { indent }, line, UI, 12.0, ink, LINE));
         }
     };
     if let Some(recap) = &info.recap {
-        wrapped(&mut rows, "", recap, theme.text);
+        wrapped(&mut rows, "", recap, theme.text, usize::MAX);
     }
     if let Some(prompt) = &info.prompt {
-        wrapped(&mut rows, "› ", prompt, theme.text);
+        wrapped(&mut rows, "› ", prompt, theme.text, PROMPT_LINES);
     }
     for (label, items) in [("Subagents", &info.subagent_tasks), ("Queued", &info.queue)] {
         if items.is_empty() {
@@ -452,7 +463,7 @@ pub(super) fn draw_header_details(
         rows.push((0.0, label.to_owned(), UI_BOLD, 11.0, theme.text_faint, LABEL));
         for item in items {
             let item = if item.is_empty() { "Subagent" } else { item.as_str() };
-            wrapped(&mut rows, "• ", item, theme.text_dim);
+            wrapped(&mut rows, "• ", item, theme.text_dim, PROMPT_LINES);
         }
     }
     let mut facts = vec![agent_summary(info)];
