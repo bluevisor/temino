@@ -424,7 +424,9 @@ impl Transcript {
                     }
                     return;
                 }
-                if entry.get("isMeta").is_some_and(Value::is_true) {
+                // Notes Claude Code writes in your name, and the summary it
+                // starts a compacted conversation with.
+                if ["isMeta", "isCompactSummary"].iter().any(|key| entry.get(key).is_some_and(Value::is_true)) {
                     return;
                 }
                 if let Some(prompt) = prompt_text(&text) {
@@ -515,6 +517,7 @@ mod tests {
         for line in [
             r#"{"type":"user","message":{"role":"user","content":"fix the\nbuild"}}"#,
             r#"{"type":"user","isMeta":true,"message":{"content":"Caveat: ignore"}}"#,
+            r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued"}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a","name":"Agent","input":{"description":"Find the\nflaky test"}},{"type":"tool_use","id":"b","name":"Agent","input":{"subagent_type":"Explore","run_in_background":true}},{"type":"tool_use","id":"c","name":"Bash","input":{}}]}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","content":"launched"}]}}"#,
         ] {
