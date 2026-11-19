@@ -441,12 +441,33 @@ impl App {
             theme.divider
         };
         self.scene.fill(Rect::new(area.right() - 1.0, area.y, 1.0, area.h), edge);
-        self.scene.push_clip(Rect::new(0.0, area.y, area.w - 1.0, area.h));
+        // The rows and the new-tab row scroll, above the foot's buttons.
+        let foot = area.bottom() - 34.0;
+        let list_bottom = if self.compact { foot - 30.0 } else { foot } - 6.0;
+        let list = Rect::new(0.0, area.y, area.w - 1.0, (list_bottom - area.y).max(0.0));
+        let heights: Vec<f32> = tabs.iter().map(|tab| sidebar_row_height(tab, self.compact)).collect();
+        let content = 8.0 + heights.iter().map(|h| h + 4.0).sum::<f32>() + SIDEBAR_ROW + 4.0;
+        self.sidebar_scroll_max = (content - list.h).max(0.0);
+        // A tab switch or a new tab scrolls the current one into view.
+        let shown = (self.active, tabs.len());
+        if shown != self.sidebar_shown && self.active < heights.len() {
+            self.sidebar_shown = shown;
+            let top = 8.0 + heights[..self.active].iter().map(|h| h + 4.0).sum::<f32>();
+            let bottom = top + heights[self.active] + 4.0;
+            if top - 8.0 < self.sidebar_scroll {
+                self.sidebar_scroll = top - 8.0;
+            } else if bottom > self.sidebar_scroll + list.h {
+                self.sidebar_scroll = bottom - list.h;
+            }
+        }
+        self.sidebar_scroll = self.sidebar_scroll.clamp(0.0, self.sidebar_scroll_max);
+        let (tab_start, pane_start) = (self.tab_hits.len(), self.pane_hits.len());
+        self.scene.push_clip(list);
         let dragged = match self.pointer {
             Pointer::Tab { index, dragging: true, .. } => Some(index),
             _ => None,
         };
-        let mut y = area.y + 8.0;
+        let mut y = area.y + 8.0 - self.sidebar_scroll;
         for (index, tab) in tabs.iter().enumerate() {
             let place = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
             let rect = self.slid(index, place);
@@ -491,12 +512,13 @@ impl App {
         let Self { scene, ctx, new_tab_hit, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         let plus = Rect::new(6.0, y, area.w - 13.0, SIDEBAR_ROW);
+        let plus_hit = clipped(plus, list);
         let ascent = text.ui_ascent(SIDEBAR_FONT);
         let baseline = (plus.y + (plus.h + ascent * 0.72) / 2.0).round();
         // Lit under the pointer, like the rows above it. The plus sits where
         // their numbers do, the label where their titles do, and the
         // shortcut at the far end.
-        let over = plus.contains(self.mouse.0, self.mouse.1) && matches!(self.pointer, Pointer::Idle);
+        let over = plus_hit.contains(self.mouse.0, self.mouse.1) && matches!(self.pointer, Pointer::Idle);
         if over {
             scene.quad(Quad::new(plus, theme.panel(HOVER_LIFT)).radius(6.0));
         }
@@ -515,11 +537,30 @@ impl App {
                 text.draw_text(scene, &keys, keys_x, baseline, UI, 11.5, theme.text_faint);
             }
         }
-        *new_tab_hit = plus;
+        *new_tab_hit = plus_hit;
+        // Rows scrolled out of the list can't be clicked or hovered.
+        for hit in &mut self.tab_hits[tab_start..] {
+            hit.0 = clipped(hit.0, list);
+        }
+        self.tab_hits.retain(|(rect, _)| rect.h > 0.0);
+        for hit in &mut self.pane_hits[pane_start..] {
+            hit.0 = clipped(hit.0, list);
+        }
+        self.pane_hits.retain(|(rect, ..)| rect.h > 0.0);
+        let Self { scene, ctx, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        // A thin thumb on the right edge says there's more to scroll to.
+        if self.sidebar_scroll_max > 0.0 {
+            let track = Rect::new(list.right() - 5.0, list.y + 4.0, 3.0, (list.h - 8.0).max(0.0));
+            let h = (track.h * list.h / content).max(24.0).min(track.h);
+            let at = track.y + (track.h - h) * self.sidebar_scroll / self.sidebar_scroll_max;
+            scene.quad(Quad::new(Rect::new(track.x, at, track.w, h), theme.text_faint.alpha(0.45)).radius(1.5));
+        }
+        scene.pop_clip();
+        scene.push_clip(Rect::new(0.0, area.y, area.w - 1.0, area.h));
         // The foot: the account button in the corner, and the button
         // that collapses to compact at the other end (above it when
         // compact, as it expands back).
-        let foot = area.bottom() - 34.0;
         let (account, collapse) = if self.compact {
             let x = (area.w - 1.0 - 28.0) / 2.0;
             (Rect::new(x, foot, 28.0, 26.0), Rect::new(x, foot - 30.0, 28.0, 26.0))
@@ -650,4 +691,23 @@ impl App {
         scene.pop_clip();
         scene.set_layer(LAYER_CONTENT);
     }
+}
+
+/// A sidebar row's height: the title row, the meta line under it (the pane
+/// count or the mark), and the extended view's pane lines. As drawn by
+/// `draw_tab_sidebar`.
+fn sidebar_row_height(tab: &TabView, compact: bool) -> f32 {
+    if compact {
+        return SIDEBAR_ROW;
+    }
+    let meta = if (tab.panes > 1 && tab.lines.is_empty()) || tab.mark.is_some() { SIDEBAR_META } else { 0.0 };
+    let under = if meta > 0.0 { meta - 2.0 } else { 0.0 };
+    let extra = if tab.lines.is_empty() { 0.0 } else { tab.lines.len() as f32 * SIDEBAR_LINE + 6.0 };
+    SIDEBAR_ROW - meta / 2.0 + under + extra
+}
+
+/// The part of `rect` inside `clip` (empty when they don't meet).
+fn clipped(rect: Rect, clip: Rect) -> Rect {
+    let (x, y) = (rect.x.max(clip.x), rect.y.max(clip.y));
+    Rect::new(x, y, (rect.right().min(clip.right()) - x).max(0.0), (rect.bottom().min(clip.bottom()) - y).max(0.0))
 }

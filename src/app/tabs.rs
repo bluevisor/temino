@@ -91,6 +91,10 @@ impl App {
         if self.tabs[index].focus == SETTINGS && before != Some(SETTINGS) {
             self.settings_from = before;
         }
+        if index != self.active {
+            self.tabs[index].ai_title.recheck = true;
+            self.dirty = true;
+        }
         self.active = index;
         self.relayout();
         self.focus_moved(before);
@@ -395,6 +399,9 @@ impl App {
                     self.dirty = true;
                 }
             }
+            // Switched to with nothing new since the title was written: it
+            // still applies.
+            let recheck = std::mem::take(&mut title.recheck);
             if context.is_empty() || context == title.asked_for {
                 continue;
             }
@@ -406,6 +413,7 @@ impl App {
                 .into_iter()
                 .flatten()
                 .max()
+                .filter(|_| !recheck)
                 .unwrap_or(now);
             if now < due {
                 wake = Some(wake.map_or(due, |w| w.min(due)));

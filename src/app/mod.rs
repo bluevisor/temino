@@ -184,6 +184,9 @@ struct AiTitle {
     /// What the panes are doing now, and since when.
     seen: String,
     seen_at: Option<Instant>,
+    /// Switched to: the title is checked against what the panes are doing
+    /// now, without the usual waits.
+    recheck: bool,
 }
 
 struct Tab {
@@ -358,6 +361,12 @@ pub struct App {
     sidebar_width: f32,
     compact: bool,
     extended: bool,
+    /// How far the sidebar's list is scrolled down, and the most it can
+    /// be (from the last frame).
+    sidebar_scroll: f32,
+    sidebar_scroll_max: f32,
+    /// The current tab and the tab count the list last scrolled to show.
+    sidebar_shown: (usize, usize),
     /// Command+B's choice to show or hide the tab list; until then it shows
     /// once there is a second tab. Hidden, tabs still switch by key.
     tab_list: Option<bool>,
@@ -564,6 +573,9 @@ impl App {
                 .clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             compact: crate::setting("sidebar").as_deref() == Some("compact"),
             extended: crate::setting("sidebar").as_deref() == Some("extended"),
+            sidebar_scroll: 0.0,
+            sidebar_scroll_max: 0.0,
+            sidebar_shown: (usize::MAX, 0),
             tab_list: None,
             next_id: 1,
             window: (width as f32, height as f32),
