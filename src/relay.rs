@@ -44,12 +44,25 @@ pub fn relay_url() -> String {
 
 /// The phone's web app as the QR code opens it: the account this machine
 /// signed in with rides along after `#for=`, so the phone can say which one
-/// to use. A fragment never reaches the relay.
+/// to use, and this machine's device id after `mac=`, so the phone asks
+/// this machine in and not another one on the account. A fragment never
+/// reaches the relay.
 pub fn app_url() -> String {
     let base = format!("{}/app", relay_url());
-    match crate::setting("account_login").filter(|login| !login.is_empty() && signed_in()) {
-        Some(login) => format!("{base}#for={}", encode(&login)),
-        None => base,
+    if !signed_in() {
+        return base;
+    }
+    let mut hash = Vec::new();
+    if let Some(login) = crate::setting("account_login").filter(|login| !login.is_empty()) {
+        hash.push(format!("for={}", encode(&login)));
+    }
+    if let Some(device) = crate::setting("relay_device").filter(|device| !device.is_empty()) {
+        hash.push(format!("mac={}", encode(&device)));
+    }
+    if hash.is_empty() {
+        base
+    } else {
+        format!("{base}#{}", hash.join("&"))
     }
 }
 

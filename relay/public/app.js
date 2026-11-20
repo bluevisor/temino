@@ -78,11 +78,15 @@ async function loadKeys() {
 // The account the Mac whose QR code opened this page is signed in with,
 // "you@example.com (Google)", from the code's `#for=`. Kept so every
 // sign-in screen can say which account to use; none when opened by hand.
+// The code also names that Mac (`#mac=`, its device id): it's the one to
+// ask in, though the phone last used another machine on the account.
 function takeHint() {
   const hash = new URLSearchParams(location.hash.slice(1));
-  if (!hash.has("for")) return;
-  store.set("temino-for", hash.get("for").slice(0, 160) || null);
+  if (!hash.has("for") && !hash.has("mac")) return;
+  if (hash.has("for")) store.set("temino-for", hash.get("for").slice(0, 160) || null);
+  if (hash.get("mac")) store.set("temino-machine", hash.get("mac").slice(0, 160));
   hash.delete("for");
+  hash.delete("mac");
   const rest = hash.toString();
   history.replaceState(null, "", location.pathname + location.search + (rest ? `#${rest}` : ""));
 }
@@ -970,6 +974,13 @@ type.addEventListener("input", () => { if (!type.matches(":focus") || !type.valu
 type.addEventListener("focus", () => document.body.classList.add("typing"));
 type.addEventListener("blur", () => document.body.classList.remove("typing"));
 addEventListener("resize", render);
+// A code scanned while this page is open: go to the Mac it names.
+addEventListener("hashchange", async () => {
+  takeHint();
+  const wanted = store.get("temino-machine");
+  if (wanted !== machine && devices.some((d) => d.id === wanted && d.online)) await start(wanted);
+  render();
+});
 
 try {
   keys = await loadKeys();
