@@ -135,12 +135,9 @@ impl App {
     pub(super) fn lists_panes(&self) -> bool {
         self.strip == TabStrip::Left && !self.compact
     }
-    /// ⌘ and a digit: the tab list's row with that number (a tab, or a
-    /// split tab's pane), or with a digit just before it the two-digit one
-    /// (⌘1 ⌘2 → 12, ⌘1 ⌘0 → 10). False for a lone ⌘0, which stays the font
-    /// reset.
-    pub(super) fn tab_digit(&mut self, digit: usize) -> bool {
-        let now = Instant::now();
+    /// The tab list's rows in order, as `numbered_rows` gives them: the
+    /// numbers the sidebar shows and ⌘-digits pick, from 1 at the start.
+    pub(super) fn tab_rows(&self) -> Vec<(usize, Option<u64>)> {
         let leaves: Vec<Vec<u64>> = self
             .tabs
             .iter()
@@ -150,7 +147,15 @@ impl App {
                 leaves
             })
             .collect();
-        let rows = numbered_rows(&leaves, self.lists_panes());
+        numbered_rows(&leaves, self.lists_panes())
+    }
+    /// ⌘ and a digit: the tab list's row with that number (a tab, or a
+    /// split tab's pane), or with a digit just before it the two-digit one
+    /// (⌘1 ⌘2 → 12, ⌘1 ⌘0 → 10). False for a lone ⌘0, which stays the font
+    /// reset.
+    pub(super) fn tab_digit(&mut self, digit: usize) -> bool {
+        let now = Instant::now();
+        let rows = self.tab_rows();
         let Some(number) = tab_number(self.tab_digits, digit, now, rows.len()) else {
             self.tab_digits = None;
             return false;

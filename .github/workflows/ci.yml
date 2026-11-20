@@ -93,5 +93,7 @@ jobs:
         run: node test/webpush.mjs
       - name: Magnifier lines
         run: node test/mag.mjs
+      - name: Tab list rows
+        run: node test/rows.mjs
       - name: Analytics and dashboard
         run: node test/analytics.mjs && node test/dashboard.mjs
