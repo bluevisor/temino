@@ -1,6 +1,23 @@
 use super::*;
 use crate::Locked;
 
+/// A tab's AI title and summary: asked once what its panes do has held
+/// still this long, and at most this often.
+const TITLE_SETTLE: Duration = Duration::from_secs(3);
+const TITLE_EVERY: Duration = Duration::from_secs(20);
+const TITLE_SYSTEM: &str = "You see what is going on in the panes of one terminal tab: their folders, \
+the coding agents and what they were asked, the commands run and the end of their output. Answer with \
+exactly two lines. Line 1: a title for the tab in 2 to 5 words, the way a person would label it \
+(for example: Temino tab colors, API deploy logs, Haiku VM build). Line 2: at most 18 words: the \
+project being worked on, then a colon, then what is being done in this tab and where it stands, naming \
+no person (for example: Temino: fixing the login redirect bug; tests passing, PR not opened yet). The \
+project is the repository or project folder's name, written the way a person would say it; leave it and \
+the colon out only when the work belongs to no project, as in a home folder. Plain text, no labels, no \
+quotes.";
+/// How much of each pane's history a tab's summary is written from, in
+/// all.
+const TITLE_CHARS: usize = 8000;
+
 /// What a tab is waiting on you for, set by hand so a glance at the list
 /// says what to do with it.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -710,5 +727,20 @@ mod tests {
         assert_eq!(idle("soon"), Duration::from_secs(600));
         assert_eq!(idle(""), Duration::from_secs(600));
         std::env::remove_var("TEMINO_RECAP_MINUTES");
+    }
+
+    #[test]
+    fn reads_the_title_and_summary_lines() {
+        let (title, summary) = title_and_summary("Temino tab colors\nTuning the tab palette; PR open.\n").unwrap();
+        assert_eq!(title, "Temino tab colors");
+        assert_eq!(summary.as_deref(), Some("Tuning the tab palette; PR open."));
+        // Labels and numbering the model adds anyway come off.
+        let (title, summary) = title_and_summary("1. Title: \"API logs\"\n\n2. Summary: Tailing the deploy").unwrap();
+        assert_eq!(title, "API logs");
+        assert_eq!(summary.as_deref(), Some("Tailing the deploy"));
+        // One line is a title alone; nothing, or a paragraph, isn't one.
+        assert_eq!(title_and_summary("Haiku VM build"), Some(("Haiku VM build".to_owned(), None)));
+        assert_eq!(title_and_summary("  \n"), None);
+        assert_eq!(title_and_summary(&"word ".repeat(20)), None);
     }
 }

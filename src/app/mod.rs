@@ -114,22 +114,10 @@ const MENU_ROW: f32 = 26.0;
 
 /// How often a window's state is rebuilt for remotes watching it.
 const REMOTE_EVERY: Duration = Duration::from_millis(150);
-/// A tab's AI title and summary: asked once what its panes do has held
-/// still this long, and at most this often.
-const TITLE_SETTLE: Duration = Duration::from_secs(3);
-const TITLE_EVERY: Duration = Duration::from_secs(20);
-const TITLE_SYSTEM: &str = "You see what is going on in the panes of one terminal tab: their folders, \
-the coding agents and what they were asked, the commands run and the end of their output. Answer with \
-exactly two lines. Line 1: a title for the tab in 2 to 5 words, the way a person would label it \
-(for example: Temino tab colors, API deploy logs, Haiku VM build). Line 2: at most 18 words: the \
-project being worked on, then a colon, then what is being done in this tab and where it stands, naming \
-no person (for example: Temino: fixing the login redirect bug; tests passing, PR not opened yet). The \
-project is the repository or project folder's name, written the way a person would say it; leave it and \
-the colon out only when the work belongs to no project, as in a home folder. Plain text, no labels, no \
-quotes.";
-/// How much of each pane's history a tab's summary is written from, in
-/// all.
-const TITLE_CHARS: usize = 8000;
+/// How often a running app asks again whether its daily update check and
+/// usage ping are due (each still goes out at most once a day): before,
+/// both ran only at launch, so a window left open for days went quiet.
+const DAILY_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 /// The colors a tab can be marked with, from its menu: a row of
 /// SWATCHES, then a row of alternates shown while Option is held. Each
 /// alternate is its color's lighter sibling (hue turned 14°, a little
@@ -489,6 +477,9 @@ pub struct App {
     consent_card: Rect,
     /// When the current foreground minute began (analytics' gauge).
     active_at: Instant,
+    /// When to see again whether the daily update check and usage ping
+    /// are due.
+    daily_at: Instant,
     /// Phones asking to control this machine (device, name, code), and
     /// where their Allow and Deny buttons are.
     asks: Vec<(String, String, String)>,
@@ -655,6 +646,7 @@ impl App {
             consent_hits: Vec::new(),
             consent_card: Rect::default(),
             active_at: Instant::now(),
+            daily_at: Instant::now() + DAILY_CHECK_EVERY,
             asks: Vec::new(),
             ask_hits: Vec::new(),
             toast_shown: None,
@@ -688,6 +680,7 @@ impl App {
         }
         if app.primary {
             crate::update::check(app.ctx.sender.clone(), false);
+            crate::analytics::bump(crate::analytics::Counter::Launches);
             crate::analytics::ping();
             // Unanswered, the permission card comes up; an answer (the
             // Settings switch included) is the only thing that ends it.
@@ -844,6 +837,11 @@ impl App {
             self.active_at = now;
             crate::analytics::bump(crate::analytics::Counter::ActiveMinutes);
         }
+        if self.primary && now >= self.daily_at {
+            self.daily_at = now + DAILY_CHECK_EVERY;
+            crate::update::check(self.ctx.sender.clone(), false);
+            crate::analytics::ping();
+        }
         for pane in &mut self.panes {
             if pane.tick(now) {
                 self.dirty = true;
@@ -934,6 +932,9 @@ impl App {
         times.push(self.type_test.as_ref().map(|(at, _)| *at));
         times.push(self.ctx.toast.as_ref().map(|(_, at)| *at));
         times.push(remote::watched().then_some(self.remote_at));
+        // Idle, the loop sleeps till the next of these: the daily check
+        // has to be one, or a quiet window would never get to it.
+        times.push(self.primary.then_some(self.daily_at));
         times.into_iter().flatten().min()
     }
 
@@ -992,24 +993,4 @@ impl App {
     // ---- events -------------------------------------------------------
 
     // ---- drawing ------------------------------------------------------
-}
-
-#[cfg(test)]
-mod tests {
-    use super::title_and_summary;
-
-    #[test]
-    fn reads_the_title_and_summary_lines() {
-        let (title, summary) = title_and_summary("Temino tab colors\nTuning the tab palette; PR open.\n").unwrap();
-        assert_eq!(title, "Temino tab colors");
-        assert_eq!(summary.as_deref(), Some("Tuning the tab palette; PR open."));
-        // Labels and numbering the model adds anyway come off.
-        let (title, summary) = title_and_summary("1. Title: \"API logs\"\n\n2. Summary: Tailing the deploy").unwrap();
-        assert_eq!(title, "API logs");
-        assert_eq!(summary.as_deref(), Some("Tailing the deploy"));
-        // One line is a title alone; nothing, or a paragraph, isn't one.
-        assert_eq!(title_and_summary("Haiku VM build"), Some(("Haiku VM build".to_owned(), None)));
-        assert_eq!(title_and_summary("  \n"), None);
-        assert_eq!(title_and_summary(&"word ".repeat(20)), None);
-    }
 }
