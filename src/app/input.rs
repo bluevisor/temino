@@ -271,6 +271,10 @@ impl App {
                     self.toggle_tab_list();
                     true
                 }
+                (_, Some('\\')) => {
+                    self.toggle_compact();
+                    true
+                }
                 (_, Some('d')) => {
                     self.split(Axis::Row, false);
                     true

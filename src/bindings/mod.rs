@@ -99,6 +99,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("tab_9", TAB_KEYS[8]),
     ("toggle_tab_list", "cmd+b"),
     ("extend_tab_list", "cmd+shift+b"),
+    ("compact_tab_list", "cmd+\\"),
     ("jump_to_agent", "cmd+`"),
     ("jump_to_newest_agent", "cmd+shift+`"),
     ("recap", "cmd+i"),
@@ -388,6 +389,8 @@ mod tests {
         assert_eq!(c("cmd+backtick"), Some('`'));
         assert_eq!(c("cmd+grave"), Some('`'));
         assert_eq!(c("cmd+comma"), Some(','));
+        // The compact/full tab list's default.
+        assert_eq!(c("cmd+\\"), Some('\\'));
         assert_eq!(c("cmd+-"), Some('-'));
         assert_eq!(c("+"), Some('+'));
         assert_eq!(c("cmd+é"), Some('é'));

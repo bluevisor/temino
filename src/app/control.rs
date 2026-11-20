@@ -89,7 +89,12 @@ impl App {
             let prefix = format!("{no}:{}:", pane.id);
             screens.insert(pane.id, pane.remote_screen(&mut self.ctx, &prefix, &mut lines));
         }
-        // Settings has no terminal to drive, so phones don't see it.
+        // The numbers the sidebar shows, so a phone lists the tabs the same
+        // way: a split tab as a group (when the sidebar shows one), a
+        // number per row. Settings keeps its number, though phones don't
+        // see it: it has no terminal to drive.
+        let rows = self.tab_rows();
+        let number = |row: (usize, Option<u64>)| rows.iter().position(|&r| r == row).map_or(0, |at| at + 1);
         let shown: Vec<usize> = (0..self.tabs.len()).filter(|&index| self.tabs[index].focus != SETTINGS).collect();
         let tabs: Vec<String> = shown
             .into_iter()
@@ -97,13 +102,17 @@ impl App {
                 let tab = &self.tabs[index];
                 let mut leaves = Vec::new();
                 tab.root.leaves(&mut leaves);
+                let lead = leaves.first().map(|&id| (index, Some(id)));
+                let group = lead.is_some_and(|row| rows.contains(&row));
+                let first = number(lead.filter(|_| group).unwrap_or((index, None)));
                 let panes: Vec<String> = leaves
                     .iter()
                     .filter_map(|&id| {
                         let pane = self.panes.iter_mut().find(|p| p.id == id)?;
                         let screen = screens.get(&id).map_or(String::new(), |screen| format!(r#","screen":{screen}"#));
+                        let row = if group { number((index, Some(id))) } else { first };
                         Some(format!(
-                            r#"{{"id":{id},"title":{},"cwd":{},"agent":{}{screen}}}"#,
+                            r#"{{"id":{id},"number":{row},"title":{},"cwd":{},"agent":{}{screen}}}"#,
                             remote::quote(&pane.title()),
                             remote::quote(&pane.session.cwd),
                             agent_name(pane.agent_now),
@@ -111,7 +120,7 @@ impl App {
                     })
                     .collect();
                 format!(
-                    r#"{{"index":{index},"title":{},"color":{},"agent":{},"focus":{},"panes":[{}]}}"#,
+                    r#"{{"index":{index},"number":{first},"group":{group},"title":{},"color":{},"agent":{},"focus":{},"panes":[{}]}}"#,
                     remote::quote(&self.tab_title(index)),
                     tab.color.map_or("null".to_owned(), |c| format!("\"#{:06x}\"", TAB_COLORS[c])),
                     agent_name(agents[index]),

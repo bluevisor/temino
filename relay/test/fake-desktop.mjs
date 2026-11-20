@@ -52,10 +52,16 @@ const shell = {
 };
 const state = () => ({
   type: "state",
+  // Numbered as the Mac's sidebar numbers them: the split tab is a group,
+  // its panes 2 and 3.
   windows: [{ no: 1, active: 0, tabs: [
-    { index: 0, title: "claude", focus: 1, panes: [{ id: 1, title: "Claude Code", agent: "waiting",
+    { index: 0, number: 1, group: false, title: "claude", agent: "waiting", focus: 1, panes: [{ id: 1, number: 1, title: "Claude Code", agent: "waiting",
       screen: { mode: "grid", columns: 50, cursor: [10, 34], lines: lines(claude) } }] },
-    { index: 1, title: "zsh", focus: 2, panes: [{ id: 2, title: "~/portal", screen: shell }] },
+    { index: 1, number: 2, group: true, title: "portal", color: "#c678dd", agent: "running", focus: 2, panes: [
+      { id: 2, number: 2, title: "~/portal", cwd: "/Users/me/portal", screen: shell },
+      { id: 3, number: 3, title: "Claude Code · tests", cwd: "/Users/me/portal", agent: "running", screen: shell },
+    ] },
+    { index: 2, number: 4, group: false, title: "zsh", agent: "done", focus: 4, panes: [{ id: 4, number: 4, title: "~", cwd: "/Users/me", agent: "done", screen: shell }] },
   ] }],
 });
 

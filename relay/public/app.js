@@ -7,6 +7,7 @@
 
 import { Session, generateKeys, hex, b64, fromB64 } from "/noise.js";
 import { MAG_DEFAULT, MAG_HISTORY, aroundCursor, clampLines, lastOutput, magRows, tailStart } from "/mag.js";
+import { esc, tabRows, rowsInOrder, num, cardHtml, groupHtml, stripHtml } from "/rows.js";
 
 const LEVELS = ["pane", "tab", "window", "machine", "user"];
 const query = new URLSearchParams(location.search);
@@ -23,7 +24,6 @@ let denied = false;         // the desktop said no, or disconnected this device
 let keys = null;
 
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const store = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
@@ -346,21 +346,21 @@ function render() {
       $("type").focus();
     };
   } else if (level === "tab") {
-    main.innerHTML = `<div class="grid">${t.panes.map((q) => `
-      <div class="mini" data-pane="${q.id}"><div class="h">${dot(q.agent)}${esc(q.title)}</div>
+    const g = tabRows(w).find((x) => x.tab.index === t.index);
+    main.innerHTML = `<div class="grid">${(g ? g.panes : t.panes).map((q) => `
+      <div class="mini" data-pane="${q.id}"><div class="h">${g && g.group ? num(q.number, q.agent) : dot(q.agent)}${esc(q.title)}</div>
       <div class="m">${screenHtml(q, false)}</div></div>`).join("")}</div>`;
     main.querySelectorAll(".mini .m").forEach((m) => { m.scrollTop = m.scrollHeight; });
     main.querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));
   } else if (level === "window") {
-    main.innerHTML = `<div class="cards">` + w.tabs.map((u) => `
-      <div class="card ${u.index === w.active ? "current" : ""}" data-tab="${u.index}">
-        <span class="swatch" style="background:${/^#[0-9a-f]{6}$/i.test(u.color) ? u.color : "transparent"}"></span>${dot(u.agent)}
-        <div class="t"><div>${u.index + 1}. ${esc(u.title)}</div><div>${u.panes.length} pane${u.panes.length === 1 ? "" : "s"} · ${esc(u.panes[0] && u.panes[0].cwd)}</div></div>
-      </div>`).join("") + `</div><button id="newtab">New Tab</button>`;
-    main.querySelectorAll("main [data-tab]").forEach((el) => el.onclick = () => {
-      const u = tabOf(w, +el.dataset.tab);
-      go("tab", { tab: u.index, pane: u.focus });
-    });
+    main.innerHTML = `<div class="cards">` + tabRows(w).map((g) => g.group ? groupHtml(g, g.tab.index === w.active, g.tab.focus, true)
+      : cardHtml(g, g.tab.index === w.active, `${g.panes.length} pane${g.panes.length === 1 ? "" : "s"} · ${g.panes[0].cwd ?? ""}`, true)).join("")
+      + `</div><button id="newtab">New Tab</button>`;
+    // A tab opens to its panes; a group's row, to that pane.
+    main.querySelector(".cards").onclick = (e) => {
+      const el = e.target.closest("[data-tab]"), u = el && tabOf(w, +el.dataset.tab);
+      if (u) go("pane" in el.dataset ? "pane" : "tab", { tab: u.index, pane: "pane" in el.dataset ? +el.dataset.pane : u.focus });
+    };
     $("newtab").onclick = () => send({ type: "new_tab", window: w.no });
   } else {
     main.innerHTML = `<div class="cards">` + windows.map((v) => `
@@ -425,19 +425,14 @@ function renderUser() {
   };
 }
 
-// The window's tabs, along the top on a phone: tap to switch, × closes
-// the current one, + opens one. Swiping the screen sideways switches too.
+// The window's tabs, along the top on a phone, numbered as on the Mac:
+// tap to switch (a group's pane, to that pane), × closes the current tab,
+// + opens one. Swiping the screen sideways goes to the next row too.
 function strip(w) {
   const el = $("tabs");
   el.hidden = level !== "pane" && level !== "tab";
   if (el.hidden) return;
-  const live = w.tabs.filter((u) => u.panes.length);
-  el.innerHTML = live.map((u) => `
-    <div class="tab ${u.index === at.tab ? "current" : ""}" data-tab="${u.index}">
-      ${/^#[0-9a-f]{6}$/i.test(u.color) ? `<span class="bar" style="background:${u.color}"></span>` : ""}
-      <span class="n">${u.index + 1}</span>${dot(u.agent)}<span class="tt">${esc(u.title)}</span>
-      ${u.index === at.tab && live.length > 1 ? `<span class="x" data-close="${u.index}">×</span>` : ""}
-    </div>`).join("") + `<div class="tab add" id="addtab">${choosing ? "×" : "+"}</div>`
+  el.innerHTML = stripHtml(tabRows(w), at) + `<div class="tab add" id="addtab">${choosing ? "×" : "+"}</div>`
     + (choosing ? (w.shells || []).map((name, i) => `<div class="tab shell" data-shell="${esc(name)}">${esc(name)}${i === 0 ? ` <span class="n">usual</span>` : ""}</div>`).join("") : "");
   el.onclick = (e) => {
     const close = e.target.closest("[data-close]");
@@ -451,13 +446,13 @@ function strip(w) {
       return render();
     }
     const t = e.target.closest("[data-tab]");
-    if (t) switchTab(w, +t.dataset.tab);
+    if (t) switchTab(w, +t.dataset.tab, "pane" in t.dataset ? +t.dataset.pane : undefined);
   };
-  const cur = el.querySelector(".current");
+  const cur = el.querySelector(".tab.current");
   // Center the current tab when it changes, not on every render: renders
   // arrive with every screen update, and re-centering each time snaps
   // the strip back whenever it's been scrolled sideways by hand.
-  const centered = `${at.window}:${at.tab}`;
+  const centered = `${at.window}:${at.tab}:${at.pane}`;
   if (cur && stripCentered !== centered) { stripCentered = centered; cur.scrollIntoView({ inline: "center", block: "nearest" }); }
 }
 
@@ -474,14 +469,16 @@ function newTab(w, shell) {
   setTimeout(() => { if (follow || starting) { follow = 0; flushHeld(); } }, 6000);
 }
 
-function switchTab(w, index) {
+// Tab `index`, or with `pane` that pane of it: it opens, and comes to the
+// front on the Mac too (go sends the pane's focus, which brings its tab).
+function switchTab(w, index, pane) {
   const u = tabOf(w, index);
   if (!u) return;
-  send({ type: "tab", window: w.no, index });
-  go(level === "tab" ? "tab" : "pane", { tab: u.index, pane: u.focus });
+  if (pane === undefined) send({ type: "tab", window: w.no, index });
+  go(pane === undefined && level === "tab" ? "tab" : "pane", { tab: u.index, pane: pane ?? u.focus });
 }
 
-// Swipe sideways across the pane: the next or previous tab.
+// Swipe sideways across the pane: the next or previous row of the list.
 let swipe = null;
 $("main").addEventListener("touchstart", (e) => {
   const t = e.touches[0];
@@ -496,10 +493,11 @@ $("main").addEventListener("touchend", (e) => {
   if (!quick || Math.abs(dx) < 70 || Math.abs(dy) > Math.abs(dx) / 2) return;
   const scroller = e.target.closest(".block, #screen.full");
   if (scroller && scroller.scrollWidth > scroller.clientWidth + 2) return;
-  const w = win(at.window), live = w.tabs.filter((u) => u.panes.length);
-  const i = live.findIndex((u) => u.index === at.tab);
-  const next = live[i + (dx < 0 ? 1 : -1)];
-  if (next) switchTab(w, next.index);
+  const rows = rowsInOrder(win(at.window));
+  let i = rows.findIndex((r) => r.tab === at.tab && r.pane === at.pane);
+  if (i < 0) i = rows.findIndex((r) => r.tab === at.tab);
+  const next = i < 0 ? null : rows[i + (dx < 0 ? 1 : -1)];
+  if (next) switchTab(win(at.window), next.tab, next.pane);
 }, { passive: true });
 
 // ---- notifications while the page is closed (Web Push)
@@ -541,18 +539,15 @@ const fromB64url = (t) => Uint8Array.from(atob(t.replace(/-/g, "+").replace(/_/g
 const visible = () => relay && relay.readyState === 1 && relay.send(JSON.stringify({ type: "visible", on: !document.hidden }));
 document.addEventListener("visibilitychange", visible);
 
+// Wide screens: the window's tabs beside the pane, as the Mac's sidebar
+// lists them.
 function side(w) {
-  $("side").innerHTML = w.tabs.filter((u) => u.panes.length).map((u) => `
-    <div class="card ${u.index === at.tab ? "current" : ""}" data-tab="${u.index}">${dot(u.agent)}
-      <div class="t"><div>${u.index + 1}. ${esc(u.title)}</div></div></div>` +
-    (u.index === at.tab && u.panes.length > 1 ? u.panes.map((q) => `
-    <div class="card pane ${q.id === at.pane ? "current" : ""}" data-pane="${q.id}">${dot(q.agent)}
-      <div class="t"><div>${esc(q.title)}</div></div></div>`).join("") : "")).join("");
+  $("side").innerHTML = tabRows(w).map((g) => g.group ? groupHtml(g, g.tab.index === at.tab, at.pane, false)
+    : cardHtml(g, g.tab.index === at.tab, "", false)).join("");
   $("side").insertAdjacentHTML("beforeend", (w.shells || []).length < 2 ? `<button class="add" data-shell="">+ New Tab</button>`
     : (w.shells || []).map((name, i) => `<button class="add" data-shell="${esc(name)}">+ New ${esc(name)} Tab</button>`).join(""));
   $("side").querySelectorAll("[data-shell]").forEach((b) => b.onclick = () => newTab(w, b.dataset.shell || undefined));
-  $("side").querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => switchTab(w, +el.dataset.tab));
-  $("side").querySelectorAll("[data-pane]").forEach((el) => el.onclick = () => go("pane", { pane: +el.dataset.pane }));
+  $("side").querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => switchTab(w, +el.dataset.tab, "pane" in el.dataset ? +el.dataset.pane : undefined));
 }
 
 // ---- drawing a pane the way the Mac does
