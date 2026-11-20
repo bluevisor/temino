@@ -199,8 +199,22 @@ impl App {
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
                 // Only the current tab grows its lines; the rest stay one row.
-                let lines =
+                let mut lines =
                     if extended && index == self.active { self.pane_lines(index, &leaves, now) } else { Vec::new() };
+                // A split tab in the full sidebar: a row per pane, each
+                // with its line.
+                let group = self.strip == TabStrip::Left && !self.compact && leaves.len() > 1;
+                let rows: Vec<PaneRow> = if group {
+                    leaves
+                        .iter()
+                        .map(|&id| {
+                            let line = lines.iter().position(|line| line.id == id).map(|at| lines.remove(at));
+                            self.pane_row(id, line, now)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let done_for = self
                     .panes
                     .iter()
@@ -213,6 +227,7 @@ impl App {
                     .unwrap_or(f32::MAX);
                 TabView {
                     lines,
+                    rows,
                     agent: agents[index],
                     done_for,
                     title: self.tab_title(index),
@@ -237,6 +252,22 @@ impl App {
             TabStrip::Left => self.draw_tab_sidebar(&tabs),
             TabStrip::Top => self.draw_tab_strip(&tabs),
         }
+    }
+    /// Pane `id`'s row in its tab's group: its name and its agent.
+    pub(super) fn pane_row(&self, id: u64, line: Option<PaneLine>, now: Instant) -> PaneRow {
+        let pane = self.panes.iter().find(|pane| pane.id == id);
+        let title = if id == SETTINGS {
+            "Settings".to_owned()
+        } else if let Some(viewer) = self.viewers.iter().find(|viewer| viewer.id == id) {
+            viewer.title.clone()
+        } else {
+            pane.map(Pane::row_title).unwrap_or_default()
+        };
+        let done_for = match pane.and_then(|pane| pane.needs_since) {
+            Some((AgentState::Done, at)) => now.duration_since(at).as_secs_f32(),
+            _ => f32::MAX,
+        };
+        PaneRow { id, title, agent: pane.and_then(|pane| pane.agent_now), done_for, line }
     }
     /// What each of `leaves` is doing, a line apiece: an agent's state, turn
     /// and last prompt; a shell's running command, or its folder.
@@ -286,20 +317,36 @@ impl App {
     /// One tab's row: number, title (or the rename field), an optional
     /// badge, and × while hovered (its menu is a right-click); records the
     /// hit areas.
-    pub(super) fn draw_tab(&mut self, index: usize, tab: &TabView, rect: Rect, badge: Option<String>) {
+    /// As a group's `header`, it's the name alone, small, over the card.
+    pub(super) fn draw_tab(&mut self, index: usize, tab: &TabView, rect: Rect, badge: Option<String>, header: bool) {
         let current = index == self.active;
         let hovered = self.hover_tab == Some(index);
         let left = self.strip == TabStrip::Left;
-        let (font, number) = if left { (SIDEBAR_FONT, 22.0) } else { (12.0, 18.0) };
+        let (font, number) = if header {
+            (11.5, 0.0)
+        } else if left {
+            (SIDEBAR_FONT, 22.0)
+        } else {
+            (12.0, 18.0)
+        };
         let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
         let Self { scene, ctx, tab_hits, close_hits, rename_field, .. } = self;
         let Ctx { text, theme, .. } = ctx;
         let ascent = text.ui_ascent(font);
         let baseline = (rect.y + (rect.h + ascent * 0.72) / 2.0).round();
-        let mut x = rect.x + if left { 10.0 } else { 8.0 };
-        let center = (x + number / 2.0, rect.y + rect.h / 2.0);
-        draw_tab_number(scene, text, theme, index, center, number, tab.agent, tab.done_for, t);
-        x += number + 8.0;
+        let mut x = rect.x
+            + if header {
+                6.0
+            } else if left {
+                10.0
+            } else {
+                8.0
+            };
+        if !header {
+            let center = (x + number / 2.0, rect.y + rect.h / 2.0);
+            draw_tab_number(scene, text, theme, index, center, number, tab.agent, tab.done_for, t);
+            x += number + 8.0;
+        }
         let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
         // Under 48px a top-strip tab can't hold both its number and the
         // ×: the two overlap, the × spilling onto the tab before it at
@@ -316,8 +363,9 @@ impl App {
             text.draw_text(scene, &label, badge.x + 5.0, badge.y + 12.0, UI, 10.0, theme.text_dim);
             right = badge.x - 6.0;
         }
-        // In the sidebar the mark goes under the title (draw_tab_meta).
-        if let Some(mark) = tab.mark.filter(|_| !left) {
+        // In the sidebar the mark goes under the title (draw_tab_meta),
+        // or at the end of a group's header.
+        if let Some(mark) = tab.mark.filter(|_| !left || header) {
             let ink = mark.color(theme);
             let w = text.measure(mark.label(), UI_BOLD, 10.0) + 12.0;
             let chip = Rect::new(right - w, rect.y + (rect.h - 16.0) / 2.0, w, 16.0);
@@ -347,9 +395,9 @@ impl App {
             scene.pop_clip();
         } else {
             scene.push_clip(Rect::new(x, rect.y, (right - x).max(0.0), rect.h));
-            let color = if tab.mark.is_some_and(Mark::aside) {
+            let color = if tab.mark.is_some_and(Mark::aside) || (header && !current) {
                 theme.text_faint
-            } else if current {
+            } else if current && !header {
                 theme.text
             } else {
                 theme.text_dim
@@ -409,7 +457,7 @@ impl App {
                 hovered,
             );
             let badge = (tab.panes > 1).then(|| format!("{}", tab.panes));
-            self.draw_tab(index, tab, rect, badge);
+            self.draw_tab(index, tab, rect, badge, false);
             // Hits go by where it belongs, so a drag doesn't chase it.
             if let Some(hit) = self.tab_hits.last_mut() {
                 hit.0 = place;
@@ -479,6 +527,16 @@ impl App {
                 y += SIDEBAR_ROW + 4.0;
                 continue;
             }
+            if !tab.rows.is_empty() {
+                let group = Rect::new(rect.x, rect.y, rect.w, group_height(tab));
+                let hovered = self.hover_tab == Some(index) && dragged.is_none();
+                self.draw_tab_group(index, tab, group, dragged == Some(index), hovered);
+                if let Some(hit) = self.tab_hits.last_mut() {
+                    hit.0 = Rect::new(place.x, place.y, group.w, group.h);
+                }
+                y += group.h + 4.0;
+                continue;
+            }
             // The pane count (where the pane lines don't show the panes)
             // and the mark go on a line under the title; the title moves
             // up to make room.
@@ -497,7 +555,7 @@ impl App {
                 dragged == Some(index),
                 self.hover_tab == Some(index) && dragged.is_none(),
             );
-            self.draw_tab(index, tab, rect, None);
+            self.draw_tab(index, tab, rect, None, false);
             if let Some(hit) = self.tab_hits.last_mut() {
                 hit.0 = Rect::new(place.x, place.y, row.w, row.h);
             }
@@ -632,6 +690,56 @@ impl App {
             pane_hits.push((rect, index, line.id));
         }
     }
+    /// A split tab in the sidebar: its name on a header line, then a card
+    /// in its color with a row per pane; the focused pane's row of the
+    /// current tab is lit. Rows are numbered by pane. A row's click goes to
+    /// that pane.
+    pub(super) fn draw_tab_group(&mut self, index: usize, tab: &TabView, area: Rect, dragged: bool, hovered: bool) {
+        let current = index == self.active;
+        let head = Rect::new(area.x, area.y, area.w, GROUP_HEAD);
+        let card = Rect::new(area.x, head.bottom(), area.w, (area.bottom() - head.bottom()).max(0.0));
+        draw_tab_background(&mut self.scene, &self.ctx.theme, card, tab.color, current, dragged, hovered);
+        self.draw_tab(index, tab, head, None, true);
+        let focus = self.tabs.get(index).map(|tab| tab.focus);
+        let idle = matches!(self.pointer, Pointer::Idle) && self.tab_menu.is_none();
+        let (mx, my) = self.mouse;
+        let t = self.ctx.blink_epoch.elapsed().as_secs_f32();
+        let Self { scene, ctx, pane_hits, .. } = self;
+        let Ctx { text, theme, .. } = ctx;
+        let mut y = card.y + 2.0;
+        for (pane, row) in tab.rows.iter().enumerate() {
+            let rect = Rect::new(card.x, y, card.w, group_row_height(row));
+            y = rect.bottom();
+            // Clear of the card's rail.
+            let fill = Rect::new(rect.x + 8.0, rect.y + 1.0, rect.w - 10.0, rect.h - 2.0);
+            let lit = current && Some(row.id) == focus;
+            if lit {
+                let ink = tab.color.unwrap_or(theme.accent);
+                scene.quad(Quad::new(fill, ink.alpha(0.10)).radius(5.0).border(1.0, ink.alpha(0.35)));
+            } else if idle && rect.contains(mx, my) {
+                scene.quad(Quad::new(fill, theme.text.alpha(0.04)).radius(5.0));
+            }
+            let title_h = if row.line.is_some() { GROUP_ROW - 10.0 } else { GROUP_ROW };
+            let center = (rect.x + 21.0, rect.y + title_h / 2.0);
+            // Numbered by pane within the tab, not by tab.
+            draw_tab_number(scene, text, theme, pane, center, 22.0, row.agent, row.done_for, t);
+            let x = rect.x + 40.0;
+            let room = (rect.right() - 10.0 - x).max(0.0);
+            let baseline = (rect.y + (title_h + text.ui_ascent(SIDEBAR_FONT) * 0.72) / 2.0).round();
+            let ink = if lit { theme.text } else { theme.text_dim };
+            let shown = text.elide(&row.title, UI, SIDEBAR_FONT, room);
+            text.draw_text(scene, &shown, x, baseline, UI, SIDEBAR_FONT, ink);
+            if let Some(line) = &row.line {
+                let font = 11.5;
+                let cy = rect.y + title_h - 4.0 + SIDEBAR_LINE / 2.0;
+                let baseline = (cy + text.ui_ascent(font) * 0.36).round();
+                let ink = if line.failed { theme.error.alpha(0.85) } else { theme.text_faint };
+                let shown = text.elide(&line.text, UI, font, room);
+                text.draw_text(scene, &shown, x, baseline, UI, font, ink);
+            }
+            pane_hits.push((rect, index, row.id));
+        }
+    }
     /// A compact sidebar row: the tab's number on its background.
     pub(super) fn draw_compact_tab(&mut self, index: usize, tab: &TabView, rect: Rect, dragged: bool) {
         let Self { scene, ctx, tab_hits, .. } = self;
@@ -663,7 +771,8 @@ impl App {
                 None => tab.title.clone(),
             }
         } else {
-            if tab.path.is_empty() || tab.path == tab.title || tab.editing.is_some() {
+            // A group's rows already say what each pane is.
+            if tab.path.is_empty() || tab.path == tab.title || tab.editing.is_some() || !tab.rows.is_empty() {
                 return;
             }
             let at = self.hover_at + TAB_HINT_DELAY;
@@ -700,6 +809,9 @@ fn sidebar_row_height(tab: &TabView, compact: bool) -> f32 {
     if compact {
         return SIDEBAR_ROW;
     }
+    if !tab.rows.is_empty() {
+        return group_height(tab);
+    }
     let meta = if (tab.panes > 1 && tab.lines.is_empty()) || tab.mark.is_some() { SIDEBAR_META } else { 0.0 };
     let under = if meta > 0.0 { meta - 2.0 } else { 0.0 };
     let extra = if tab.lines.is_empty() { 0.0 } else { tab.lines.len() as f32 * SIDEBAR_LINE + 6.0 };
@@ -710,4 +822,14 @@ fn sidebar_row_height(tab: &TabView, compact: bool) -> f32 {
 fn clipped(rect: Rect, clip: Rect) -> Rect {
     let (x, y) = (rect.x.max(clip.x), rect.y.max(clip.y));
     Rect::new(x, y, (rect.right().min(clip.right()) - x).max(0.0), (rect.bottom().min(clip.bottom()) - y).max(0.0))
+}
+
+/// A split tab's group: its header, and a card of its pane rows.
+fn group_height(tab: &TabView) -> f32 {
+    GROUP_HEAD + 4.0 + tab.rows.iter().map(group_row_height).sum::<f32>()
+}
+
+/// A pane's row in a group, taller with its line under the name.
+fn group_row_height(row: &PaneRow) -> f32 {
+    GROUP_ROW + if row.line.is_some() { 10.0 } else { 0.0 }
 }

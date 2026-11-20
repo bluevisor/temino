@@ -76,6 +76,10 @@ const AGENT_DONE: u32 = 0x8ccf7e;
 const AGENT_HEADER: f32 = 26.0;
 /// The extended sidebar's line per pane, under each tab's title.
 const SIDEBAR_LINE: f32 = 18.0;
+/// A split tab in the sidebar is a group: its name on a header line, then
+/// a card with a row per pane.
+const GROUP_HEAD: f32 = 22.0;
+const GROUP_ROW: f32 = 34.0;
 /// A sidebar row's line under its title: the pane count and the mark.
 const SIDEBAR_META: f32 = 18.0;
 /// How long the pointer rests on a tab before its folder shows beside it.
@@ -310,6 +314,20 @@ struct TabView {
     /// Its focused pane's folder, in full.
     path: String,
     mark: Option<Mark>,
+    /// A split tab's panes, a row apiece, in the sidebar; empty for a
+    /// one-pane tab and elsewhere.
+    rows: Vec<PaneRow>,
+}
+
+/// One pane's row in a split tab's group in the sidebar.
+struct PaneRow {
+    id: u64,
+    title: String,
+    agent: Option<AgentState>,
+    /// How long ago its unseen finish came in, for the green to pop.
+    done_for: f32,
+    /// In the extended sidebar, the current tab's: what it's doing.
+    line: Option<PaneLine>,
 }
 
 /// One pane's line in the extended sidebar.
