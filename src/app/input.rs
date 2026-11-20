@@ -428,6 +428,12 @@ impl App {
             self.pointer = Pointer::Sidebar;
             return;
         }
+        if let Some((_, id, url)) = self.server_hits.iter().find(|(r, _, _)| r.contains(x, y)).cloned() {
+            // The link to a local server a pane runs: open it beside it.
+            self.open_link(id, url);
+            self.dirty = true;
+            return;
+        }
         if let Some(&(_, id)) = self.header_hits.iter().find(|(r, _)| r.contains(x, y)) {
             // An agent's header, or its extension: open or close it, and go
             // to that pane.
@@ -668,6 +674,15 @@ impl App {
         if let Some(divider) = self.dividers.iter().find(|d| d.grab_area().contains(x, y)) {
             let cursor = if divider.axis == Axis::Row { Cursor::ResizeColumn } else { Cursor::ResizeRow };
             self.set_cursor(cursor);
+            return;
+        }
+        let server = self.server_hits.iter().find(|(r, _, _)| r.contains(x, y)).map(|&(_, id, _)| id);
+        if server != self.server_hover {
+            self.server_hover = server;
+            self.dirty = true;
+        }
+        if server.is_some() {
+            self.set_cursor(Cursor::Link);
             return;
         }
         let header = self.header_hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, id)| id);

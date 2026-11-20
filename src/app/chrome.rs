@@ -552,7 +552,8 @@ pub(super) fn draw_triangle(scene: &mut Scene, cx: f32, cy: f32, dir: f32, color
     }
 }
 
-/// The bar over a listed program's pane: its name, and how long it has run.
+/// The bar over a listed program's pane: its name, how long it has run,
+/// and the local server it serves. Returns where that server's link is.
 pub(super) fn draw_program_header(
     scene: &mut Scene,
     text: &mut TextSystem,
@@ -561,7 +562,8 @@ pub(super) fn draw_program_header(
     name: &str,
     uptime: Duration,
     focus: Lit,
-) {
+    server: Option<(&str, bool)>,
+) -> Option<Rect> {
     scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focus));
     draw_header_edge(scene, theme, bar, bar.bottom(), focus, theme.accent);
     let font = 12.0;
@@ -569,10 +571,44 @@ pub(super) fn draw_program_header(
     let cy = bar.y + bar.h / 2.0;
     let x = bar.x + 12.0;
     scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), theme.text_faint).radius(4.0));
-    text.draw_text(scene, name, x + 16.0, baseline, UI_BOLD, font, theme.text);
     let uptime = format!("up {}", ui::short_duration(uptime));
     let w = text.measure(&uptime, UI, 11.0);
-    text.draw_text(scene, &uptime, bar.right() - 12.0 - w, baseline, UI, 11.0, theme.text_faint);
+    let mut right = bar.right() - 12.0 - w;
+    text.draw_text(scene, &uptime, right, baseline, UI, 11.0, theme.text_faint);
+    let link = server
+        .and_then(|(label, hover)| draw_server_link(scene, text, theme, bar, label, hover, x + 120.0, right - 12.0));
+    if let Some(link) = link {
+        right = link.x;
+    }
+    let shown = text.elide(name, UI_BOLD, font, (right - 12.0 - x - 16.0).max(0.0));
+    text.draw_text(scene, &shown, x + 16.0, baseline, UI_BOLD, font, theme.text);
+    link
+}
+
+/// A link to the local server a pane runs, `label` its host and port, as
+/// a pill ending at `right`, lit under the pointer: where it went, or
+/// `None` when it wouldn't fit right of `left`.
+fn draw_server_link(
+    scene: &mut Scene,
+    text: &mut TextSystem,
+    theme: &Theme,
+    bar: Rect,
+    label: &str,
+    hover: bool,
+    left: f32,
+    right: f32,
+) -> Option<Rect> {
+    let line = format!("↗ {label}");
+    let w = text.measure(&line, UI, 11.0) + 14.0;
+    if right - w < left {
+        return None;
+    }
+    let cy = bar.y + bar.h / 2.0;
+    let pill = Rect::new(right - w, cy - 9.0, w, 18.0);
+    scene.quad(Quad::new(pill, theme.accent.alpha(if hover { 0.24 } else { 0.12 })).radius(9.0));
+    let baseline = (cy + text.ui_ascent(11.0) * 0.36).round();
+    text.draw_text(scene, &line, pill.x + 7.0, baseline, UI, 11.0, theme.accent);
+    Some(pill)
 }
 
 /// What the bar over a plain terminal says.
@@ -589,7 +625,8 @@ pub(super) struct ShellHeader {
 
 /// The bar over a plain terminal: a dot (lit while a command
 /// runs, red after one failed), the folder, the command running, then the
-/// last command, how it ended and when, and the git branch.
+/// last command, how it ended and when, and the git branch; at the right,
+/// a link to the local server the command serves. Returns where that is.
 pub(super) fn draw_shell_header(
     scene: &mut Scene,
     text: &mut TextSystem,
@@ -597,7 +634,8 @@ pub(super) fn draw_shell_header(
     bar: Rect,
     shell: &ShellHeader,
     focus: Lit,
-) {
+    server: Option<(&str, bool)>,
+) -> Option<Rect> {
     let ShellHeader { busy, failed, .. } = *shell;
     scene.fill(bar, header_ground(theme, theme.panel(SURFACE_LIFT), focus));
     draw_header_edge(scene, theme, bar, bar.bottom(), focus, theme.accent);
@@ -614,7 +652,12 @@ pub(super) fn draw_shell_header(
     };
     scene.quad(Quad::new(Rect::new(x, cy - 4.0, 8.0, 8.0), dot).radius(4.0));
     x += 16.0;
-    let right = bar.right() - 12.0;
+    let mut right = bar.right() - 12.0;
+    let link =
+        server.and_then(|(label, hover)| draw_server_link(scene, text, theme, bar, label, hover, x + 80.0, right));
+    if let Some(link) = link {
+        right = link.x - 12.0;
+    }
     // The folder keeps at most half the bar, so what's going on still shows.
     let shown = text.elide(&shell.path, UI_BOLD, font, ((right - x) / 2.0).max(0.0));
     text.draw_text(scene, &shown, x, baseline, UI_BOLD, font, theme.text);
@@ -629,4 +672,5 @@ pub(super) fn draw_shell_header(
         text.draw_text(scene, &shown, x, baseline, UI, font, ink);
         x += text.measure(&shown, UI, font) + 14.0;
     }
+    link
 }
