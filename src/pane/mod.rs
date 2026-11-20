@@ -29,9 +29,12 @@ use crate::Msg;
 mod attention;
 mod draw;
 mod mouse;
+mod server;
 mod typing;
+
 use draw::*;
 use mouse::*;
+pub use server::label as server_label;
 
 pub const PAD_X: f32 = 14.0;
 const ALT_PAD_Y: f32 = 8.0;
@@ -255,6 +258,8 @@ pub struct Pane {
     pub needs_since: Option<(AgentState, Instant)>,
     /// The listed program running here this frame, and since when.
     pub program_now: Option<(String, Instant)>,
+    /// The local server the running command serves, as far as it's known.
+    server: Option<server::ServerScan>,
     /// Claude Code's own account of the agent, read in the background.
     watcher: Option<agent::Watcher>,
     /// What's been typed to the agent since the last Enter, and the last
@@ -384,6 +389,7 @@ impl Pane {
             header_open: false,
             header_reach: 0.0,
             program_now: None,
+            server: None,
             agent_now: None,
             needs_since: None,
             git_changes: None,

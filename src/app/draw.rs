@@ -89,6 +89,7 @@ impl App {
     /// pane's is lit. An agent's, opened, pushes its terminal down.
     pub(super) fn draw_agent_headers(&mut self) {
         self.header_hits.clear();
+        self.server_hits.clear();
         if self.tabs.is_empty() {
             return;
         }
@@ -104,6 +105,7 @@ impl App {
             let pane = &mut self.panes[index];
             let info = pane.agent_info(now);
             let program = pane.program_now.clone();
+            let server = if info.is_none() { pane.server_link(now) } else { None };
             let shell = (info.is_none() && program.is_none()).then(|| {
                 pane.refresh_git(&sender, now);
                 let (busy, running) = pane.activity();
@@ -122,7 +124,9 @@ impl App {
                 (true, true) => Lit::Soft,
                 (true, false) => Lit::Full,
             };
-            let Self { scene, ctx, pane_hits, header_hits, panes, .. } = self;
+            let label = server.as_deref().map(crate::pane::server_label);
+            let link = label.as_deref().map(|label| (label, self.server_hover == Some(id)));
+            let Self { scene, ctx, pane_hits, header_hits, server_hits, panes, .. } = self;
             let Ctx { text, theme, .. } = ctx;
             let reach = match (info, program, shell) {
                 (Some(info), _, _) => {
@@ -132,11 +136,14 @@ impl App {
                     reach
                 }
                 (None, Some((name, started)), _) => {
-                    draw_program_header(scene, text, theme, bar, &name, now.duration_since(started), focused);
+                    let uptime = now.duration_since(started);
+                    let hit = draw_program_header(scene, text, theme, bar, &name, uptime, focused, link);
+                    server_hits.extend(hit.zip(server.clone()).map(|(rect, url)| (rect, id, url)));
                     0.0
                 }
                 (None, None, Some(shell)) => {
-                    draw_shell_header(scene, text, theme, bar, &shell, focused);
+                    let hit = draw_shell_header(scene, text, theme, bar, &shell, focused, link);
+                    server_hits.extend(hit.zip(server.clone()).map(|(rect, url)| (rect, id, url)));
                     0.0
                 }
                 (None, None, None) => 0.0,

@@ -414,6 +414,10 @@ pub struct App {
     /// opens or closes it. And the one under the pointer.
     header_hits: Vec<(Rect, u64)>,
     header_hover: Option<u64>,
+    /// Each link in a pane's header to the local server it runs: where,
+    /// which pane, the address. And the pane whose link is under the pointer.
+    server_hits: Vec<(Rect, u64, String)>,
+    server_hover: Option<u64>,
     menu_hits: Vec<(Rect, MenuAction)>,
     menu_rect: Rect,
     dividers: Vec<Divider>,
@@ -611,6 +615,8 @@ impl App {
             pane_hits: Vec::new(),
             header_hits: Vec::new(),
             header_hover: None,
+            server_hits: Vec::new(),
+            server_hover: None,
             menu_hits: Vec::new(),
             menu_rect: Rect::default(),
             dividers: Vec::new(),
