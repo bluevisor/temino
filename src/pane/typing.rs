@@ -498,10 +498,16 @@ impl Pane {
             .rev()
             .collect();
         let prompt = ask::prompt(&request, &ctx.shell, &self.session.cwd, &recent);
+        // This pane's conversation so far, as its blocks still show it.
+        let blocks = &self.session.blocks;
+        self.chat.retain(|(id, ..)| blocks.iter().any(|block| block.id == *id));
+        let turns: Vec<(String, String)> =
+            self.chat.iter().map(|(_, asked, said)| (asked.clone(), said.clone())).collect();
+        let history = ask::recent_turns(&turns).to_vec();
         let reply = Arc::new(Mutex::new(None));
         let theirs = reply.clone();
         let _ = std::thread::Builder::new().name("ask".into()).spawn(move || {
-            *theirs.locked() = Some(ask::run(&request, &prompt));
+            *theirs.locked() = Some(ask::run(&request, &prompt, &history));
         });
         self.asking = Some((id, reply));
     }
@@ -515,6 +521,12 @@ impl Pane {
         // Asked after the reply: the call is what finds a server's model.
         if let Some(block) = self.session.blocks.iter_mut().find(|block| block.id == id) {
             block.source = Some(llm::source());
+            // A reply joins the pane's conversation; a failure doesn't.
+            match &reply {
+                Ok(Reply::Answer(answer)) if answer.is_empty() => {}
+                Ok(said) => self.chat.push((id, block.command.clone(), ask::remembered(said))),
+                Err(_) => {}
+            }
         }
         match reply {
             Ok(Reply::Command(command)) => {
@@ -602,6 +614,8 @@ impl Pane {
     }
     pub(super) fn clear_blocks(&mut self) {
         self.session.clear();
+        // A clean pane starts a new conversation.
+        self.chat.clear();
         self.selected = None;
         self.selection = None;
         self.scroll = 0.0;

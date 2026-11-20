@@ -192,30 +192,44 @@ const THINKING_ROOM: u32 = 2000;
 /// `max_tokens` long at most. A model that thinks first is asked again,
 /// once, with room for it.
 pub fn complete(system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
+    chat(system, &[], prompt, max_tokens)
+}
+
+/// `complete`, with the conversation so far before `prompt`: earlier
+/// (request, reply) turns, oldest first.
+pub fn chat(system: &str, history: &[(String, String)], prompt: &str, max_tokens: u32) -> Result<String, String> {
     let (base, model) = server()?;
     let thinks = THINKERS.locked().contains(&model);
     let room = if thinks { THINKING_ROOM } else { 0 };
-    if let Some(text) = ask(&base, &model, system, prompt, max_tokens + room)? {
+    let messages = Messages { system, history, prompt };
+    if let Some(text) = ask(&base, &model, &messages, max_tokens + room)? {
         return Ok(text);
     }
     if !thinks {
         THINKERS.locked().push(model.clone());
-        if let Some(text) = ask(&base, &model, system, prompt, max_tokens + THINKING_ROOM)? {
+        if let Some(text) = ask(&base, &model, &messages, max_tokens + THINKING_ROOM)? {
             return Ok(text);
         }
     }
     Err("the model gave no answer".to_owned())
 }
 
+/// What a request says: the instructions, the turns before, the new one.
+struct Messages<'a> {
+    system: &'a str,
+    history: &'a [(String, String)],
+    prompt: &'a str,
+}
+
 /// One request; None when the model answered nothing.
-fn ask(base: &str, model: &str, system: &str, prompt: &str, max_tokens: u32) -> Result<Option<String>, String> {
+fn ask(base: &str, model: &str, messages: &Messages, max_tokens: u32) -> Result<Option<String>, String> {
     let url = format!("{base}/chat/completions");
     let switch = no_thinking(base);
-    let sent = curl(&url, Some(&body(model, system, prompt, max_tokens, switch)), 60);
+    let sent = curl(&url, Some(&body(model, messages, max_tokens, switch)), 60);
     // A model that can't stop thinking refuses the switch: ask it plainly.
     let sent = match sent {
         Err(error) if !switch.is_empty() && refused(&error) => {
-            curl(&url, Some(&body(model, system, prompt, max_tokens, "")), 60)
+            curl(&url, Some(&body(model, messages, max_tokens, "")), 60)
         }
         sent => sent,
     };
@@ -239,12 +253,18 @@ fn refused(error: &str) -> bool {
 }
 
 /// A chat completion request; `switch` is one of the thinking switches, or empty.
-fn body(model: &str, system: &str, prompt: &str, max_tokens: u32, switch: &str) -> String {
+fn body(model: &str, messages: &Messages, max_tokens: u32, switch: &str) -> String {
+    let message = |role: &str, content: &str| format!(r#"{{"role":"{role}","content":{}}}"#, quote(content));
+    let mut all = vec![message("system", messages.system)];
+    for (request, reply) in messages.history {
+        all.push(message("user", request));
+        all.push(message("assistant", reply));
+    }
+    all.push(message("user", messages.prompt));
     format!(
-        r#"{{"model":{},"temperature":0.2,{switch}"max_tokens":{max_tokens},"messages":[{{"role":"system","content":{}}},{{"role":"user","content":{}}}]}}"#,
+        r#"{{"model":{},"temperature":0.2,{switch}"max_tokens":{max_tokens},"messages":[{}]}}"#,
         quote(model),
-        quote(system),
-        quote(prompt),
+        all.join(","),
     )
 }
 
@@ -353,7 +373,8 @@ mod tests {
         assert_eq!(no_thinking("https://api.openai.com/v1"), "");
         assert_eq!(no_thinking("http://localhost:8080/v1"), TEMPLATE_THINKING_OFF);
         for switch in [REASONING_OFF, TEMPLATE_THINKING_OFF, ""] {
-            let body = json::parse(&body("m", "be \"brief\"", "hi\nthere", 400, switch)).expect("valid JSON");
+            let messages = Messages { system: "be \"brief\"", history: &[], prompt: "hi\nthere" };
+            let body = json::parse(&body("m", &messages, 400, switch)).expect("valid JSON");
             assert_eq!(body.str_at("model"), Some("m"));
             assert_eq!(body.get("messages").unwrap().array()[1].str_at("content"), Some("hi\nthere"));
             assert_eq!(body.get("reasoning").is_some(), switch == REASONING_OFF);
@@ -361,6 +382,24 @@ mod tests {
         assert!(refused("curl: (22) The requested URL returned error: 400"));
         assert!(!refused("curl: (22) The requested URL returned error: 401"));
         assert!(!refused("curl: (28) Operation timed out after 60001 milliseconds"));
+    }
+
+    #[test]
+    fn earlier_turns_go_between_the_instructions_and_the_new_request() {
+        let history = [("what's in here?".to_owned(), "ANSWER: two \"logs\"".to_owned())];
+        let messages = Messages { system: "be brief", history: &history, prompt: "and the bigger one?" };
+        let body = json::parse(&body("m", &messages, 400, "")).expect("valid JSON");
+        let said: Vec<(Option<&str>, Option<&str>)> =
+            body.get("messages").unwrap().array().iter().map(|m| (m.str_at("role"), m.str_at("content"))).collect();
+        assert_eq!(
+            said,
+            [
+                (Some("system"), Some("be brief")),
+                (Some("user"), Some("what's in here?")),
+                (Some("assistant"), Some("ANSWER: two \"logs\"")),
+                (Some("user"), Some("and the bigger one?")),
+            ]
+        );
     }
 
     #[test]

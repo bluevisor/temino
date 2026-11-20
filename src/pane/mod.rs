@@ -272,6 +272,10 @@ pub struct Pane {
     /// shell. The request on its way: its block and the model's reply.
     ai: bool,
     asking: Option<(u64, Answer)>,
+    /// AI mode's conversation in this pane, oldest first: each answered
+    /// request's block, the request, and the reply. It goes with the next
+    /// request; a turn whose block is cleared away is forgotten.
+    chat: Vec<(u64, String, String)>,
     /// How many files `git status` lists in the folder, by folder; and what
     /// it was last asked for (folder and last command), and when.
     pub git_changes: Option<(String, usize)>,
@@ -395,6 +399,7 @@ impl Pane {
             recap: None,
             ai: false,
             asking: None,
+            chat: Vec::new(),
             find: None,
             last_query: String::new(),
         })

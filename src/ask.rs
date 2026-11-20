@@ -25,6 +25,37 @@ few lines, no markdown headings.";
 /// Room for an answer of a few lines.
 const MAX_TOKENS: u32 = 400;
 
+/// Told the model when the pane has asked before.
+const FOLLOW_UP: &str = "The earlier messages are this terminal pane's conversation so far: read the new \
+request in their light (\"the other one\", \"do that again\"), and keep the same reply format.";
+/// How much of a pane's conversation goes with a new request: its last
+/// turns, newest first, until either limit.
+const CHAT_TURNS: usize = 8;
+const CHAT_CHARS: usize = 6000;
+
+/// The end of a pane's conversation (request, reply), oldest first, that
+/// goes with its next request: the newest turns that fit the limits.
+pub fn recent_turns(turns: &[(String, String)]) -> &[(String, String)] {
+    let mut chars = 0;
+    let mut kept = 0;
+    for (request, reply) in turns.iter().rev().take(CHAT_TURNS) {
+        chars += request.chars().count() + reply.chars().count();
+        if chars > CHAT_CHARS {
+            break;
+        }
+        kept += 1;
+    }
+    &turns[turns.len() - kept..]
+}
+
+/// A reply as the conversation remembers it: in the form the model gave it.
+pub fn remembered(reply: &Reply) -> String {
+    match reply {
+        Reply::Command(command) => format!("COMMAND: {command}"),
+        Reply::Answer(answer) => format!("ANSWER: {answer}"),
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Reply {
     Command(String),
@@ -92,14 +123,16 @@ fn wants_command(request: &str) -> Option<bool> {
 }
 
 /// The whole round trip for AI mode's Enter: Jev's pick, then the model's
-/// command or answer. Blocks.
-pub fn run(request: &str, prompt: &str) -> Result<Reply, String> {
+/// command or answer, with the pane's conversation so far (`history`,
+/// oldest first, as `recent_turns` cut it). Blocks.
+pub fn run(request: &str, prompt: &str, history: &[(String, String)]) -> Result<Reply, String> {
     let system = match wants_command(request) {
         Some(true) => COMMAND_SYSTEM,
         Some(false) => ANSWER_SYSTEM,
         None => EITHER_SYSTEM,
     };
-    llm::complete(system, prompt, MAX_TOKENS).map(|reply| parse(&reply))
+    let system = if history.is_empty() { system.to_owned() } else { format!("{system}\n{FOLLOW_UP}") };
+    llm::chat(&system, history, prompt, MAX_TOKENS).map(|reply| parse(&reply))
 }
 
 /// Reads the model's reply: a command when it says COMMAND:, else an answer.
@@ -139,6 +172,26 @@ mod tests {
         assert_eq!(parse("Just text"), Reply::Answer("Just text".into()));
     }
 
+    #[test]
+    fn a_pane_sends_its_newest_turns_that_fit() {
+        let turn = |i: usize, len: usize| (format!("q{i}"), "a".repeat(len));
+        // A few short turns all go, oldest first.
+        let few: Vec<_> = (0..3).map(|i| turn(i, 10)).collect();
+        assert_eq!(recent_turns(&few), &few[..]);
+        assert!(recent_turns(&[]).is_empty());
+        // More than CHAT_TURNS: the newest ones.
+        let many: Vec<_> = (0..20).map(|i| turn(i, 10)).collect();
+        assert_eq!(recent_turns(&many), &many[20 - CHAT_TURNS..]);
+        // Long replies: as many of the newest as fit CHAT_CHARS.
+        let long: Vec<_> = (0..5).map(|i| turn(i, 2500)).collect();
+        assert_eq!(recent_turns(&long), &long[3..]);
+        // A turn longer than the whole budget isn't sent.
+        assert!(recent_turns(&[turn(0, CHAT_CHARS + 1)]).is_empty());
+        // Replies come back in the form the model gave them.
+        assert_eq!(remembered(&Reply::Command("ls -la".into())), "COMMAND: ls -la");
+        assert_eq!(parse(&remembered(&Reply::Answer("Yes.".into()))), Reply::Answer("Yes.".into()));
+    }
+
     /// Against the real services: `TYPESAFE_API_KEY=… cargo test live -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -148,7 +201,7 @@ mod tests {
             [("rename example.jpg to example_backup.jpg", true), ("what does chmod 755 mean?", false)]
         {
             assert_eq!(wants_command(request), Some(command), "{request}");
-            let reply = run(request, &prompt(request)).unwrap();
+            let reply = run(request, &prompt(request), &[]).unwrap();
             println!("{request} -> {reply:?}");
             assert_eq!(matches!(reply, Reply::Command(_)), command);
         }
