@@ -609,8 +609,11 @@ impl TextSystem {
             }
             return;
         }
-        // About two physical pixels a square, at most 240 across.
-        let step = (2.0 / s).max(rect.w / 240.0).max(rect.h / 240.0);
+        // A square per physical pixel, as sharp as the Metal texture (two
+        // a square blurred a small photo, the account face, into blocks),
+        // at most 240 across. On the pixel grid, so none is cut short.
+        let rect = Rect::new(self.snap(rect.x), self.snap(rect.y), rect.w, rect.h);
+        let step = (1.0 / s).max(rect.w / 240.0).max(rect.h / 240.0);
         let (w, h) = (((rect.w / step).ceil() as usize).max(1), ((rect.h / step).ceil() as usize).max(1));
         let key = (picture.id, w, h);
         if self.mosaics.len() > 64 {
@@ -821,5 +824,27 @@ impl TextSystem {
         });
         self.cache.insert(key, entry);
         entry
+    }
+}
+
+#[cfg(test)]
+mod picture_tests {
+    use super::*;
+
+    /// Off macOS there's no color atlas: a picture is a mosaic of fills,
+    /// one per physical pixel, or a 20 pt face at 2x came out in 2 px blocks.
+    #[test]
+    fn a_picture_without_the_color_atlas_gets_a_square_per_pixel() {
+        let mut text = TextSystem::new(14.0);
+        text.color_atlas = Atlas::new(0, 4);
+        text.set_scale(2.0);
+        let photo = crate::picture::Picture::new(96, 96, vec![255; 96 * 96 * 4]).expect("picture");
+        let mut scene = Scene::new();
+        scene.reset(200.0, 200.0, 2.0, Color::hex(0x000000));
+        // Off the pixel grid on purpose.
+        text.draw_picture(&mut scene, &photo, Rect::new(10.3, 10.1, 20.0, 20.0));
+        let rects: Vec<_> = scene.layers.iter().flat_map(|layer| layer.rects.iter()).collect();
+        assert_eq!(rects.len(), 40 * 40);
+        assert!(rects.iter().all(|r| r.bounds[2] == 1.0 && r.bounds[3] == 1.0), "every square one pixel");
     }
 }
