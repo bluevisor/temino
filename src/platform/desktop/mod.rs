@@ -138,6 +138,9 @@ enum Request {
     CloseWindow,
     /// Close every window: this one's core is done, the others are asked.
     Quit,
+    /// Bring the window to the front, out of the Dock if it's there.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Raise,
 }
 
 struct Frame {
@@ -206,6 +209,15 @@ pub fn new_window(cwd: Option<String>) {
 /// Closes the calling core's window, once it's done; the last one quits.
 pub fn close_window() {
     request(Request::CloseWindow);
+}
+
+/// Brings window `no` to the front, from any thread (a clicked
+/// notification's, on macOS).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn raise_window(no: u32) {
+    if let Some(proxy) = PROXY.get() {
+        let _ = proxy.locked().send_event((no, Request::Raise));
+    }
 }
 
 pub fn app_new(_signature: &str) {

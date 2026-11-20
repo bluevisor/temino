@@ -20,7 +20,8 @@
 //!   block when `wait` (timeout in seconds, 120 by default)
 //! - `read` {pane, blocks?, lines?}: the last blocks' commands and output
 //! - `block` {pane, block}: one block
-//! - `notify` {title, body}: a desktop notification
+//! - `notify` {title, body, pane?}: a desktop notification; clicked, it
+//!   opens `pane` (macOS)
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::mpsc::{self, Sender};
@@ -191,7 +192,11 @@ fn answer(line: &str) -> Result<String, String> {
     match method {
         "notify" => {
             let param = |key| params.and_then(|p| p.str_at(key)).unwrap_or_default();
-            crate::notify::show(param("title"), param("body"));
+            let pane = params.and_then(|p| p.num_at("pane")).map(|p| p as u64);
+            // A script that says where it runs: a click goes back there.
+            let from = params.is_some_and(|p| p.num_at("window").is_some() || pane.is_some());
+            let source = from.then_some(crate::notify::Source { window, pane });
+            crate::notify::show(param("title"), param("body"), source);
             Ok("true".to_owned())
         }
         "list" => {

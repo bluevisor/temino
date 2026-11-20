@@ -480,6 +480,11 @@ impl App {
             leaves.contains(&id)
         })
     }
+    /// Pane `id` of this window, as a notification about it says: a click
+    /// opens it.
+    fn notify_source(&self, id: u64) -> crate::notify::Source {
+        crate::notify::Source { window: platform::window_no(), pane: Some(id) }
+    }
     /// Desktop notifications programs asked for, for the panes you can't
     /// see right now (another tab, or the window isn't in front); titled
     /// with the tab when the program gave no title.
@@ -490,7 +495,7 @@ impl App {
                 continue;
             }
             let title = title.unwrap_or_else(|| self.tab_title(tab));
-            crate::notify::show(&title, &body);
+            crate::notify::show(&title, &body, Some(self.notify_source(id)));
         }
     }
     /// Reads what every pane's agent is doing, once a frame; a pane whose
@@ -527,7 +532,7 @@ impl App {
                             }
                             // Out of sight on this computer: the desktop says so.
                             if !seen && new {
-                                alerts.push((index, need));
+                                alerts.push((index, pane.id, need));
                             }
                         }
                         pane.agent_now = state;
@@ -546,9 +551,9 @@ impl App {
                     .max()
             })
             .collect();
-        for (index, need) in alerts {
+        for (index, id, need) in alerts {
             let body = if need == AgentState::Waiting { "Waiting for you" } else { "Finished" };
-            crate::notify::show(&self.tab_title(index), body);
+            crate::notify::show(&self.tab_title(index), body, Some(self.notify_source(id)));
         }
         if moved {
             self.relayout();

@@ -194,6 +194,7 @@ fn main() {
     let (sender, receiver) = mpsc::channel();
     platform::app_new("application/x-vnd.bluevisor-Temino");
     opener::install();
+    notify::install();
     platform::window_new("Temino", WIDTH, HEIGHT, sender.clone());
     // Command+N: another window with a core thread of its own, fresh.
     platform::on_new_window(|receiver, sender, cwd| app::run(receiver, sender, WIDTH, HEIGHT, app::Start::Fresh(cwd)));

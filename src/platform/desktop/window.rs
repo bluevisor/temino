@@ -365,6 +365,12 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                     win.draw();
                 }
             }
+            Request::Raise => {
+                if let Some(win) = self.win(no) {
+                    win.window.set_minimized(false);
+                    win.window.focus_window();
+                }
+            }
             Request::Title(title) => {
                 if let Some(win) = self.win(no) {
                     win.window.set_title(&title);
