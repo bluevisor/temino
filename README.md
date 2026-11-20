@@ -11,6 +11,14 @@ Full-screen programs (`less`, `vim`, `top`) get the whole window. On the
 Haiku arm64 VM in UTM it renders on the Mac's GPU, through the Venus Vulkan
 stack from [haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chromium/tree/main/gpu).
 
+| Platform | Builds | Draws with |
+|---|---|---|
+| **Haiku** | arm64, x86_64 (`.hpkg`; 32-bit x86 from source) | Vulkan |
+| **macOS** | Apple silicon, Intel (`.dmg`) | Metal |
+| **Linux** | aarch64, x86_64 (`.tar.gz`) | Vulkan |
+
+Download the latest from [Releases](https://github.com/bluevisor/temino/releases/latest) or [temino.app](https://temino.app).
+
 ![The launch screen](docs/welcome.png)
 
 ![Blocks: a failed command, background output, a running loop](docs/blocks.png)
