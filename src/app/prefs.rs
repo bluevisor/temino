@@ -444,7 +444,9 @@ impl App {
             Action::Notifications(on) => {
                 crate::save_setting("notifications", if on { "on" } else { "off" });
                 if on {
-                    crate::notify::show("Temino", "Notifications are on");
+                    // The first one asks for permission (macOS): now, while
+                    // you're turning them on.
+                    crate::notify::show("Temino", "Notifications are on", None);
                 }
             }
             Action::Remote(true) => crate::relay::sign_in(),

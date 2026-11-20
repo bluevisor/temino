@@ -200,7 +200,9 @@ fn command_line(command: &str, args: &[String]) -> Result<i32, String> {
         "notify" => {
             let title = args.words.first().cloned().unwrap_or_else(|| "Temino".to_owned());
             let body = args.words.get(1..).map(|w| w.join(" ")).unwrap_or_default();
-            print(api::call("notify", &format!(r#"{{"title":{},"body":{}}}"#, quote(&title), quote(&body)))?)
+            // Run in a pane: clicked, the notification opens that pane.
+            let from = args.target(true).map(|target| format!(",{target}")).unwrap_or_default();
+            print(api::call("notify", &format!(r#"{{"title":{},"body":{}{from}}}"#, quote(&title), quote(&body)))?)
         }
         "api" => {
             let method = args.words.first().ok_or("which method?")?;
