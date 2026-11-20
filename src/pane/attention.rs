@@ -252,6 +252,22 @@ impl Pane {
         let skip = context.chars().count().saturating_sub(RECAP_CHARS);
         context.chars().skip(skip).collect()
     }
+    /// The pane's name on its row in a split tab's group: an agent's topic
+    /// (its title without the state mark), a running program's own title,
+    /// or the folder and its recent commands.
+    pub fn row_title(&self) -> String {
+        let title = agent::one_line(&self.program_title);
+        if self.session.active().is_some() && !title.is_empty() {
+            if agent::title_state(&title).is_some() {
+                let topic = title.chars().skip(1).collect::<String>().trim().to_owned();
+                if !topic.is_empty() {
+                    return topic;
+                }
+            }
+            return title;
+        }
+        self.title()
+    }
     /// One line on what the pane is doing: the running command, or the
     /// folder at rest; and whether something runs.
     pub fn activity(&self) -> (bool, String) {
