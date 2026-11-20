@@ -728,9 +728,12 @@ impl App {
                 scene.quad(Quad::new(fill, theme.text.alpha(0.04)).radius(5.0));
             }
             let title_h = if row.line.is_some() { GROUP_ROW - 10.0 } else { GROUP_ROW };
-            let center = (rect.x + 21.0, rect.y + title_h / 2.0);
+            // The number sits inside the row's fill, its waiting halo too:
+            // centered on the whole row (beside both lines of a row with
+            // a line), clear of the fill's left edge, 8 before the title.
+            let center = (fill.x + 16.0, rect.y + rect.h / 2.0);
             draw_tab_number(scene, text, theme, tab.number + pane, center, 22.0, row.agent, row.done_for, t);
-            let x = rect.x + 40.0;
+            let x = center.0 + 11.0 + 8.0;
             let room = (rect.right() - 10.0 - x).max(0.0);
             let baseline = (rect.y + (title_h + text.ui_ascent(SIDEBAR_FONT) * 0.72) / 2.0).round();
             let ink = if lit { theme.text } else { theme.text_dim };
