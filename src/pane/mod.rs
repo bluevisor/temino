@@ -91,7 +91,7 @@ const BANNER_LARGE: &[&str] = &[
     "   ╚═╝   ╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ",
 ];
 /// Pane width (columns) from which `BANNER_LARGE` replaces `BANNER`.
-const BANNER_LARGE_COLUMNS: usize = 150;
+const BANNER_LARGE_COLUMNS: usize = 100;
 
 /// What every pane shares: fonts, colors, history, the clock for the caret.
 pub struct Ctx {
