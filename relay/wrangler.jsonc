@@ -1,5 +1,6 @@
 // Temino's relay. Secrets (wrangler secret put): RELAY_SECRET,
-// GOOGLE_CLIENT_SECRET, APPLE_PRIVATE_KEY. Local dev reads .dev.vars.
+// GOOGLE_CLIENT_SECRET, APPLE_PRIVATE_KEY, DASHBOARD_EMAILS (who may open
+// the analytics dashboard, comma-separated). Local dev reads .dev.vars.
 {
   "name": "temino-relay",
   "main": "src/index.js",
@@ -13,6 +14,7 @@
     "APPLE_CLIENT_ID": "com.bluevisor.temino.signin",
     "APPLE_TEAM_ID": "CKGXYS3R8N",
     "APPLE_KEY_ID": "VXYLHDH8MA",
+    "DASHBOARD_ORIGIN": "https://dashboard.bucaastudio.com",
     "VAPID_PUBLIC": "BJPcvtWDIXrHAhWLpzQv92--aNTzz6ebZbHsmlbvryD0tOX9nWwhwbWcnLHRh_H4d_b_82n48V21qMYVL2vdLvg"
   }
 }
