@@ -408,6 +408,9 @@ impl TextSystem {
         self.cache.clear();
         self.atlas.clear();
         self.emoji.clear();
+        // Pictures live in the color atlas too: forget where they were, or
+        // the account photo points at an emptied spot and draws nothing.
+        self.pictures.clear();
         self.color_atlas.clear();
     }
 
@@ -846,5 +849,20 @@ mod picture_tests {
         let rects: Vec<_> = scene.layers.iter().flat_map(|layer| layer.rects.iter()).collect();
         assert_eq!(rects.len(), 40 * 40);
         assert!(rects.iter().all(|r| r.bounds[2] == 1.0 && r.bounds[3] == 1.0), "every square one pixel");
+    }
+
+    /// A new text size empties the color atlas; a picture drawn before it
+    /// must be written again, not drawn from its old, now blank, spot.
+    #[test]
+    fn a_picture_survives_a_text_size_change() {
+        let mut text = TextSystem::new(14.0);
+        text.color_atlas = Atlas::new(COLOR_ATLAS_SIZE, 4);
+        let photo = crate::picture::Picture::new(96, 96, vec![255; 96 * 96 * 4]).expect("picture");
+        let mut scene = Scene::new();
+        scene.reset(200.0, 200.0, 2.0, Color::hex(0x000000));
+        text.draw_picture(&mut scene, &photo, Rect::new(0.0, 0.0, 20.0, 20.0));
+        text.set_size(16.0);
+        text.draw_picture(&mut scene, &photo, Rect::new(0.0, 0.0, 20.0, 20.0));
+        assert!(text.color_atlas.pixels.iter().any(|&p| p != 0), "the photo is back in the atlas");
     }
 }
