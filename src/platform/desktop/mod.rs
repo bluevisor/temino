@@ -381,6 +381,7 @@ mod menu {
         ("Edit", None, "", 0, None, '\0'),
         ("Edit", Some("Clear"), "k", 0, None, 'k'),
         ("View", Some("Show/Hide Tabs"), "b", 0, None, 'b'),
+        ("View", Some("Compact/Full Tabs"), "\\", 0, None, '\\'),
         ("View", Some("Previous Tab"), "{", SHIFT, None, '['),
         ("View", Some("Next Tab"), "}", SHIFT, None, ']'),
         ("View", Some("Previous Pane"), "[", 0, None, '['),

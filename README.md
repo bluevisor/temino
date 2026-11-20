@@ -135,6 +135,7 @@ macOS, Ctrl+Shift (or Super) on Linux.
 | Cmd+Shift+I / Cmd+L / Cmd+Shift+L | mark the tab Important / Waiting / Later, or clear it (also in the tab's right-click menu); Cmd+\` skips Waiting and Later tabs, and typing in one clears its mark |
 | Cmd+1…9 | the tab list's row with that number: a tab, or in the sidebar, where a split tab lists its panes, one of those panes (the numbers run on through each group); two quick presses pick 10 and up (Cmd+1 then Cmd+2 = 12). On Linux, where the desktop often keeps Super+1…9, it's Cmd+Alt+1…9 (Super+Alt, Command+Option on a Mac keyboard); Cmd+1…9 and Alt+1…9 also work |
 | Cmd+B | hide / show the tab list |
+| Cmd+\\ | the tab list compact (numbers only) or full, as the button at its bottom does |
 | Ctrl+PageUp / PageDown, Ctrl+Tab / Ctrl+Shift+Tab | previous / next tab (on Haiku Ctrl+Tab stays the window switcher) |
 | Cmd+C, Cmd+Shift+C, Cmd+V | copy (selection, else the selected block's output), copy the block's command, paste |
 | Cmd+↑ / Cmd+↓ | select the previous / next block |

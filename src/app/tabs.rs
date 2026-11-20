@@ -181,6 +181,17 @@ impl App {
             self.ctx.show_toast(&format!("Tabs hidden · {} shows them", platform::shortcut("B")));
         }
     }
+    /// ⌘\: the sidebar between compact (numbers only) and full, as its
+    /// button at the bottom does; a hidden one comes back.
+    pub(super) fn toggle_compact(&mut self) {
+        if self.strip != TabStrip::Left {
+            return;
+        }
+        if !self.tab_list_visible() {
+            self.tab_list = Some(true);
+        }
+        self.set_compact(!self.compact);
+    }
     pub(super) fn step_tab(&mut self, delta: i32) {
         let n = self.tabs.len() as i32;
         if n > 1 {
