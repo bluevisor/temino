@@ -17,6 +17,9 @@
 //                          and feature-use counters from a fixed list
 //   GET  /analytics/summary the last 30 days of pings; needs the relay
 //                          secret as a Bearer token
+//   GET  /dashboard/…      the private analytics dashboard (dashboard.js),
+//                          served at DASHBOARD_ORIGIN through a proxy;
+//                          Google sign-in, for DASHBOARD_EMAILS only
 //
 // A sign-in ends with a device token, sent back to the device's own
 // loopback port, its app's URL scheme, or this origin's /app: nowhere
@@ -27,34 +30,9 @@ import { verifyIdToken, appleClientSecret } from "./jwt.js";
 import { dayKey, recordPing, summarize, validPing } from "./analytics.js";
 export { Hub };
 
-const enc = new TextEncoder();
-const b64url = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const fromB64url = (text) => Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
-const random = (n = 16) => b64url(crypto.getRandomValues(new Uint8Array(n)));
-
-async function hmacKey(secret) {
-  return crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
-}
-
-// A small signed blob: the login request through the OAuth round trip,
-// and a device's token.
-export async function sign(env, value) {
-  const body = b64url(enc.encode(JSON.stringify(value)));
-  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(env.RELAY_SECRET), enc.encode(body)));
-  return `${body}.${b64url(mac)}`;
-}
-
-export async function unsign(env, token) {
-  const [body, mac] = String(token || "").split(".");
-  if (!body || !mac) return null;
-  let ok = false;
-  try {
-    ok = await crypto.subtle.verify("HMAC", await hmacKey(env.RELAY_SECRET), fromB64url(mac), enc.encode(body));
-  } catch {}
-  if (!ok) return null;
-  const value = JSON.parse(new TextDecoder().decode(fromB64url(body)));
-  return value.exp && value.exp < Date.now() ? null : value;
-}
+import { random, sign, unsign } from "./sign.js";
+import { dashboard, dashboardFinish } from "./dashboard.js";
+export { sign, unsign };
 
 // Where a token may go: the device's loopback port, the app's scheme, or
 // this origin's web client.
@@ -233,6 +211,8 @@ function hub(env, accountId) {
 }
 
 async function finish(env, url, req, who) {
+  // The analytics dashboard's sign-in: no device, just who it is.
+  if (req.kind === "dashboard") return dashboardFinish(env, req, who);
   const accountId = await account(env, who);
   const device = random(12);
   await hub(env, accountId).fetch("https://hub/register", {
@@ -329,6 +309,7 @@ export default {
       case "POST /analytics": return analytics(request, env);
       case "GET /analytics/summary": return analyticsSummary(request, env);
     }
+    if (url.pathname === "/dashboard" || url.pathname.startsWith("/dashboard/")) return dashboard(request, env, url);
     return env.ASSETS.fetch(request);
   },
 };
