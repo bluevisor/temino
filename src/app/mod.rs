@@ -43,6 +43,7 @@ mod preview;
 mod start;
 mod tabs;
 mod theme_edit;
+mod zen;
 use chrome::*;
 use layout::*;
 pub use overlays::*;
@@ -369,6 +370,8 @@ pub struct App {
     sidebar_width: f32,
     compact: bool,
     extended: bool,
+    /// Zen mode: the current tab alone, framed, and nothing else.
+    zen: bool,
     /// How far the sidebar's list is scrolled down, and the most it can
     /// be (from the last frame).
     sidebar_scroll: f32,
@@ -584,6 +587,7 @@ impl App {
                 .clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             compact: crate::setting("sidebar").as_deref() == Some("compact"),
             extended: crate::setting("sidebar").as_deref() == Some("extended"),
+            zen: crate::setting("zen").as_deref() == Some("on"),
             sidebar_scroll: 0.0,
             sidebar_scroll_max: 0.0,
             sidebar_shown: (usize::MAX, 0),
@@ -991,8 +995,4 @@ impl App {
         }
         self.quitting = true;
     }
-
-    // ---- events -------------------------------------------------------
-
-    // ---- drawing ------------------------------------------------------
 }

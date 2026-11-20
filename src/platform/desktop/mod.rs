@@ -45,6 +45,8 @@ extern "C" {
     fn temino_metal_detach(window: u32);
     /// Makes the title bar `height` points tall, traffic lights centered.
     fn temino_titlebar(view: *mut std::ffi::c_void, height: f64);
+    /// Zen mode: a title bar `height` points tall, without traffic lights.
+    fn temino_zen(view: *mut std::ffi::c_void, on: bool, height: f64);
     /// Blurs what shows through the background, within the rounded corners.
     fn temino_blur(view: *mut std::ffi::c_void, on: bool);
     fn temino_hotkey(keycode: u32, modifiers: u32);
@@ -119,6 +121,9 @@ enum Request {
     Title(String),
     Cursor(Cursor),
     Blur(bool),
+    /// Zen mode, and the margin around the tab, in points.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Zen(bool, f32),
     /// Where the text caret is, in logical pixels: x, y, height.
     Caret(i32, i32, i32),
     // The viewers are native views, on macOS only for now.
@@ -326,6 +331,12 @@ fn mac_key_code(combo: &crate::bindings::Combo) -> Option<u32> {
     KEYS.chars().position(|c| c == combo.c && c != '\0').map(|i| i as u32)
 }
 
+/// Zen mode (macOS): the title bar only `margin` points tall, to drag the
+/// window by, and the traffic lights hidden.
+pub fn set_zen(on: bool, margin: f32) {
+    request(Request::Zen(on, margin));
+}
+
 /// Blurs what shows through a see-through background (macOS).
 pub fn set_blur(on: bool) {
     BLUR.store(on, Ordering::Release);
@@ -401,6 +412,7 @@ mod menu {
         ("View", Some("Jump to What Needs You"), "`", 0, None, '`'),
         ("View", Some("Jump to Newest Need"), "~", SHIFT, None, '`'),
         ("View", Some("Zoom Pane"), "\r", 0, Some(Named::Enter), '\r'),
+        ("View", Some("Zen Mode"), "\r", SHIFT, Some(Named::Enter), '\r'),
         ("View", None, "", 0, None, '\0'),
         ("View", Some("Bigger Text"), "+", 0, None, '='),
         ("View", Some("Smaller Text"), "-", 0, None, '-'),

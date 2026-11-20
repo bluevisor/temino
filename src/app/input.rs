@@ -208,6 +208,10 @@ impl App {
                     self.focus_toward(0.0, 1.0);
                     true
                 }
+                (Some(Named::Enter), _) if key.shift() => {
+                    self.toggle_zen();
+                    true
+                }
                 (Some(Named::Enter), _) => {
                     self.toggle_zoom();
                     true
