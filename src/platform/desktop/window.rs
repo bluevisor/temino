@@ -365,6 +365,16 @@ impl ApplicationHandler<(u32, Request)> for Handler {
                     win.draw();
                 }
             }
+            Request::Zen(_on, _margin) =>
+            {
+                #[cfg(target_os = "macos")]
+                if let Some(win) = self.win(no) {
+                    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    if let Ok(RawWindowHandle::AppKit(handle)) = win.window.window_handle().map(|h| h.as_raw()) {
+                        unsafe { temino_zen(handle.ns_view.as_ptr(), _on, _margin as f64) };
+                    }
+                }
+            }
             Request::Raise => {
                 if let Some(win) = self.win(no) {
                     win.window.set_minimized(false);

@@ -315,11 +315,16 @@ impl App {
         }
     }
     pub(super) fn tab_list_visible(&self) -> bool {
-        self.tab_list.unwrap_or(self.tabs.len() > 1)
+        !self.zen && self.tab_list.unwrap_or(self.tabs.len() > 1)
     }
-    /// How much of the window's top the title bar takes, in zoomed pixels.
+    /// How much of the window's top the title bar takes, in zoomed pixels:
+    /// none in zen mode.
     pub(super) fn top(&self) -> f32 {
-        platform::TITLEBAR / self.zoom
+        if self.zen {
+            0.0
+        } else {
+            platform::TITLEBAR / self.zoom
+        }
     }
     /// The tab list's area, under the title bar; empty while it is hidden.
     pub(super) fn tab_area(&self) -> Rect {
@@ -369,6 +374,9 @@ impl App {
         crate::save_setting("sidebar_width", &format!("{}", self.sidebar_width.round()));
     }
     pub(super) fn content_rect(&self) -> Rect {
+        if self.zen {
+            return self.zen_frame();
+        }
         let (width, top) = (self.width, self.top());
         let height = (self.height - top).max(1.0);
         let area = self.tab_area();
@@ -382,7 +390,8 @@ impl App {
     pub(super) fn tab_layout(&self, index: usize) -> (Vec<(u64, Rect)>, Vec<Divider>) {
         let (mut panes, dividers) = self.tab_slots(index);
         for (id, rect) in &mut panes {
-            if let Some(pane) = self.panes.iter().find(|pane| pane.id == *id) {
+            // Zen mode has no headers.
+            if let Some(pane) = self.panes.iter().find(|pane| pane.id == *id).filter(|_| !self.zen) {
                 *rect = under_header(*rect, pane.header_reach);
             }
         }

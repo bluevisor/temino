@@ -12,6 +12,10 @@ impl App {
         let focus = self.focused_id();
         let visible = self.visible_panes();
         let several = visible.len() > 1;
+        self.sync_zen();
+        if self.zen {
+            self.draw_zen_ground();
+        }
         let mut animation: Option<Instant> = None;
         for &(id, rect) in &visible {
             if id == SETTINGS {
@@ -51,6 +55,9 @@ impl App {
             self.scene.fill(divider.line, ink);
             self.scene.set_layer(LAYER_CONTENT);
         }
+        if self.zen {
+            self.draw_zen_edge();
+        }
         self.draw_tab_bar(&agents);
         self.draw_titlebar();
         self.draw_update();
@@ -89,7 +96,7 @@ impl App {
     /// pane's is lit. An agent's, opened, pushes its terminal down.
     pub(super) fn draw_agent_headers(&mut self) {
         self.header_hits.clear();
-        if self.tabs.is_empty() {
+        if self.tabs.is_empty() || self.zen {
             return;
         }
         let now = Instant::now();

@@ -239,6 +239,9 @@ pub fn set_quick_terminal(_combo: Option<&crate::bindings::Combo>) -> bool {
 }
 pub fn toggle_quick_terminal() {}
 
+/// Haiku's title bar is the system's: zen mode leaves it be.
+pub fn set_zen(_on: bool, _margin: f32) {}
+
 /// Haiku windows are opaque, so there is nothing to blur.
 pub fn set_blur(_on: bool) {}
 

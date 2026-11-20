@@ -80,6 +80,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("new_browser_tab", "cmd+alt+t"),
     ("browser_pane", "cmd+alt+b"),
     ("zoom_pane", "cmd+enter"),
+    ("zen_mode", "cmd+shift+enter"),
     ("next_tab", "cmd+shift+]"),
     ("previous_tab", "cmd+shift+["),
     ("next_pane", "cmd+]"),

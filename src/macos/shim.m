@@ -10,6 +10,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <WebKit/WebKit.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -639,24 +640,35 @@ in_full_screen(NSWindow* window)
 	return (window.styleMask & NSWindowStyleMaskFullScreen) != 0 || [sFullScreen containsObject:window];
 }
 
+// A window in zen mode keeps a title bar only as tall as its margin, to
+// drag it by, and no traffic lights.
+static char sZenKey;
+
+static CGFloat
+titlebar_height(NSWindow* window)
+{
+	NSNumber* zen = objc_getAssociatedObject(window, &sZenKey);
+	return zen != nil ? zen.doubleValue : sTitlebarHeight;
+}
+
 static void
 place_traffic_lights(NSWindow* window)
 {
 	NSButton* close = [window standardWindowButton:NSWindowCloseButton];
 	NSView* bar = close.superview;
 	NSView* container = bar.superview;
-	if (container == nil || sTitlebarHeight <= 0 || sPlacing || in_full_screen(window)
-		|| container.window != window)
+	CGFloat height = titlebar_height(window);
+	if (container == nil || height <= 0 || sPlacing || in_full_screen(window) || container.window != window)
 		return;
 	sPlacing = true;
 	NSRect frame = container.frame;
-	if (NSHeight(frame) != sTitlebarHeight) {
+	if (NSHeight(frame) != height) {
 		DEBUG_LOG(@"titlebar: strip %.0f high set back to %.0f, style %#lx, strip in %@",
-			NSHeight(frame), sTitlebarHeight, (unsigned long)window.styleMask,
+			NSHeight(frame), height, (unsigned long)window.styleMask,
 			container.window == window ? @"this window" : NSStringFromClass(container.window.class));
 	}
-	frame.size.height = sTitlebarHeight;
-	frame.origin.y = NSHeight(window.frame) - sTitlebarHeight;
+	frame.size.height = height;
+	frame.origin.y = NSHeight(window.frame) - height;
 	container.frame = frame;
 	bar.frame = container.bounds;
 	NSWindowButton kinds[] = {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton};
@@ -664,7 +676,7 @@ place_traffic_lights(NSWindow* window)
 		NSButton* button = [window standardWindowButton:kinds[i]];
 		NSRect place = button.frame;
 		place.origin.x = 14 + i * 20;
-		place.origin.y = round((sTitlebarHeight - NSHeight(place)) / 2);
+		place.origin.y = round((height - NSHeight(place)) / 2);
 		[button setFrameOrigin:place.origin];
 	}
 	sPlacing = false;
@@ -781,6 +793,22 @@ temino_titlebar(void* view_handle, double height)
 	}
 }
 
+// Zen mode on or off for the window of `view_handle`: on, its title bar is
+// `height` points tall with the traffic lights hidden; off, as before.
+void
+temino_zen(void* view_handle, bool on, double height)
+{
+	@autoreleasepool {
+		NSWindow* window = ((__bridge NSView*)view_handle).window;
+		if (window == nil)
+			return;
+		objc_setAssociatedObject(window, &sZenKey, on ? @(height) : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		NSWindowButton kinds[] = {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton};
+		for (int i = 0; i < 3; i++)
+			[window standardWindowButton:kinds[i]].hidden = on;
+		place_traffic_lights(window);
+	}
+}
 
 // Whether `handle`'s frames go straight to its window.
 bool
