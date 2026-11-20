@@ -218,13 +218,14 @@ fn forget_counts(sent: &[(Counter, u64)]) {
 
 /// Sends the accumulated counts in the background, at most once a day,
 /// and only with consent. Throttled by the `analytics_sent` timestamp,
-/// like the updater's daily check, whose shape this mirrors. Counts
-/// are only forgotten after a send the relay accepted.
+/// like the updater's daily check, whose shape this mirrors. Called at
+/// launch and again every hour while the app runs, so a window left
+/// open for days still reports each day. Counts are only forgotten
+/// after a send the relay accepted.
 pub fn ping() {
     if !enabled() {
         return;
     }
-    bump(Counter::Launches);
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let last = crate::setting("analytics_sent").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
     if now.saturating_sub(last) < DAY {
