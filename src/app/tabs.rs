@@ -80,15 +80,30 @@ impl Mark {
 /// How soon after one ⌘-digit the next still extends the number.
 const DIGIT_WINDOW: Duration = Duration::from_millis(700);
 
-/// The tab number (from 1) a ⌘-digit picks. A digit soon after the last one
-/// extends that number when there are that many tabs; otherwise it stands
+/// The number (from 1) a ⌘-digit picks. A digit soon after the last one
+/// extends that number when there are that many rows; otherwise it stands
 /// alone, and a lone 0 picks nothing.
-fn tab_number(last: Option<(usize, Instant)>, digit: usize, now: Instant, tabs: usize) -> Option<usize> {
+fn tab_number(last: Option<(usize, Instant)>, digit: usize, now: Instant, rows: usize) -> Option<usize> {
     let longer = last
         .filter(|&(_, at)| now.saturating_duration_since(at) < DIGIT_WINDOW)
         .map(|(number, _)| number * 10 + digit)
-        .filter(|&number| number <= tabs);
+        .filter(|&number| number <= rows);
     longer.or((digit > 0).then_some(digit))
+}
+
+/// What each number in the tab list stands for, in order: a tab, or where
+/// split tabs list their panes (`by_pane`), a split tab's pane apiece.
+/// `leaves` holds each tab's panes.
+fn numbered_rows(leaves: &[Vec<u64>], by_pane: bool) -> Vec<(usize, Option<u64>)> {
+    let mut rows = Vec::new();
+    for (index, panes) in leaves.iter().enumerate() {
+        if by_pane && panes.len() > 1 {
+            rows.extend(panes.iter().map(|&id| (index, Some(id))));
+        } else {
+            rows.push((index, None));
+        }
+    }
+    rows
 }
 
 impl App {
@@ -116,17 +131,41 @@ impl App {
         self.relayout();
         self.focus_moved(before);
     }
-    /// ⌘ and a digit: that tab, or with a digit just before it the
-    /// two-digit tab (⌘1 ⌘2 → 12, ⌘1 ⌘0 → 10). False for a lone ⌘0, which
-    /// stays the font reset.
+    /// The full sidebar lists a split tab's panes, a row and a number apiece.
+    pub(super) fn lists_panes(&self) -> bool {
+        self.strip == TabStrip::Left && !self.compact
+    }
+    /// ⌘ and a digit: the tab list's row with that number (a tab, or a
+    /// split tab's pane), or with a digit just before it the two-digit one
+    /// (⌘1 ⌘2 → 12, ⌘1 ⌘0 → 10). False for a lone ⌘0, which stays the font
+    /// reset.
     pub(super) fn tab_digit(&mut self, digit: usize) -> bool {
         let now = Instant::now();
-        let Some(number) = tab_number(self.tab_digits, digit, now, self.tabs.len()) else {
+        let leaves: Vec<Vec<u64>> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let mut leaves = Vec::new();
+                tab.root.leaves(&mut leaves);
+                leaves
+            })
+            .collect();
+        let rows = numbered_rows(&leaves, self.lists_panes());
+        let Some(number) = tab_number(self.tab_digits, digit, now, rows.len()) else {
             self.tab_digits = None;
             return false;
         };
         self.tab_digits = Some((number, now));
-        self.switch_tab(number - 1);
+        match rows.get(number - 1) {
+            Some(&(index, Some(id))) if index == self.active => self.set_focus(id),
+            Some(&(index, pane)) => {
+                if let Some(id) = pane {
+                    self.tabs[index].focus = id;
+                }
+                self.switch_tab(index);
+            }
+            None => {}
+        }
         true
     }
     pub(super) fn toggle_tab_list(&mut self) {
@@ -654,6 +693,17 @@ mod tests {
         assert_eq!(tab_number(Some((12, t)), 3, soon, 20), Some(3));
         assert_eq!(tab_number(Some((1, t)), 2, soon, 200), Some(12));
         assert_eq!(tab_number(Some((12, t)), 3, soon, 200), Some(123));
+    }
+    #[test]
+    fn numbers_run_on_through_split_tabs() {
+        use super::numbered_rows;
+        // A split tab, a one-pane tab, another split tab: in the full
+        // sidebar the second group's panes are 4 and 5, not 1 and 2 again.
+        let leaves = [vec![10, 11], vec![20], vec![30, 31]];
+        let rows = numbered_rows(&leaves, true);
+        assert_eq!(rows, [(0, Some(10)), (0, Some(11)), (1, None), (2, Some(30)), (2, Some(31))]);
+        // Compact or across the top, a number per tab.
+        assert_eq!(numbered_rows(&leaves, false), [(0, None), (1, None), (2, None)]);
     }
     use super::*;
 

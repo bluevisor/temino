@@ -194,7 +194,7 @@ impl App {
         let now = Instant::now();
         self.refresh_titles(now);
         let extended = self.extended && !self.compact && self.strip == TabStrip::Left;
-        let tabs: Vec<TabView> = (0..self.tabs.len())
+        let mut tabs: Vec<TabView> = (0..self.tabs.len())
             .map(|index| {
                 let mut leaves = Vec::new();
                 self.tabs[index].root.leaves(&mut leaves);
@@ -203,7 +203,7 @@ impl App {
                     if extended && index == self.active { self.pane_lines(index, &leaves, now) } else { Vec::new() };
                 // A split tab in the full sidebar: a row per pane, each
                 // with its line.
-                let group = self.strip == TabStrip::Left && !self.compact && leaves.len() > 1;
+                let group = self.lists_panes() && leaves.len() > 1;
                 let rows: Vec<PaneRow> = if group {
                     leaves
                         .iter()
@@ -226,6 +226,7 @@ impl App {
                     .reduce(f32::min)
                     .unwrap_or(f32::MAX);
                 TabView {
+                    number: 0,
                     lines,
                     rows,
                     agent: agents[index],
@@ -248,6 +249,13 @@ impl App {
                 }
             })
             .collect();
+        // The numbers run straight down the list, a group's panes taking
+        // one apiece, as ⌘-digits count them (numbered_rows).
+        let mut number = 0;
+        for tab in &mut tabs {
+            tab.number = number;
+            number += tab.rows.len().max(1);
+        }
         match self.strip {
             TabStrip::Left => self.draw_tab_sidebar(&tabs),
             TabStrip::Top => self.draw_tab_strip(&tabs),
@@ -344,7 +352,7 @@ impl App {
             };
         if !header {
             let center = (x + number / 2.0, rect.y + rect.h / 2.0);
-            draw_tab_number(scene, text, theme, index, center, number, tab.agent, tab.done_for, t);
+            draw_tab_number(scene, text, theme, tab.number, center, number, tab.agent, tab.done_for, t);
             x += number + 8.0;
         }
         let close = Rect::new(rect.right() - 22.0, rect.y + (rect.h - 16.0) / 2.0, 16.0, 16.0);
@@ -692,8 +700,8 @@ impl App {
     }
     /// A split tab in the sidebar: its name on a header line, then a card
     /// in its color with a row per pane; the focused pane's row of the
-    /// current tab is lit. Rows are numbered by pane. A row's click goes to
-    /// that pane.
+    /// current tab is lit. Each row takes the next number down the list. A
+    /// row's click goes to that pane.
     pub(super) fn draw_tab_group(&mut self, index: usize, tab: &TabView, area: Rect, dragged: bool, hovered: bool) {
         let current = index == self.active;
         let head = Rect::new(area.x, area.y, area.w, GROUP_HEAD);
@@ -721,8 +729,7 @@ impl App {
             }
             let title_h = if row.line.is_some() { GROUP_ROW - 10.0 } else { GROUP_ROW };
             let center = (rect.x + 21.0, rect.y + title_h / 2.0);
-            // Numbered by pane within the tab, not by tab.
-            draw_tab_number(scene, text, theme, pane, center, 22.0, row.agent, row.done_for, t);
+            draw_tab_number(scene, text, theme, tab.number + pane, center, 22.0, row.agent, row.done_for, t);
             let x = rect.x + 40.0;
             let room = (rect.right() - 10.0 - x).max(0.0);
             let baseline = (rect.y + (title_h + text.ui_ascent(SIDEBAR_FONT) * 0.72) / 2.0).round();
@@ -748,7 +755,7 @@ impl App {
         draw_tab_background(scene, theme, rect, tab.color, current, dragged, self.hover_tab == Some(index));
         let center = (rect.x + rect.w / 2.0 + 1.0, rect.y + rect.h / 2.0);
         let t = blink_epoch.elapsed().as_secs_f32();
-        draw_tab_number(scene, text, theme, index, center, 24.0, tab.agent, tab.done_for, t);
+        draw_tab_number(scene, text, theme, tab.number, center, 24.0, tab.agent, tab.done_for, t);
         if let Some(mark) = tab.mark {
             let dot = Rect::new(rect.right() - 9.0, rect.y + 3.0, 6.0, 6.0);
             scene.quad(Quad::new(dot, mark.color(theme)).radius(3.0));

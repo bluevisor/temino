@@ -288,6 +288,8 @@ struct Rename {
 
 /// How a tab is drawn in the tab list.
 struct TabView {
+    /// The number its row shows, from 0; a group's pane rows count on from it.
+    number: usize,
     title: String,
     panes: usize,
     color: Option<Color>,
