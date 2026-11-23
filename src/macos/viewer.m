@@ -121,6 +121,20 @@ abbreviated(NSString* path)
 }
 @end
 
+// A viewer's header bar. Viewers sit in a hole in winit's cursor rect (see
+// "Pointer shape"), so anything that doesn't set its own pointer would keep
+// whatever the terminal showed last, often the I-beam: the header shows the
+// arrow (its address field still gets the I-beam).
+@interface TeminoViewerHeader : TeminoFlippedView
+@end
+
+@implementation TeminoViewerHeader
+- (void)resetCursorRects
+{
+	[self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
+}
+@end
+
 
 @interface TeminoViewer : NSView <NSTextViewDelegate, NSTextFieldDelegate, WKNavigationDelegate, WKUIDelegate>
 @property(nonatomic) uint64_t viewerId;
@@ -177,7 +191,7 @@ abbreviated(NSString* path)
 - (void)buildWithStyle:(const TeminoViewerStyle*)style
 {
 	NSRect bounds = self.bounds;
-	TeminoFlippedView* header = [[TeminoFlippedView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(bounds), kViewerHeader)];
+	TeminoViewerHeader* header = [[TeminoViewerHeader alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(bounds), kViewerHeader)];
 	header.wantsLayer = YES;
 	header.layer.backgroundColor = style_color(style->header).CGColor;
 	header.autoresizingMask = NSViewWidthSizable;
@@ -483,6 +497,8 @@ abbreviated(NSString* path)
 	scroll.hasHorizontalScroller = YES;
 	scroll.autohidesScrollers = YES;
 	scroll.backgroundColor = style_color(style->background);
+	// The arrow, as in Preview; nothing else would set one here (see "Pointer shape").
+	scroll.documentCursor = NSCursor.arrowCursor;
 	NSImageView* view = [[NSImageView alloc] initWithFrame:scroll.bounds];
 	view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 	view.image = image;
