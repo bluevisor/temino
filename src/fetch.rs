@@ -92,10 +92,14 @@ impl Fetch {
             },
             None => {
                 let command = shells::install_package(self.name)?;
-                match self.ppa {
-                    Some(ppa) if command.starts_with("sudo apt-get") && !apt_has(self.name) => {
-                        Ok(format!("sudo add-apt-repository -y {ppa} && sudo apt-get update && {command}"))
-                    }
+                // Not in the distribution's own lists yet: add its PPA first.
+                let apt = ["apt", "apt-get"].into_iter().find(|apt| command.contains(&format!("{apt} install")));
+                match (self.ppa, apt) {
+                    (Some(ppa), Some(apt)) if !apt_has(self.name) => Ok(format!(
+                        "{} && {} && {command}",
+                        shells::as_admin(&format!("add-apt-repository -y {ppa}")),
+                        shells::as_admin(&format!("{apt} update")),
+                    )),
                     _ => Ok(command),
                 }
             }

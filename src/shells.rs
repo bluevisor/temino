@@ -97,18 +97,43 @@ pub fn install_package(name: &str) -> Result<String, String> {
             .map(|brew| format!("{brew} install {name}"))
             .ok_or_else(|| format!("Installing {name} needs Homebrew (brew.sh)"));
     }
-    let managers = [
-        ("apt-get", "sudo apt-get install -y"),
-        ("dnf", "sudo dnf install -y"),
-        ("pacman", "sudo pacman -S --noconfirm"),
-        ("zypper", "sudo zypper install -y"),
-        ("apk", "sudo apk add"),
-    ];
-    managers
+    MANAGERS
         .iter()
         .find(|(tool_name, _)| tool(&[tool_name]).is_some())
-        .map(|(_, install)| format!("{install} {name}"))
+        .map(|(_, install)| as_admin(&format!("{install} {name}")))
         .ok_or_else(|| format!("No package manager found to install {name}"))
+}
+
+/// Linux package managers, the first one found installs: `apt` before
+/// `apt-get`, as people type it.
+const MANAGERS: [(&str, &str); 6] = [
+    ("apt", "apt install -y"),
+    ("apt-get", "apt-get install -y"),
+    ("dnf", "dnf install -y"),
+    ("pacman", "pacman -S --noconfirm"),
+    ("zypper", "zypper install -y"),
+    ("apk", "apk add"),
+];
+
+/// `command` run as root: through sudo, unless Temino already is root (as
+/// on Puppy Linux, which has no sudo) or there's no sudo to run.
+pub fn as_admin(command: &str) -> String {
+    let sudo = ["/usr/bin/sudo", "/bin/sudo"].iter().any(|path| std::path::Path::new(path).exists());
+    with_sudo(command, sudo && !running_as_root())
+}
+
+fn with_sudo(command: &str, sudo: bool) -> String {
+    if sudo {
+        format!("sudo {command}")
+    } else {
+        command.to_owned()
+    }
+}
+
+/// Whether Temino runs as root: the owner of its own /proc entry (Linux).
+fn running_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").is_ok_and(|meta| meta.uid() == 0)
 }
 
 /// Settings ▸ Shell's entries (missing shells offer to install), and the
@@ -128,6 +153,13 @@ pub fn menu(current: &str) -> (Vec<String>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_installs_without_sudo() {
+        assert_eq!(with_sudo("apt install -y fish", false), "apt install -y fish");
+        assert_eq!(with_sudo("apt install -y fish", true), "sudo apt install -y fish");
+        assert_eq!(MANAGERS[0], ("apt", "apt install -y"));
+    }
 
     #[test]
     fn a_shell_is_known_by_its_file_name_wherever_it_lives() {
