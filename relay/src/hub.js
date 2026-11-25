@@ -1,7 +1,8 @@
 // One account's hub: its devices, and the sockets of those online.
 //
 // To devices:
-//   {"type":"devices","you":id,"devices":[{id,name,kind,pub,online}]}
+//   {"type":"devices","you":id,"devices":[{id,name,kind,pub,online}],
+//    "beckon":{id,at}?}              a desktop showing its QR code lately
 //   {"type":"recv","from":id,"kind":"hs"|"msg","data":base64}
 // From devices:
 //   {"type":"send","to":id,"kind":"hs"|"msg","data":base64}
@@ -11,6 +12,9 @@
 //                                 a desktop's agent needs you: phones not
 //                                 showing the page get a push saying only that
 //   {"type":"visible","on":bool}  whether a phone's page is on screen
+//   {"type":"beckon"}             a desktop's QR code is on screen: phones
+//                                 go to it (a Home Screen app on iOS can't
+//                                 read a code scanned in Safari)
 //
 // `data` is a Noise frame: the hub sees who talks to whom, and how much,
 // never what. It doesn't vouch for keys either: the desktop asks you
@@ -31,6 +35,9 @@ const validSub = (sub) => {
     return false;
   }
 };
+
+// How long a desktop's call stands for phones that come online after it.
+const BECKON_FOR = 5 * 60 * 1000;
 
 // Cloudflare takes up to 1 MiB a message; Noise frames are under 64 KiB.
 const MAX_MESSAGE = 200 * 1024;
@@ -95,6 +102,10 @@ export class Hub extends DurableObject {
       socket.serializeAttachment({ visible: message.on === true });
     } else if (message.type === "notify" && (message.kind === "waiting" || message.kind === "done")) {
       await this.notify(from, message.kind, Number(message.tab) || 0);
+    } else if (message.type === "beckon") {
+      if ((await this.devices())[from]?.kind !== "desktop") return;
+      await this.ctx.storage.put("beckon", { id: from, at: Date.now() });
+      await this.announce();
     } else if (message.type === "forget" && typeof message.id === "string") {
       const devices = await this.devices();
       delete devices[message.id];
@@ -147,9 +158,11 @@ export class Hub extends DurableObject {
       id, name: d.name, kind: d.kind, pub: d.pub, online: online.has(id), person: d.person || "", picture: d.picture || "",
       email: d.email || "", provider: d.provider || "",
     }));
+    const call = await this.ctx.storage.get("beckon");
+    const beckon = call && devices[call.id] && Date.now() - call.at < BECKON_FOR ? call : undefined;
     for (const socket of sockets) {
       try {
-        socket.send(JSON.stringify({ type: "devices", you: this.ctx.getTags(socket)[0], devices: list }));
+        socket.send(JSON.stringify({ type: "devices", you: this.ctx.getTags(socket)[0], devices: list, beckon }));
       } catch {}
     }
   }

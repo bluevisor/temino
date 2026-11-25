@@ -37,6 +37,12 @@ static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static CONNECTED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 /// Phones Settings asked to cut off, by device id.
 static DISCONNECTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// When this machine last called the account's phones over (see `beckon`),
+/// and whether that call is still to go to the relay.
+static BECKONED: Mutex<Option<Instant>> = Mutex::new(None);
+static BECKON: AtomicBool = AtomicBool::new(false);
+/// How often a QR code left on screen calls the phones again.
+const BECKON_EVERY: Duration = Duration::from_secs(60);
 
 pub fn relay_url() -> String {
     crate::setting("relay").unwrap_or_else(|| DEFAULT_RELAY.to_owned()).trim_end_matches('/').to_owned()
@@ -107,6 +113,21 @@ pub fn notify(kind: &str, tab: usize) {
     // Offline for a while: only the latest few are worth sending.
     let excess = notices.len().saturating_sub(4);
     notices.drain(..excess);
+}
+
+/// This machine's QR code is on screen: the account's phones should come to
+/// it. A phone running from its Home Screen can't read a code scanned in
+/// Safari (iOS keeps the two apart), so the relay tells it instead.
+pub fn beckon() {
+    if !signed_in() {
+        return;
+    }
+    let mut last = BECKONED.locked();
+    if last.is_some_and(|at| at.elapsed() < BECKON_EVERY) {
+        return;
+    }
+    *last = Some(Instant::now());
+    BECKON.store(true, Ordering::Release);
 }
 
 pub fn decide(device: &str, allow: bool) {
@@ -391,6 +412,9 @@ fn serve_relay() -> Result<(), String> {
             }
         }
         out.append(&mut NOTICES.locked());
+        if BECKON.swap(false, Ordering::AcqRel) {
+            out.push(r#"{"type":"beckon"}"#.to_owned());
+        }
         for message in out.drain(..) {
             socket.send(tungstenite::Message::text(message)).map_err(|e| e.to_string())?;
         }

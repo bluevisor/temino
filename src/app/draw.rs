@@ -18,6 +18,10 @@ impl App {
                 let values = self.settings_values();
                 let Self { settings, scene, ctx, mouse, .. } = self;
                 settings.draw(scene, &mut ctx.text, &ctx.theme, rect, &values, *mouse);
+                // Its QR code is up: the phones should come to this machine.
+                if settings.section == settings::Section::Remote {
+                    crate::relay::beckon();
+                }
                 if std::mem::take(&mut settings.redraw) {
                     self.dirty = true;
                 }
