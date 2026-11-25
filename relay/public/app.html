@@ -44,6 +44,17 @@
   .card .t div, .row .t div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card .t div + div, .row .t div + div { color: var(--faint); font-size: 13px; }
   .card.current { border-color: var(--accent); }
+  /* A machine's row: swipe it left, or tap ⋯, for its actions. Scroll snap
+     does the gesture, so it moves and settles like a native list. */
+  .swipe { display: grid; grid-template-columns: 100% max-content; overflow-x: auto; scroll-snap-type: x mandatory;
+    scrollbar-width: none; overscroll-behavior: chain; margin-bottom: 8px; }
+  .swipe::-webkit-scrollbar { display: none; }
+  .swipe > .card { scroll-snap-align: start; margin-bottom: 0; }
+  .swipe > .acts { scroll-snap-align: end; display: flex; padding-left: 8px; }
+  .acts button { min-width: 92px; border-radius: 10px; }
+  .acts .danger { background: #b93f3f; border-color: #b93f3f; color: #fff; }
+  .card .more { flex: none; min-height: 40px; padding: 0 10px; margin: -8px -6px -8px 0; background: none; border: 0;
+    color: var(--dim); font-size: 18px; }
   /* A row's number, marked as on the Mac: a dot going round it while its
      agent works, amber while it waits on you, green when it's done. */
   .num { position: relative; flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center;

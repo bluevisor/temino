@@ -406,6 +406,7 @@ function wrongAccount() {
 }
 
 // Every machine on your account.
+let userHtml = "", userTop = null;
 function renderUser() {
   $("tabs").hidden = true;
   $("crumbs").innerHTML = "<b>You</b>";
@@ -415,19 +416,59 @@ function renderUser() {
   const wrong = wrongAccount()
     ? `<div class="center"><h1>Wrong account</h1><p>This phone is signed in as <b>${esc(phoneAccount())}</b>, but your Mac is signed in as <b>${esc(macAccount())}</b>. Sign out, then sign in with ${esc(macAccount())}.</p></div>`
     : "";
-  $("main").innerHTML = wrong + (wrong && !desktops.length ? "" : desktops.length ? `<div class="cards">` + desktops.map((d) => `
-    <div class="card ${d.id === machine ? "current" : ""}" data-machine="${esc(d.id)}">${dot(d.online ? "idle" : null)}
-      <div class="t"><div>${esc(d.name)}</div><div>${d.online ? "Online" : "Offline"}</div></div>
+  // Each Mac's row swipes left (or its ⋯ opens) to show Remove. Removing
+  // an online Mac signs it out of Remote Control, so that one asks twice.
+  const html = wrong + (wrong && !desktops.length ? "" : desktops.length ? `<div class="cards">` + desktops.map((d) => `
+    <div class="swipe">
+      <div class="card ${d.id === machine ? "current" : ""}" data-machine="${esc(d.id)}">${dot(d.online ? "idle" : null)}
+        <div class="t"><div>${esc(d.name)}</div><div>${d.online ? "Online" : "Offline"}</div></div>
+        <button class="more" aria-label="${esc(d.name)} actions" aria-expanded="false">⋯</button>
+      </div>
+      <div class="acts" role="group" aria-label="${esc(d.name)} actions">
+        <button class="danger" data-forget="${esc(d.id)}" tabindex="-1">${d.online ? "Sign Out" : "Remove"}</button>
+      </div>
     </div>`).join("") + `</div>` : `<div class="center"><p>No Mac on this account yet. In Temino, open Settings and sign in to Remote Control.</p></div>`)
     + `<p class="note">${esc(signedInAs())}</p>`
     + `<div class="signout"><button id="notify">${notifyLabel()}</button><button id="signout">Sign Out</button></div>`
     + `<p class="note" id="notifynote">${notifyNote()}</p>`;
+  // Unchanged: keep the page as it is, so a row swiped open stays open.
+  if (html === userHtml && $("main").firstElementChild === userTop) return;
+  $("main").innerHTML = userHtml = html;
+  userTop = $("main").firstElementChild;
   $("notify").onclick = toggleNotify;
-  $("main").querySelectorAll("[data-machine]").forEach((el) => el.onclick = async () => {
-    const d = devices.find((x) => x.id === el.dataset.machine);
-    if (!d || !d.online) return;
-    if (d.id !== machine || !session) await start(d.id);
-    go("machine");
+  const rows = [...$("main").querySelectorAll(".swipe")];
+  const reveal = (row, open) => row.scrollTo({ left: open ? row.scrollWidth : 0, behavior: "smooth" });
+  for (const row of rows) {
+    const card = row.querySelector(".card"), more = row.querySelector(".more"), acts = row.querySelector(".acts");
+    // Open or shut by swipe or by ⋯: its buttons take focus only while showing.
+    row.addEventListener("scroll", () => {
+      const open = row.scrollLeft > acts.offsetWidth / 2;
+      if (open === (more.getAttribute("aria-expanded") === "true")) return;
+      more.setAttribute("aria-expanded", open);
+      acts.querySelectorAll("button").forEach((b) => b.tabIndex = open ? 0 : -1);
+      if (open) for (const other of rows) if (other !== row && other.scrollLeft > 0) reveal(other, false);
+    }, { passive: true });
+    more.onclick = (e) => { e.stopPropagation(); reveal(row, more.getAttribute("aria-expanded") !== "true"); };
+    card.onclick = async () => {
+      // Open: a tap on the row shuts it, as in iOS lists.
+      if (row.scrollLeft > 4) return reveal(row, false);
+      const d = devices.find((x) => x.id === card.dataset.machine);
+      if (!d || !d.online) return;
+      if (d.id !== machine || !session) await start(d.id);
+      go("machine");
+    };
+  }
+  $("main").querySelectorAll("[data-forget]").forEach((button) => button.onclick = () => {
+    const d = devices.find((x) => x.id === button.dataset.forget);
+    if (!d || !relay || relay.readyState !== 1) return;
+    if (d.online && !button.dataset.armed) {
+      button.dataset.armed = "1";
+      button.textContent = "Sign it out?";
+      setTimeout(() => { delete button.dataset.armed; button.textContent = "Sign Out"; }, 4000);
+      return;
+    }
+    if (store.get("temino-machine") === d.id) store.set("temino-machine", null);
+    relay.send(JSON.stringify({ type: "forget", id: d.id }));
   });
   $("signout").onclick = () => {
     if (relay && me) relay.send(JSON.stringify({ type: "forget", id: me }));
