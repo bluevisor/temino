@@ -164,8 +164,19 @@ async function onRelay(message) {
       return connect();
     }
     const desktops = devices.filter((d) => d.kind === "desktop");
+    // A Mac showing its QR code calls the phones over, once per showing:
+    // the Home Screen app can't read a code scanned in Safari.
+    const call = message.beckon;
+    const called = call && String(call.at) !== store.get("temino-beckon")
+      && desktops.find((d) => d.id === call.id && d.online);
+    if (called) {
+      store.set("temino-beckon", String(call.at));
+      store.set("temino-machine", called.id);
+      // Turned away by it before: showing the code again asks again.
+      if (denied && called.id === machine) { denied = false; session = null; }
+    }
     const wanted = store.get("temino-machine");
-    const pick = desktops.find((d) => d.id === machine && d.online) || desktops.find((d) => d.id === wanted && d.online)
+    const pick = called || desktops.find((d) => d.id === machine && d.online) || desktops.find((d) => d.id === wanted && d.online)
       || desktops.find((d) => d.online);
     // Turned away by this desktop: wait to be told to ask again.
     const away = denied && pick && pick.id === machine;
