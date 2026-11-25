@@ -76,16 +76,18 @@ impl KeyEvent {
     pub fn option(&self) -> bool {
         self.mods & mods::OPTION != 0
     }
-    /// Mac editing keys: Option+←/→ moves by word. On Haiku in UTM a Mac
-    /// keyboard's Option arrives as the Command (Alt) key and ⌘ as Option,
-    /// so the two swap there. Both together stay pane navigation.
+    /// Editing by word (with ⌫ and ←/→), besides Ctrl: Option on a Mac.
+    /// On Haiku in UTM a Mac keyboard's Option arrives as the Command (Alt)
+    /// key and ⌘ as Option, so the two swap there. On Linux it's Alt, as in
+    /// bash and fish (Alt+Backspace deletes a word). Both together stay pane
+    /// navigation.
     pub fn word_mod(&self) -> bool {
         if cfg!(target_os = "haiku") {
             self.cmd() && !self.option()
         } else if cfg!(target_os = "macos") {
             self.option() && !self.cmd()
         } else {
-            false
+            self.option() && !self.cmd() && !self.ctrl()
         }
     }
     /// Mac editing keys: ⌘+←/→ jumps to the start or end of the line.
@@ -228,4 +230,18 @@ pub enum ViewerEvent {
     Close,
     /// Enter in a browser's address bar: what was typed there.
     Address(String),
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alt_edits_by_word_on_linux() {
+        let key = |mods| KeyEvent { named: None, mods, raw_char: 0, bytes: Vec::new() };
+        assert!(key(mods::OPTION).word_mod());
+        assert!(!key(mods::OPTION | mods::COMMAND).word_mod());
+        assert!(!key(mods::OPTION | mods::CONTROL).word_mod());
+        assert!(!key(0).word_mod());
+    }
 }
