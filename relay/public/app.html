@@ -168,14 +168,21 @@
   .tab .tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tab .bar, .tabgroup > .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
   /* A split tab's chips, boxed together under its name. */
+  /* clip, not hidden: hidden would make it a scroller and keep its × from
+     sticking to the strip's edge. */
   .tabgroup { display: flex; align-items: center; gap: 4px; flex: none; padding: 2px; border-radius: 10px;
-    border: 1px solid var(--line); position: relative; overflow: hidden; }
+    border: 1px solid var(--line); position: relative; overflow: clip; }
   .tabgroup.current { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
   .tabgroup .gn { font-size: 11px; color: var(--faint); padding: 0 2px 0 8px; max-width: 22vw;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tabgroup .tab { min-height: 34px; max-width: 40vw; }
-  .tabgroup > .x { color: var(--faint); padding: 8px 8px 8px 4px; }
-  .tab .x { color: var(--faint); padding: 9px 2px 9px 8px; margin: -9px -2px -9px -4px; }
+  /* × closes the current tab: a thumb-sized target. A split tab's × stays
+     on screen at the strip's edge while any of the group is showing. */
+  .x { display: flex; align-items: center; justify-content: center; align-self: stretch; flex: none;
+    width: 34px; font-size: 18px; color: var(--dim); }
+  .tabgroup > .x { position: sticky; right: 0; margin: -2px -2px -2px 0; background: var(--panel);
+    border-radius: 0 9px 9px 0; box-shadow: -6px 0 6px var(--panel); }
+  .tab .x { margin: -6px -10px -6px -6px; }
   .tab.add { color: var(--accent); }
   .tab.shell { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
   /* iPad and other wide screens: the pane keeps a list of the window's
