@@ -48,6 +48,7 @@ impl App {
         self.pane_hits.clear();
         self.draw_agent_headers();
         self.draw_remote_marks(&visible);
+        self.draw_header_drag();
         for divider in &self.dividers {
             self.scene.set_layer(LAYER_OVERLAY);
             let over = divider.grab_area().contains(self.mouse.0, self.mouse.1);
