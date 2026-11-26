@@ -39,7 +39,7 @@ A terminal with many tabs and AI agents running in parallel is hard on ADHD atte
 
 Temino has no idea whether anyone uses it, or which of its features earn their place. This adds the smallest honest answer: with the user's permission, Temino counts how its features get used and sends the counts once a day, so reach and adoption are measured instead of guessed — without watching anyone work.
 
-**Consent first.** The first launch of a build with analytics shows a card ("Help improve Temino") asking permission. Nothing is counted and nothing is sent before the user answers yes — there is no backfill of pre-consent usage. "No thanks" saves the no; closing the card without answering asks again next launch. Settings ▸ Share anonymous usage data shows the answer and changes it any time: turning it on starts counting from that moment; turning it off stops counting and sending, and clears pending counts and the install id.
+**Consent first, off by default.** Nothing is counted and nothing is sent until the user turns on Settings ▸ Share anonymous usage data — there is no backfill of earlier usage. There is no launch-time ask (an early "Help improve Temino" card was dropped while Temino has a handful of users). The switch changes it any time: turning it on starts counting from that moment; turning it off stops counting and sending, and clears pending counts and the install id.
 
 **What a yes sends** (one ping a day, accumulated locally between sends; counters reset only after a send the relay accepts):
 

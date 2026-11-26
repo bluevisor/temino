@@ -98,7 +98,7 @@ pub struct Values {
     pub blink: bool,
     pub updates: bool,
     /// Anonymous usage data is shared, with the user's yes (Settings ▸
-    /// Share anonymous usage data; the permission card's answer too).
+    /// Share anonymous usage data).
     pub analytics: bool,
     /// The window can be see-through (macOS).
     pub see_through: bool,

@@ -264,22 +264,6 @@ enum UpdateAction {
     Notes,
 }
 
-/// The analytics permission ask, and its card. It stands until the
-/// user answers; closing the card without answering asks again on the
-/// next launch (the answer is what's saved, not the card).
-struct ConsentOffer {
-    /// The card is showing; the pill alone leaves it closed.
-    open: bool,
-}
-
-/// What a click on the consent pill or card does.
-#[derive(Clone, Copy)]
-enum ConsentAction {
-    Toggle,
-    Share,
-    NoThanks,
-}
-
 /// A tab being renamed in place.
 struct Rename {
     tab: usize,
@@ -476,11 +460,6 @@ pub struct App {
     /// Per frame: the update pill and card's hit areas, and the card.
     update_hits: Vec<(Rect, UpdateAction)>,
     update_card: Rect,
-    /// The analytics permission ask, until it's answered.
-    consent: Option<ConsentOffer>,
-    /// Per frame: the consent pill and card's hit areas, and the card.
-    consent_hits: Vec<(Rect, ConsentAction)>,
-    consent_card: Rect,
     /// When the current foreground minute began (analytics' gauge).
     active_at: Instant,
     /// When to see again whether the daily update check and usage ping
@@ -648,9 +627,6 @@ impl App {
             update: None,
             update_hits: Vec::new(),
             update_card: Rect::default(),
-            consent: None,
-            consent_hits: Vec::new(),
-            consent_card: Rect::default(),
             active_at: Instant::now(),
             daily_at: Instant::now() + DAILY_CHECK_EVERY,
             asks: Vec::new(),
@@ -688,11 +664,6 @@ impl App {
             crate::update::check(app.ctx.sender.clone(), false);
             crate::analytics::bump(crate::analytics::Counter::Launches);
             crate::analytics::ping();
-            // Unanswered, the permission card comes up; an answer (the
-            // Settings switch included) is the only thing that ends it.
-            if crate::analytics::consent() == crate::analytics::Consent::Undecided {
-                app.consent = Some(ConsentOffer { open: true });
-            }
         }
         crate::trace("app: shell started");
         Ok(app)
