@@ -359,18 +359,19 @@ const BUILT_IN: [BuiltIn; 11] = [
             0x41ff53, 0xffff00, 0x66aaff, 0xff88ff, 0x88ffcc, 0xffffff,
         ],
     ),
-    // The 1984 Macintosh: one bit, black on white. Its colors are the
-    // grays QuickDraw dithered them to, so red and green still differ.
+    // The Macintosh: black on white, with the Macintosh II's 16-color
+    // system palette (1987). Its yellow is too pale to read on white, so
+    // the yellows are its brown and tan, as CGA's dark yellow was brown.
     (
         "Macintosh",
         0xffffff,
         0x000000,
         0x000000,
-        0x000000,
-        0x000000,
+        0,
+        0x0000d3,
         [
-            0x000000, 0x5a5a5a, 0x3c3c3c, 0x6e6e6e, 0x282828, 0x505050, 0x464646, 0x8c8c8c, //
-            0x646464, 0x2a2a2a, 0x1e1e1e, 0x3a3a3a, 0x141414, 0x323232, 0x282828, 0x000000,
+            0x000000, 0xdd0907, 0x006412, 0x562c05, 0x0000d3, 0xf20884, 0x02abea, 0x808080, //
+            0x404040, 0xff6403, 0x1fb714, 0x90713a, 0x4700a5, 0xf20884, 0x02abea, 0xc0c0c0,
         ],
     ),
     // The CGA/VGA text palette, light grey on black.
