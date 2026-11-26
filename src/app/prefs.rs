@@ -581,25 +581,6 @@ impl App {
         self.ctx.show_toast("Checking for updates…");
         update::check(self.ctx.sender.clone(), true);
     }
-    pub(super) fn consent_action(&mut self, action: ConsentAction) {
-        match action {
-            ConsentAction::Toggle => {
-                if let Some(offer) = &mut self.consent {
-                    offer.open = !offer.open;
-                }
-            }
-            ConsentAction::Share => {
-                crate::analytics::grant();
-                self.consent = None;
-                self.ctx.show_toast("Thanks — anonymous usage data is shared; change it any time in Settings");
-            }
-            ConsentAction::NoThanks => {
-                crate::analytics::deny();
-                self.consent = None;
-            }
-        }
-        self.dirty = true;
-    }
     pub(super) fn update_action(&mut self, action: UpdateAction) {
         let Some(offer) = &mut self.update else { return };
         match action {

@@ -25,8 +25,8 @@ const DAY: u64 = 24 * 60 * 60;
 const DEFAULT_URL: &str = "https://temino-relay.bluevisor.workers.dev/analytics";
 const COUNTS_FILE: &str = "analytics-counts";
 
-/// The user's answer to the permission card, from the settings file:
-/// unset is not-yet-asked, and counts as no for everything.
+/// The user's choice in Settings ▸ Share anonymous usage data, from the
+/// settings file: unset (never turned on) counts as no for everything.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Consent {
     Undecided,

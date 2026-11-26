@@ -401,18 +401,6 @@ impl App {
             self.dirty = true;
             return;
         }
-        if let Some(&(_, action)) = self.consent_hits.iter().find(|(r, _)| r.contains(x, y)) {
-            self.consent_action(action);
-            return;
-        }
-        if self.consent_card.contains(x, y) {
-            return;
-        }
-        // A click elsewhere puts the consent card away without an
-        // answer, and goes on to what it hit; it asks again next launch.
-        if let Some(offer) = self.consent.as_mut().filter(|offer| offer.open) {
-            offer.open = false;
-        }
         if let Some(&(_, action)) = self.update_hits.iter().find(|(r, _)| r.contains(x, y)) {
             self.update_action(action);
             return;
@@ -570,13 +558,6 @@ impl App {
             && self.settings.action_at(x, y).and_then(|a| settings::Preview::of(a, self.settings.open)).is_some();
         if previewable || self.previewing.is_some() || self.settings.open.is_some() {
             self.dirty = true;
-        }
-        if !self.consent_hits.is_empty() {
-            self.dirty = true;
-            if self.consent_card.contains(x, y) || self.consent_hits.iter().any(|(r, _)| r.contains(x, y)) {
-                self.set_cursor(Cursor::Arrow);
-                return;
-            }
         }
         if !self.update_hits.is_empty() {
             // The pill and the card's buttons light up under the pointer.

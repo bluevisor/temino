@@ -59,7 +59,6 @@ impl App {
         self.draw_header_drag();
         self.draw_titlebar();
         self.draw_update();
-        self.draw_consent();
         self.draw_asks();
         self.draw_tab_menu();
         self.draw_toast();
