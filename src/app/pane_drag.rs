@@ -1,6 +1,7 @@
 //! Moving a pane by its header: dragged onto another pane of its tab,
 //! it trades places with that pane (dropped on its middle) or settles
-//! beside it (dropped near one of its edges).
+//! beside it (dropped near one of its edges); onto another tab in the
+//! list, it joins that tab; onto the new-tab button, it gets its own.
 
 use super::*;
 
@@ -19,6 +20,17 @@ pub(super) enum Drop {
     Bottom,
 }
 
+/// Where a dragged header would put its pane.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Landing {
+    /// On a pane of the same tab.
+    Pane(u64, Drop),
+    /// On another tab in the list: the pane joins it, on its right.
+    Tab(usize),
+    /// On the new-tab button: the pane gets a tab of its own.
+    NewTab,
+}
+
 /// A press on a pane's header, and the drag it may turn into.
 pub(super) struct HeaderDrag {
     pub(super) id: u64,
@@ -26,8 +38,8 @@ pub(super) struct HeaderDrag {
     pub(super) dragging: bool,
     /// An agent's header: a click that doesn't drag opens or closes it.
     pub(super) toggles: bool,
-    /// The pane under the pointer, and where on it the drop would land.
-    pub(super) target: Option<(u64, Drop)>,
+    /// Where the drop would land.
+    pub(super) target: Option<Landing>,
 }
 
 impl Drop {
@@ -97,33 +109,50 @@ pub(super) fn rearrange(root: &mut Node, id: u64, target: u64, drop: Drop) -> bo
 }
 
 impl App {
-    /// The pane of the active tab whose header bar is at the point, when
-    /// the tab shows more than one: there's somewhere to move it.
+    /// The pane of the active tab whose header bar is at the point.
     pub(super) fn header_bar_at(&self, x: f32, y: f32) -> Option<u64> {
-        let slots = self.tab_slots(self.active).0;
-        if slots.len() < 2 {
-            return None;
-        }
-        slots
+        self.tab_slots(self.active)
+            .0
             .into_iter()
             .filter(|(id, _)| self.panes.iter().any(|pane| pane.id == *id))
             .find(|(_, slot)| Rect::new(slot.x, slot.y, slot.w, AGENT_HEADER.min(slot.h)).contains(x, y))
             .map(|(id, _)| id)
     }
 
-    /// The pointer moved with a header pressed: past DRAG_SLOP it drags
-    /// the pane, and the pane under it shows where it would land.
-    pub(super) fn header_dragged(&mut self, x: f32, y: f32) {
+    /// Where pane `id`, dragged by its header, would land at the point.
+    fn landing_at(&self, x: f32, y: f32, id: u64) -> Option<Landing> {
         let slots = self.tab_slots(self.active).0;
-        let Pointer::Header(drag) = &mut self.pointer else { return };
+        if self.tab_area().contains(x, y) {
+            if self.new_tab_hit.contains(x, y) {
+                // A pane alone in its tab has its own tab already.
+                return (slots.len() > 1).then_some(Landing::NewTab);
+            }
+            // A tab's row, or one of its pane lines under it.
+            let tab = self
+                .tab_hits
+                .iter()
+                .find(|(r, _)| r.contains(x, y))
+                .map(|&(_, index)| index)
+                .or_else(|| self.pane_hits.iter().find(|(r, _, _)| r.contains(x, y)).map(|&(_, index, _)| index))?;
+            let open = tab != self.active && self.tabs.get(tab).is_some_and(|t| !t.root.contains(SETTINGS));
+            return open.then_some(Landing::Tab(tab));
+        }
+        slots
+            .into_iter()
+            .find(|(pane, slot)| *pane != id && slot.contains(x, y))
+            .map(|(pane, slot)| Landing::Pane(pane, Drop::at(slot, x, y)))
+    }
+
+    /// The pointer moved with a header pressed: past DRAG_SLOP it drags
+    /// the pane, and what's under it shows where it would land.
+    pub(super) fn header_dragged(&mut self, x: f32, y: f32) {
+        let Pointer::Header(drag) = &self.pointer else { return };
         let moved = (x - drag.from.0).abs().max((y - drag.from.1).abs()) > DRAG_SLOP;
-        if slots.len() < 2 || !(drag.dragging || moved) {
+        if !(drag.dragging || moved) {
             return;
         }
-        let target = slots
-            .iter()
-            .find(|(id, slot)| *id != drag.id && slot.contains(x, y))
-            .map(|&(id, slot)| (id, Drop::at(slot, x, y)));
+        let target = self.landing_at(x, y, drag.id);
+        let Pointer::Header(drag) = &mut self.pointer else { return };
         let changed = !drag.dragging || target != drag.target;
         drag.dragging = true;
         drag.target = target;
@@ -145,18 +174,87 @@ impl App {
             }
             return;
         }
-        let Some((target, drop)) = drag.target else { return };
-        let tab = &mut self.tabs[self.active];
-        if rearrange(&mut tab.root, drag.id, target, drop) {
-            tab.zoomed = false;
-            tab.focus = drag.id;
-            self.relayout();
-            self.save_tabs();
+        match drag.target {
+            Some(Landing::Pane(target, drop)) => {
+                let tab = &mut self.tabs[self.active];
+                if rearrange(&mut tab.root, drag.id, target, drop) {
+                    tab.zoomed = false;
+                    tab.focus = drag.id;
+                    self.relayout();
+                    self.save_tabs();
+                }
+            }
+            Some(Landing::Tab(to)) => self.move_pane_to_tab(drag.id, Some(to)),
+            Some(Landing::NewTab) => self.move_pane_to_tab(drag.id, None),
+            None => {}
         }
     }
 
+    /// Moves pane `id` out of the active tab: into tab `to`, on the right
+    /// of what it shows, or (None) into a tab of its own after this one.
+    /// A tab it leaves empty closes. Either way, its new tab comes up.
+    fn move_pane_to_tab(&mut self, id: u64, to: Option<usize>) {
+        let from = self.active;
+        let count = self.tabs.len();
+        let source = &mut self.tabs[from];
+        if !source.root.contains(id) || to.is_some_and(|to| to == from || to >= count) {
+            return;
+        }
+        let emptied = !source.root.remove(id);
+        if emptied && to.is_none() {
+            return;
+        }
+        if !emptied {
+            source.zoomed = false;
+            if source.focus == id {
+                let mut leaves = Vec::new();
+                source.root.leaves(&mut leaves);
+                source.focus = leaves[0];
+            }
+        }
+        let mut target = match to {
+            Some(to) => {
+                let tab = &mut self.tabs[to];
+                let rest = std::mem::replace(&mut tab.root, Node::Leaf(id));
+                tab.root = join_right(rest, id);
+                tab.zoomed = false;
+                tab.focus = id;
+                to
+            }
+            None => {
+                let tab = Tab {
+                    root: Node::Leaf(id),
+                    focus: id,
+                    zoomed: false,
+                    name: None,
+                    color: None,
+                    shown: None,
+                    slide: None,
+                    mark: None,
+                    marked_at: None,
+                    ai_title: AiTitle::default(),
+                };
+                self.tabs.insert(from + 1, tab);
+                from + 1
+            }
+        };
+        if emptied {
+            self.tabs.remove(from);
+            self.tab_menu = None;
+            self.renaming = None;
+            if target > from {
+                target -= 1;
+            }
+            // The tab that was showing is gone: the moved pane's is now.
+            self.active = target;
+        }
+        self.switch_tab(target);
+        self.relayout();
+        self.save_tabs();
+    }
+
     /// While a header is dragged: its pane dims, and the place it would
-    /// go is lit with the accent.
+    /// go is lit with the accent. Drawn over the tab list.
     pub(super) fn draw_header_drag(&mut self) {
         let Pointer::Header(drag) = &self.pointer else { return };
         if !drag.dragging {
@@ -164,7 +262,13 @@ impl App {
         }
         let slots = self.tab_slots(self.active).0;
         let slot = |id: u64| slots.iter().find(|(pane, _)| *pane == id).map(|&(_, rect)| rect);
-        let (source, target) = (slot(drag.id), drag.target.and_then(|(id, drop)| Some(drop.area(slot(id)?))));
+        let target = match drag.target {
+            Some(Landing::Pane(id, drop)) => slot(id).map(|rect| drop.area(rect).inset(6.0, 6.0)),
+            Some(Landing::Tab(index)) => self.tab_hits.iter().find(|(_, tab)| *tab == index).map(|&(rect, _)| rect),
+            Some(Landing::NewTab) => Some(self.new_tab_hit),
+            None => None,
+        };
+        let source = slot(drag.id);
         let Self { scene, ctx, .. } = self;
         let theme = &ctx.theme;
         scene.set_layer(LAYER_OVERLAY);
@@ -172,11 +276,15 @@ impl App {
             scene.fill(rect, theme.background.alpha(0.5));
         }
         if let Some(rect) = target {
-            let rect = rect.inset(6.0, 6.0);
             scene.quad(Quad::new(rect, theme.accent.alpha(0.14)).radius(8.0).border(1.5, theme.accent.alpha(0.7)));
         }
         scene.set_layer(LAYER_CONTENT);
     }
+}
+
+/// `rest` with pane `id` beside it on the right, taking half.
+fn join_right(rest: Node, id: u64) -> Node {
+    Node::Split { axis: Axis::Row, ratio: 0.5, first: Box::new(rest), second: Box::new(Node::Leaf(id)) }
 }
 
 #[cfg(test)]
@@ -255,6 +363,13 @@ mod tests {
         assert!(rearrange(&mut root, 1, 2, Drop::Bottom));
         assert_eq!(leaves(&root), [2, 1]);
         assert_eq!(axis_of(&root), Some(Axis::Column));
+    }
+
+    #[test]
+    fn a_pane_joining_a_tab_takes_its_right_half() {
+        let root = join_right(pair(Axis::Column, 1, 2), 3);
+        assert_eq!(leaves(&root), [1, 2, 3]);
+        assert_eq!(axis_of(&root), Some(Axis::Row));
     }
 
     #[test]
