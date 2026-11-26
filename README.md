@@ -61,7 +61,7 @@ Download the latest from [Releases](https://github.com/bluevisor/temino/releases
   type (lowercase ignores case), marks the matches and scrolls to them;
   Enter or ↑ goes to the older match, Shift+Enter or ↓ to the newer one.
 - **Themes from real machines.** Settings ▸ Theme steps through the screens
-  of the Apple II, Macintosh, IBM PC, Commodore 64, Amiga 500, ZX Spectrum,
+  of the Apple II, Macintosh, today's macOS, IBM PC, Commodore 64, Amiga 500, ZX Spectrum,
   DEC VT220, an SGI Indy, a NeXTstation and Windows PowerShell's console,
   each in its own palette. Ghostty theme files dropped into the
   `themes` folder (next to the settings) join the list.

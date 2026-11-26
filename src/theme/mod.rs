@@ -344,7 +344,7 @@ pub struct Palette {
 /// ANSI 0-15, from the machine's own palette where it had one. Temino's own
 /// comes first and is the default.
 type BuiltIn = (&'static str, u32, u32, u32, u32, u32, [u32; 16]);
-const BUILT_IN: [BuiltIn; 11] = [
+const BUILT_IN: [BuiltIn; 12] = [
     ("Temino", 0x0f1117, 0xd8dee9, 0x6cb6ff, 0, 0, [0; 16]),
     // Green phosphor (Monitor II), the lo-res colors for the rest.
     (
@@ -372,6 +372,21 @@ const BUILT_IN: [BuiltIn; 11] = [
         [
             0x000000, 0xdd0907, 0x006412, 0x562c05, 0x0000d3, 0xf20884, 0x02abea, 0x808080, //
             0x404040, 0xff6403, 0x1fb714, 0x90713a, 0x4700a5, 0xf20884, 0x02abea, 0xc0c0c0,
+        ],
+    ),
+    // Today's Mac in Dark mode: a window tinted warm by the wallpaper, the
+    // accent blue and the Appearance settings' accent colors (cyan, which
+    // isn't one, from the system teal).
+    (
+        "macOS",
+        0x29211e,
+        0xe8e5e3,
+        0x3478f7,
+        0x2457ca,
+        0x3478f7,
+        [
+            0x403935, 0xed5f5d, 0x78b857, 0xf7c844, 0x3478f7, 0x9c55a3, 0x5ac8f5, 0xc8c4c2, //
+            0x8c8c8c, 0xff7b78, 0x8fd16f, 0xffd95e, 0x5a93ff, 0xe45c9c, 0x7fdcff, 0xf2f0ef,
         ],
     ),
     // The CGA/VGA text palette, light grey on black.

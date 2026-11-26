@@ -303,7 +303,8 @@ mod tests {
         }
         // A preset's name is taken, whatever the case; a theme keeps its own.
         assert!(check_name(&library, "commodore 64", None).is_err());
-        assert!(check_name(&library, "Commodore 64", Some(4)).is_ok());
+        let c64 = library.iter().position(|theme| theme.name == "Commodore 64");
+        assert!(check_name(&library, "Commodore 64", c64).is_ok());
     }
 
     #[test]
