@@ -97,8 +97,8 @@ pub struct Values {
     pub cursor: usize,
     pub blink: bool,
     pub updates: bool,
-    /// Anonymous usage data is shared, with the user's yes (Settings ▸
-    /// Share anonymous usage data).
+    /// Anonymous usage data is shared (Settings ▸ Share anonymous usage
+    /// data; on unless turned off).
     pub analytics: bool,
     /// The window can be see-through (macOS).
     pub see_through: bool,

@@ -1,18 +1,16 @@
-//! Anonymous usage analytics, behind an explicit yes.
+//! Anonymous usage analytics, on unless turned off.
 //!
-//! The first launch of a build with analytics shows a card (Help
-//! improve Temino) asking permission. Until the user says yes, nothing
-//! is counted and nothing is sent — there is no backfill of usage from
-//! before the answer. After a yes, Temino counts how its features get
-//! used and sends the counts once a day: a random install id, the
+//! While sharing is on (the default, with no launch-time ask while
+//! Temino is early), Temino counts how its features get used and sends
+//! the counts once a day: a random install id, the
 //! version, the OS, the CPU architecture, the default shell kind and
 //! the GPU backend, plus aggregate counters (launches, commands
 //! finished, tabs opened, …). Never commands, terminal content, file
 //! paths, or anything tied to an account: counters come from a fixed
 //! list in code (`Counter`), so free text can't ride along. The relay
 //! hashes the install id before storing it and drops it after 40
-//! days. Settings ▸ Share anonymous usage data changes the answer at
-//! any time; saying no stops counting and clears what's pending.
+//! days. Settings ▸ Share anonymous usage data turns it off at any
+//! time, which stops counting and clears what's pending.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -25,43 +23,27 @@ const DAY: u64 = 24 * 60 * 60;
 const DEFAULT_URL: &str = "https://temino-relay.bluevisor.workers.dev/analytics";
 const COUNTS_FILE: &str = "analytics-counts";
 
-/// The user's choice in Settings ▸ Share anonymous usage data, from the
-/// settings file: unset (never turned on) counts as no for everything.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Consent {
-    Undecided,
-    On,
-    Off,
-}
-
-/// The answer a settings value means (pure, so it can be tested).
-fn consent_of(value: Option<&str>) -> Consent {
-    match value {
-        Some("on") => Consent::On,
-        Some("off") => Consent::Off,
-        _ => Consent::Undecided,
-    }
-}
-
-pub fn consent() -> Consent {
-    consent_of(crate::setting("analytics").as_deref())
+/// Whether a settings value lets usage be shared (pure, so it can be
+/// tested): on unless Settings ▸ Share anonymous usage data was turned
+/// off.
+fn shares(value: Option<&str>) -> bool {
+    value != Some("off")
 }
 
 /// Whether counting and sending may happen at all. The one gate every
 /// `bump` and the ping itself pass through.
 pub fn enabled() -> bool {
-    consent() == Consent::On
+    shares(crate::setting("analytics").as_deref())
 }
 
-/// "Share": remember the yes, make the install id now (not before),
-/// and let counting start from this moment.
+/// The Settings switch turned on: remember it, and make the install id.
 pub fn grant() {
     crate::save_setting("analytics", "on");
     install_id();
 }
 
-/// "No thanks", or the Settings switch turned off: remember the no,
-/// stop counting, and clear what's pending — counts and the id.
+/// The Settings switch turned off: remember the no, stop counting, and
+/// clear what's pending — counts and the id.
 pub fn deny() {
     crate::save_setting("analytics", "off");
     clear_counts();
@@ -217,7 +199,7 @@ fn forget_counts(sent: &[(Counter, u64)]) {
 }
 
 /// Sends the accumulated counts in the background, at most once a day,
-/// and only with consent. Throttled by the `analytics_sent` timestamp,
+/// and only while sharing is on. Throttled by the `analytics_sent` timestamp,
 /// like the updater's daily check, whose shape this mirrors. Called at
 /// launch and again every hour while the app runs, so a window left
 /// open for days still reports each day. Counts are only forgotten
@@ -248,7 +230,7 @@ pub fn ping() {
 }
 
 /// This install's random id, made and remembered on first use. Only
-/// called with consent (from `grant` and `ping`), never before.
+/// called while sharing is on (from `grant` and `ping`).
 fn install_id() -> String {
     if let Some(id) = crate::setting("analytics_id").filter(|id| valid_id(id)) {
         return id;
@@ -387,15 +369,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn consent_comes_from_the_setting_and_unset_is_no() {
-        assert_eq!(consent_of(Some("on")), Consent::On);
-        assert_eq!(consent_of(Some("off")), Consent::Off);
-        assert_eq!(consent_of(None), Consent::Undecided);
-        assert_eq!(consent_of(Some("later")), Consent::Undecided);
-        // The gate itself: only an explicit yes enables anything.
-        assert!(consent_of(Some("on")) == Consent::On);
-        assert!(consent_of(Some("off")) != Consent::On);
-        assert!(consent_of(None) != Consent::On);
+    fn sharing_is_on_unless_turned_off() {
+        assert!(shares(Some("on")));
+        assert!(shares(None));
+        assert!(shares(Some("later")));
+        // Only an explicit no stops it.
+        assert!(!shares(Some("off")));
     }
 
     #[test]
