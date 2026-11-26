@@ -428,15 +428,16 @@ impl App {
             self.pointer = Pointer::Sidebar;
             return;
         }
-        if let Some(&(_, id)) = self.header_hits.iter().find(|(r, _)| r.contains(x, y)) {
-            // An agent's header, or its extension: open or close it, and go
-            // to that pane.
-            if let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == id) {
-                pane.header_open = !pane.header_open;
-            }
+        // A pane's header goes to that pane; dragged, it moves the pane
+        // (see pane_drag). An agent's header, or its extension, clicked,
+        // opens or closes.
+        let agent = self.header_hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, id)| id);
+        if let Some(id) = agent.or_else(|| self.header_bar_at(x, y)) {
             if self.focused_id() != Some(id) {
                 self.set_focus(id);
             }
+            let drag = HeaderDrag { id, from: (x, y), dragging: false, toggles: agent.is_some(), target: None };
+            self.pointer = Pointer::Header(drag);
             self.dirty = true;
             return;
         }
@@ -602,6 +603,13 @@ impl App {
                 return;
             }
         }
+        if matches!(self.pointer, Pointer::Header(_)) {
+            if pressed != 0 {
+                self.header_dragged(x, y);
+                return;
+            }
+            self.pointer = Pointer::Idle;
+        }
         let hover = self.tab_hits.iter().find(|(r, _)| r.contains(x, y)).map(|&(_, index)| index);
         if hover != self.hover_tab {
             self.dirty = true;
@@ -711,6 +719,10 @@ impl App {
         if matches!(pointer, Pointer::Sidebar) {
             self.save_sidebar();
         }
+        let pointer = match pointer {
+            Pointer::Header(drag) => return self.header_released(drag),
+            pointer => pointer,
+        };
         if let Pointer::Pane(id) = pointer {
             let Self { panes, ctx, .. } = self;
             let mut link = None;

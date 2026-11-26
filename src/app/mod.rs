@@ -37,6 +37,7 @@ mod input;
 mod keys_edit;
 mod layout;
 mod overlays;
+mod pane_drag;
 mod persist;
 mod prefs;
 mod preview;
@@ -46,6 +47,7 @@ mod theme_edit;
 use chrome::*;
 use layout::*;
 pub use overlays::*;
+use pane_drag::HeaderDrag;
 use prefs::*;
 pub use start::*;
 use tabs::*;
@@ -339,6 +341,8 @@ enum Pointer {
     Divider(Divider),
     /// Dragging the sidebar's edge.
     Sidebar,
+    /// Pressed on a pane's header: a click, or a drag that moves the pane.
+    Header(HeaderDrag),
     /// Pressed on a tab: a click, or a drag that moves it in the list.
     Tab {
         index: usize,
@@ -991,8 +995,4 @@ impl App {
         }
         self.quitting = true;
     }
-
-    // ---- events -------------------------------------------------------
-
-    // ---- drawing ------------------------------------------------------
 }
